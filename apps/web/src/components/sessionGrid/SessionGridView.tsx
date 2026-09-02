@@ -59,7 +59,6 @@ import { SessionGridResizableLayout } from "./SessionGridResizableLayout";
 import {
   buildSessionGridSections,
   resolveSessionGridArrowTargetIndex,
-  resolveSessionGridChangeRequestState,
   resolveSessionGridDimensions,
   resolveSessionGridLifecycle,
   resolveSessionGridProject,
@@ -68,8 +67,6 @@ import {
   type SessionGridChangeRequestState,
 } from "./sessionGrid.logic";
 
-const MAX_QUIET_CHECKOUT_OBSERVERS = 6;
-const MAX_QUIET_THREAD_OBSERVERS = 24;
 function samePrStatus(
   left: SessionGridChangeRequestObservation["prStatus"],
   right: SessionGridChangeRequestObservation["prStatus"],
@@ -131,8 +128,6 @@ export function SessionGridView({ requestedProjectKey }: SessionGridViewProps) {
     (state) => state.sessionGridThreadOrderByProjectKey,
   );
   const setSessionGridThreadOrder = useUiStateStore((state) => state.setSessionGridThreadOrder);
-  const autoSettleAfterDays = useClientSettings((settings) => settings.sidebarAutoSettleAfterDays);
-  const autoSettleOnMerge = useClientSettings((settings) => settings.sidebarAutoSettleOnMerge);
   const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
   const nowMinute = useNowMinute();
   const wideGrid = useMediaQuery("md");
@@ -230,66 +225,21 @@ export function SessionGridView({ requestedProjectKey }: SessionGridViewProps) {
     return new Date().toISOString();
   }, [nowMinute, snoozeWakeTick]);
   const lifecycle = useMemo(() => {
-    const settledNow = `${nowMinute}:00.000Z`;
     const active: EnvironmentThreadShell[] = [];
     const snoozed: EnvironmentThreadShell[] = [];
-    const pendingChangeRequest: EnvironmentThreadShell[] = [];
 
     for (const thread of threads) {
-      const threadKey = scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
-      const changeRequestKey = sessionGridChangeRequestKey({ threadKey, branch: thread.branch });
-      const environmentConnected =
-        environmentConnectionPhaseById.get(thread.environmentId) === "connected";
-      const changeRequestState =
-        thread.branch !== null && !environmentConnected
-          ? "unknown"
-          : resolveSessionGridChangeRequestState(
-              changeRequestSnapshot.stateByKey,
-              changeRequestKey,
-              thread.branch,
-            );
       const capabilities = serverConfigs.get(thread.environmentId)?.environment.capabilities;
       const state = resolveSessionGridLifecycle(thread, {
         preciseNow,
-        settledNow,
-        autoSettleAfterDays,
-        autoSettleOnMerge,
         supportsSettlement: capabilities?.threadSettlement === true,
         supportsSnooze: capabilities?.threadSnooze === true,
-        changeRequestState,
       });
-      if (
-        state === "active" &&
-        environmentConnected &&
-        thread.branch !== null &&
-        !changeRequestSnapshot.stateByKey.has(changeRequestKey) &&
-        resolveSessionGridLifecycle(thread, {
-          preciseNow,
-          settledNow,
-          autoSettleAfterDays,
-          autoSettleOnMerge,
-          supportsSettlement: capabilities?.threadSettlement === true,
-          supportsSnooze: capabilities?.threadSnooze === true,
-          changeRequestState: null,
-        }) === "settled"
-      ) {
-        pendingChangeRequest.push(thread);
-        continue;
-      }
       if (state === "active") active.push(thread);
       if (state === "snoozed") snoozed.push(thread);
     }
-    return { active, snoozed, pendingChangeRequest };
-  }, [
-    autoSettleAfterDays,
-    autoSettleOnMerge,
-    changeRequestSnapshot.stateByKey,
-    environmentConnectionPhaseById,
-    nowMinute,
-    preciseNow,
-    serverConfigs,
-    threads,
-  ]);
+    return { active, snoozed };
+  }, [preciseNow, serverConfigs, threads]);
 
   useEffect(() => {
     const nextWakeAtMs = lifecycle.snoozed.reduce((earliest, thread) => {
@@ -440,27 +390,6 @@ export function SessionGridView({ requestedProjectKey }: SessionGridViewProps) {
     }
   }, [focusedThreadKey, visibleGridItemKeys]);
 
-  const selectedProjectMemberKeys = useMemo(
-    () =>
-      new Set(
-        selectedProject?.memberProjectRefs.map(
-          (projectRef) => `${projectRef.environmentId}:${projectRef.projectId}`,
-        ) ?? [],
-      ),
-    [selectedProject],
-  );
-  const visiblePendingChangeRequestCount = lifecycle.pendingChangeRequest.filter((thread) =>
-    selectedProjectMemberKeys.has(`${thread.environmentId}:${thread.projectId}`),
-  ).length;
-  const pendingChangeRequestThreadKeys = useMemo(
-    () =>
-      new Set(
-        lifecycle.pendingChangeRequest.map((thread) =>
-          scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
-        ),
-      ),
-    [lifecycle.pendingChangeRequest],
-  );
   const visibleThreadKeys = useMemo(() => new Set(orderedThreadKeys), [orderedThreadKeys]);
   const changeRequestObservationGroups = useMemo(() => {
     if (!bootstrapped) return [];
@@ -478,14 +407,11 @@ export function SessionGridView({ requestedProjectKey }: SessionGridViewProps) {
       if (thread.archivedAt !== null || thread.branch === null) continue;
       if (environmentConnectionPhaseById.get(thread.environmentId) !== "connected") continue;
       const threadKey = scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
-      const visible = visibleThreadKeys.has(threadKey);
-      const pending = pendingChangeRequestThreadKeys.has(threadKey);
-      if (!visible && !pending) continue;
+      if (!visibleThreadKeys.has(threadKey)) continue;
       const project = projectByPhysicalKey.get(`${thread.environmentId}:${thread.projectId}`);
       const cwd = thread.worktreePath ?? project?.workspaceRoot ?? "";
       if (cwd.trim().length === 0) continue;
-      const transient = !visible;
-      const key = `${transient ? "quiet" : "visible"}\0${thread.environmentId}\0${cwd}`;
+      const key = `${thread.environmentId}\0${cwd}`;
       const existing = groups.get(key);
       if (existing) existing.threads.push(thread);
       else
@@ -494,42 +420,14 @@ export function SessionGridView({ requestedProjectKey }: SessionGridViewProps) {
           environmentId: thread.environmentId,
           cwd,
           threads: [thread],
-          transient,
+          transient: false,
         });
     }
-    const allGroups = [...groups.values()];
-    const quietGroups = allGroups
-      .filter((group) => group.transient)
-      .toSorted((left, right) => {
-        const leftSelected = left.threads.some((thread) =>
-          selectedProjectMemberKeys.has(`${thread.environmentId}:${thread.projectId}`),
-        );
-        const rightSelected = right.threads.some((thread) =>
-          selectedProjectMemberKeys.has(`${thread.environmentId}:${thread.projectId}`),
-        );
-        if (leftSelected !== rightSelected) return leftSelected ? -1 : 1;
-        const leftPrimary = left.environmentId === primaryEnvironmentId;
-        const rightPrimary = right.environmentId === primaryEnvironmentId;
-        if (leftPrimary !== rightPrimary) return leftPrimary ? -1 : 1;
-        return left.key.localeCompare(right.key);
-      });
-    let quietThreadBudget = MAX_QUIET_THREAD_OBSERVERS;
-    const boundedQuietGroups = quietGroups
-      .slice(0, MAX_QUIET_CHECKOUT_OBSERVERS)
-      .flatMap((group) => {
-        if (quietThreadBudget <= 0) return [];
-        const observedThreads = group.threads.slice(0, quietThreadBudget);
-        quietThreadBudget -= observedThreads.length;
-        return [{ ...group, threads: observedThreads }];
-      });
-    return [...allGroups.filter((group) => !group.transient), ...boundedQuietGroups];
+    return [...groups.values()];
   }, [
     bootstrapped,
     environmentConnectionPhaseById,
-    pendingChangeRequestThreadKeys,
-    primaryEnvironmentId,
     projectByPhysicalKey,
-    selectedProjectMemberKeys,
     threads,
     visibleThreadKeys,
   ]);
@@ -748,10 +646,7 @@ export function SessionGridView({ requestedProjectKey }: SessionGridViewProps) {
             </div>
           </WorkspacePageHeader>
 
-          <main
-            aria-busy={visiblePendingChangeRequestCount > 0}
-            className="relative min-h-0 flex-1"
-          >
+          <main className="relative min-h-0 flex-1">
             {!bootstrapped ? (
               <SessionGridLoading />
             ) : projects.length === 0 ? (
@@ -762,8 +657,6 @@ export function SessionGridView({ requestedProjectKey }: SessionGridViewProps) {
                 onAction={() => openCommandPalette({ open: "add-project" })}
                 title="No projects yet"
               />
-            ) : visibleThreadCount === 0 && visiblePendingChangeRequestCount > 0 ? (
-              <SessionGridChecking count={visiblePendingChangeRequestCount} />
             ) : visibleThreadCount === 0 ? (
               <SessionGridEmpty
                 actionLabel="New thread"
@@ -872,15 +765,6 @@ export function SessionGridView({ requestedProjectKey }: SessionGridViewProps) {
                     </button>
                   ) : null}
                 </SessionGridResizableLayout>
-                {visiblePendingChangeRequestCount > 0 ? (
-                  <div
-                    className="pointer-events-none absolute right-3 top-3 z-20 rounded-full border border-border/70 bg-background/90 px-2.5 py-1 text-[10px] text-muted-foreground shadow-sm backdrop-blur-sm"
-                    role="status"
-                  >
-                    Checking {visiblePendingChangeRequestCount} quiet session
-                    {visiblePendingChangeRequestCount === 1 ? "" : "s"}…
-                  </div>
-                ) : null}
               </DiffWorkerPoolProvider>
             )}
           </main>
@@ -916,22 +800,6 @@ function SessionGridLoading() {
           </div>
         </div>
       ))}
-    </div>
-  );
-}
-
-function SessionGridChecking({ count }: { readonly count: number }) {
-  return (
-    <div className="flex h-full items-center justify-center px-6" role="status">
-      <div className="max-w-md rounded-xl border border-border/65 bg-card px-6 py-7 text-center shadow-xs/5">
-        <div className="mx-auto mb-4 flex size-10 items-center justify-center rounded-xl border border-border/65 bg-muted/30 text-muted-foreground">
-          <LayoutGridIcon className="size-4.5" />
-        </div>
-        <h2 className="text-sm font-semibold text-foreground">Checking quiet sessions</h2>
-        <p className="mt-2 text-sm leading-6 text-muted-foreground">
-          Verifying pull request state for {count} branch {count === 1 ? "session" : "sessions"}.
-        </p>
-      </div>
     </div>
   );
 }

@@ -75,12 +75,8 @@ function classify(
 ) {
   return resolveSessionGridLifecycle(thread, {
     preciseNow: NOW,
-    settledNow: NOW,
-    autoSettleAfterDays: 3,
-    autoSettleOnMerge: true,
     supportsSettlement: true,
     supportsSnooze: true,
-    changeRequestState: null,
     ...overrides,
   });
 }
@@ -128,6 +124,8 @@ describe("resolveSessionGridLifecycle", () => {
       classify(
         makeThread({
           pinnedAt: STALE,
+          settledOverride: "settled",
+          settledAt: STALE,
           snoozedAt: "2026-08-05T10:00:00.000Z",
           snoozedUntil: "2026-08-06T12:00:00.000Z",
         }),
@@ -135,12 +133,10 @@ describe("resolveSessionGridLifecycle", () => {
     ).toBe("snoozed");
   });
 
-  it("keeps a pinned thread active ahead of explicit or automatic settlement", () => {
+  it("uses the server-projected settlement even for a formerly pinned thread", () => {
     expect(
-      classify(makeThread({ pinnedAt: NOW, settledOverride: "settled", settledAt: NOW }), {
-        changeRequestState: "merged",
-      }),
-    ).toBe("active");
+      classify(makeThread({ pinnedAt: NOW, settledOverride: "settled", settledAt: NOW })),
+    ).toBe("settled");
   });
 
   it("fails active on servers that do not support settlement", () => {
@@ -151,39 +147,19 @@ describe("resolveSessionGridLifecycle", () => {
     ).toBe("active");
   });
 
-  it("honors explicit settlement while PR metadata is loading", () => {
-    expect(
-      classify(makeThread({ settledOverride: "settled", settledAt: NOW }), {
-        changeRequestState: "unknown",
-      }),
-    ).toBe("settled");
+  it("honors server-projected settlement without waiting for client PR metadata", () => {
+    expect(classify(makeThread({ settledOverride: "settled", settledAt: NOW }))).toBe("settled");
   });
 
-  it("keeps inactivity visible until PR metadata resolves", () => {
-    const stale = makeThread();
-    expect(classify(stale, { changeRequestState: "unknown" })).toBe("active");
-    expect(classify(stale, { changeRequestState: null })).toBe("settled");
+  it("keeps old threads active until the server projects automatic settlement", () => {
+    expect(classify(makeThread())).toBe("active");
   });
 
-  it("keeps open PRs active and settles merged or closed PRs", () => {
-    const recentAt = "2026-08-05T11:59:00.000Z";
-    const recent = makeThread({
-      latestUserMessageAt: recentAt,
-      latestTurn: {
-        turnId: TurnId.make("turn-recent"),
-        state: "completed",
-        requestedAt: recentAt,
-        startedAt: recentAt,
-        completedAt: recentAt,
-        assistantMessageId: null,
-      },
-    });
-    expect(classify(recent, { changeRequestState: "open" })).toBe("active");
-    expect(classify(recent, { changeRequestState: "merged" })).toBe("settled");
-    expect(classify(recent, { changeRequestState: "closed" })).toBe("settled");
+  it("keeps an explicit server-side active override in the open grid", () => {
+    expect(classify(makeThread({ settledOverride: "active" }))).toBe("active");
   });
 
-  it("never hides live or blocked work, even behind a settle signal", () => {
+  it("keeps live and blocked work active before the server settles it", () => {
     const baseSession = {
       threadId: ThreadId.make("thread-1"),
       status: "running" as const,
@@ -193,15 +169,8 @@ describe("resolveSessionGridLifecycle", () => {
       lastError: null,
       updatedAt: NOW,
     };
-    expect(
-      classify(makeThread({ session: baseSession, settledOverride: "settled", settledAt: NOW })),
-    ).toBe("active");
-    expect(
-      classify(
-        makeThread({ hasPendingUserInput: true, settledOverride: "settled", settledAt: NOW }),
-        { changeRequestState: "merged" },
-      ),
-    ).toBe("active");
+    expect(classify(makeThread({ session: baseSession }))).toBe("active");
+    expect(classify(makeThread({ hasPendingUserInput: true }))).toBe("active");
   });
 
   it("scopes cached PR state to the current branch", () => {

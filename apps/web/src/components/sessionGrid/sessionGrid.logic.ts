@@ -1,10 +1,6 @@
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
 import type { ContextMenuItem } from "@t3tools/contracts";
-import {
-  effectiveSettled,
-  effectiveSnoozed,
-  type ChangeRequestStateLike,
-} from "@t3tools/client-runtime/state/thread-settled";
+import { effectiveSnoozed } from "@t3tools/client-runtime/state/thread-settled";
 
 import type {
   SidebarProjectGroupMember,
@@ -22,7 +18,7 @@ export interface SessionGridSearch {
   readonly project?: string;
 }
 
-export type SessionGridChangeRequestState = ChangeRequestStateLike | null | "unknown";
+export type SessionGridChangeRequestState = "open" | "closed" | "merged" | null | "unknown";
 export type SessionGridLifecycle = "active" | "snoozed" | "settled" | "archived";
 export type SessionGridArrowKey = "ArrowLeft" | "ArrowRight" | "ArrowUp" | "ArrowDown";
 
@@ -271,21 +267,18 @@ export function resolveSessionGridProject(
 }
 
 /**
- * The grid is the visual twin of Sidebar v2's working partition. Snooze is
- * checked before pinning, and a pin keeps a thread active ahead of automatic
- * settlement. Unknown PR state fails visible while VCS metadata loads, but an
- * explicit settle can still hide immediately.
+ * The grid is the visual twin of the sidebar's server-backed partition.
+ * Snooze is still a time-derived overlay, while settlement itself comes from
+ * the shell projected by the server. That keeps the grid, web sidebar, mobile,
+ * and disconnected clients consistent when inactivity or a PR merge settles a
+ * thread in the background.
  */
 export function resolveSessionGridLifecycle(
   thread: EnvironmentThreadShell,
   options: {
     readonly preciseNow: string;
-    readonly settledNow: string;
-    readonly autoSettleAfterDays: number | null;
-    readonly autoSettleOnMerge: boolean;
     readonly supportsSettlement: boolean;
     readonly supportsSnooze: boolean;
-    readonly changeRequestState: SessionGridChangeRequestState;
   },
 ): SessionGridLifecycle {
   if (thread.archivedAt !== null) return "archived";
@@ -294,24 +287,7 @@ export function resolveSessionGridLifecycle(
     return "snoozed";
   }
 
-  if (thread.pinnedAt != null) return "active";
-  if (!options.supportsSettlement) return "active";
-
-  const changeRequestStateUnknown = options.changeRequestState === "unknown";
-  return effectiveSettled(thread, {
-    now: options.settledNow,
-    // An unresolved branch query cannot safely auto-settle: it may reveal an
-    // open PR, which blocks inactivity settlement. Explicit overrides remain
-    // authoritative because effectiveSettled checks them before this window.
-    autoSettleAfterDays: changeRequestStateUnknown ? null : options.autoSettleAfterDays,
-    autoSettleOnMerge: options.autoSettleOnMerge,
-    changeRequest:
-      changeRequestStateUnknown || options.changeRequestState === null
-        ? null
-        : { state: options.changeRequestState },
-  })
-    ? "settled"
-    : "active";
+  return options.supportsSettlement && thread.settledOverride === "settled" ? "settled" : "active";
 }
 
 export function sessionGridPhysicalProjectKey(input: {

@@ -40,6 +40,7 @@ import {
   MenuTrigger,
 } from "./ui/menu";
 import { Separator } from "./ui/separator";
+import { ComposerSurface } from "./chat/ComposerSurface";
 
 interface BranchToolbarProps {
   /** fork: project session grid — the same controls can live in a pane header. */
@@ -268,8 +269,10 @@ function useLabelsOverflow(element: HTMLDivElement | null): boolean {
     let needed = 0;
     let groups = 0;
     for (const child of current.children) {
-      if (!(child instanceof HTMLElement) || child.offsetWidth <= 1) continue;
-      needed += contentWidth(child);
+      if (!(child instanceof HTMLElement)) continue;
+      const width = contentWidth(child);
+      if (width <= 1) continue;
+      needed += width;
       groups += 1;
     }
     needed += stripGap * Math.max(0, groups - 1);
@@ -359,7 +362,7 @@ function useLabelsOverflow(element: HTMLDivElement | null): boolean {
   // Label widths can change without the strip box moving (font family or
   // size preferences), so re-measure on every render as well as on resize
   // and font loads.
-  useEffect(() => {
+  useLayoutEffect(() => {
     measure();
   });
 
@@ -476,14 +479,14 @@ export const BranchToolbar = memo(function BranchToolbar({
   if (!hasActiveThread || !activeProject) return null;
 
   return (
-    <div
+    <ComposerSurface.ContextStrip
       ref={setStripElement}
       data-branch-toolbar-placement={placement}
       data-compact={labelsOverflow ? "" : undefined}
       className={
         placement === "grid-header"
           ? "group/composer-context flex min-w-0 w-fit max-w-full items-center justify-end gap-1"
-          : "chat-composer-context-strip group/composer-context -mt-4 mx-auto flex w-[calc(100%-2.75rem)] max-w-[calc(48rem-2.75rem)] items-center gap-2 overflow-x-clip overflow-y-visible ps-1 pe-2 pt-5 pb-1"
+          : undefined
       }
     >
       {isMobile && showGitControls && showWorkspaceControl ? (
@@ -503,7 +506,13 @@ export const BranchToolbar = memo(function BranchToolbar({
           onUsePreviousWorktree={onUsePreviousWorktree}
         />
       ) : showRunLocationControls ? (
-        <div className="flex min-w-0 flex-1 items-center gap-1">
+        <div
+          className={
+            placement === "grid-header"
+              ? "flex min-w-0 flex-1 items-center gap-1"
+              : "flex min-w-10 flex-1 items-center gap-1"
+          }
+        >
           {showEnvironmentIndicator && availableEnvironments && (
             <>
               <BranchToolbarEnvironmentSelector
@@ -539,7 +548,7 @@ export const BranchToolbar = memo(function BranchToolbar({
           className={
             placement === "grid-header"
               ? "min-w-0 justify-end"
-              : "min-w-0 flex-1 justify-end md:ml-auto md:flex-none"
+              : "min-w-0 flex-1 justify-end md:ml-auto md:flex-initial"
           }
           popupSide={placement === "grid-header" ? "bottom" : "top"}
           environmentId={environmentId}
@@ -555,6 +564,6 @@ export const BranchToolbar = memo(function BranchToolbar({
           {...(onComposerFocusRequest ? { onComposerFocusRequest } : {})}
         />
       ) : null}
-    </div>
+    </ComposerSurface.ContextStrip>
   );
 });

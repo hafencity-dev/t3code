@@ -85,19 +85,6 @@ export interface ThreadSubtitleGenerationInput {
 export interface ThreadSubtitleGenerationResult {
   subtitle: string;
 }
-
-export interface TextGenerationService {
-  generateCommitMessage(
-    input: CommitMessageGenerationInput,
-  ): Promise<CommitMessageGenerationResult>;
-  generatePrContent(input: PrContentGenerationInput): Promise<PrContentGenerationResult>;
-  generateBranchName(input: BranchNameGenerationInput): Promise<BranchNameGenerationResult>;
-  generateThreadTitle(input: ThreadTitleGenerationInput): Promise<ThreadTitleGenerationResult>;
-  generateThreadSubtitle(
-    input: ThreadSubtitleGenerationInput,
-  ): Promise<ThreadSubtitleGenerationResult>;
-}
-
 /**
  * TextGeneration - Service tag for commit and change request text generation.
  */
@@ -136,9 +123,6 @@ export class TextGeneration extends Context.Service<
     ) => Effect.Effect<ThreadSubtitleGenerationResult, TextGenerationError>;
   }
 >()("t3/textGeneration/TextGeneration") {}
-
-/** @deprecated Use `TextGeneration["Service"]`. */
-export type TextGenerationShape = TextGeneration["Service"];
 
 type TextGenerationOp =
   | "generateCommitMessage"

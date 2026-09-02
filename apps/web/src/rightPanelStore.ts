@@ -43,6 +43,7 @@ export type RightPanelSurface =
   | {
       id: `file:${string}`;
       kind: "file";
+      /** Workspace-relative, or absolute for a host file outside the workspace. */
       relativePath: string;
       revealLine: number | null;
       revealRequestId: number;

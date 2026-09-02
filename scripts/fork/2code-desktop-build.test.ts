@@ -37,6 +37,7 @@ it.effect("builds a legacy-compatible 2code updater configuration", () =>
         entitlementsPath: "/tmp/entitlements.2code.mac.plist",
         entitlementsInheritPath: "/tmp/entitlements.2code.mac.plist",
       },
+      false,
       TWO_CODE_PRODUCTION_PROFILE,
     );
 

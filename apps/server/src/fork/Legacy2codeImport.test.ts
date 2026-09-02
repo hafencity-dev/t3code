@@ -103,6 +103,7 @@ const makeEngine = (
         return { sequence: 1 };
       }),
     streamDomainEvents: Stream.empty,
+    subscribeDomainEvents: Effect.succeed(Stream.empty),
     latestSequence: Effect.succeed(0),
   }) satisfies OrchestrationEngine.OrchestrationEngineService["Service"];
 

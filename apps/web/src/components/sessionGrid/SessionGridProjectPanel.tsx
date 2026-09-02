@@ -54,7 +54,6 @@ import { useThreadActions } from "../../hooks/useThreadActions";
 import { readLocalApi } from "../../localApi";
 import { getProjectOrderKey, selectProjectGroupingSettings } from "../../logicalProject";
 import { cn } from "../../lib/utils";
-import { useSessionGridFocusStore } from "../../sessionGridFocusStore";
 import {
   buildSidebarProjectSnapshots,
   type SidebarProjectGroupMember,
@@ -79,9 +78,7 @@ import { stackedThreadToast, toastManager } from "../ui/toast";
 import {
   buildSessionGridProjectContextMenuItems,
   buildSessionGridProjectPanelEntries,
-  resolveSessionGridChangeRequestState,
   resolveSessionGridLifecycle,
-  sessionGridChangeRequestKey,
   type SessionGridProjectContextAction,
   type SessionGridProjectPanelEntry,
 } from "./sessionGrid.logic";
@@ -283,8 +280,7 @@ export function SessionGridProjectPanel() {
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const { environments } = useEnvironments();
   const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
-  const autoSettleAfterDays = useClientSettings((settings) => settings.sidebarAutoSettleAfterDays);
-  const autoSettleOnMerge = useClientSettings((settings) => settings.sidebarAutoSettleOnMerge);
+  const nowMinute = useNowMinute();
   const projectOrder = useUiStateStore((state) => state.projectOrder);
   const reorderProjects = useUiStateStore((state) => state.reorderProjects);
   const lastVisitedAtByThreadKey = useUiStateStore((state) => state.threadLastVisitedAtById);
@@ -311,10 +307,6 @@ export function SessionGridProjectPanel() {
       );
     },
   });
-  const changeRequestStateByKey = useSessionGridFocusStore(
-    (state) => state.changeRequestStateByKey,
-  );
-  const nowMinute = useNowMinute();
   const [expandedSettledProjectKey, setExpandedSettledProjectKey] = useState<string | null>(null);
   const [restoringThreadKeys, setRestoringThreadKeys] = useState<ReadonlySet<string>>(
     () => new Set(),
@@ -340,15 +332,6 @@ export function SessionGridProjectPanel() {
       }),
     [projectOrder, projects],
   );
-  const environmentConnectionPhaseById = useMemo(
-    () =>
-      new Map(
-        environments.map(
-          (environment) => [environment.environmentId, environment.connection.phase] as const,
-        ),
-      ),
-    [environments],
-  );
   const projectGroups = useMemo(
     () =>
       buildSidebarProjectSnapshots({
@@ -360,47 +343,21 @@ export function SessionGridProjectPanel() {
     [environmentLabelById, orderedProjects, primaryEnvironmentId, projectGroupingSettings],
   );
   const lifecycleByThreadKey = useMemo(() => {
+    void nowMinute;
     const preciseNow = new Date().toISOString();
-    const settledNow = `${nowMinute}:00.000Z`;
     return new Map(
       threads.map((thread) => {
         const threadKey = scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
         const capabilities = serverConfigs.get(thread.environmentId)?.environment.capabilities;
-        const changeRequestKey = sessionGridChangeRequestKey({
-          threadKey,
-          branch: thread.branch,
-        });
-        const changeRequestState =
-          thread.branch === null
-            ? null
-            : environmentConnectionPhaseById.get(thread.environmentId) !== "connected"
-              ? "unknown"
-              : resolveSessionGridChangeRequestState(
-                  changeRequestStateByKey,
-                  changeRequestKey,
-                  thread.branch,
-                );
         const lifecycle = resolveSessionGridLifecycle(thread, {
           preciseNow,
-          settledNow,
-          autoSettleAfterDays,
-          autoSettleOnMerge,
           supportsSettlement: capabilities?.threadSettlement === true,
           supportsSnooze: capabilities?.threadSnooze === true,
-          changeRequestState,
         });
         return [threadKey, lifecycle] as const;
       }),
     );
-  }, [
-    autoSettleAfterDays,
-    autoSettleOnMerge,
-    changeRequestStateByKey,
-    environmentConnectionPhaseById,
-    nowMinute,
-    serverConfigs,
-    threads,
-  ]);
+  }, [nowMinute, serverConfigs, threads]);
   const entries = useMemo(
     () =>
       buildSessionGridProjectPanelEntries({

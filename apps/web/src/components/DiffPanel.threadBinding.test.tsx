@@ -77,6 +77,7 @@ describe("DiffPanel thread binding", () => {
         initialGitScope="unstaged"
         mode="embedded"
         threadRef={GRID_THREAD_REF}
+        workspaceMutationId={null}
       />,
     );
 

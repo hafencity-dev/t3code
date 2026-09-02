@@ -1,5 +1,5 @@
 import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
-import { canSettle, snoozeWakeLabel } from "@t3tools/client-runtime/state/thread-settled";
+import { snoozeWakeLabel } from "@t3tools/client-runtime/state/thread-settled";
 import { displayThreadSubtitle } from "@t3tools/client-runtime/state/thread-subtitle";
 import type {
   EnvironmentProject,
@@ -190,8 +190,7 @@ export const SessionGridChatPane = memo(function SessionGridChatPane(
   const [leavingPending, setLeavingPending] = useState(false);
   const [runContextPortalTarget, setRunContextPortalTarget] = useState<HTMLElement | null>(null);
   const openPrLink = useOpenPrLink();
-  const canSettleThread =
-    !props.snoozed && props.settlementSupported && canSettle(thread, { now: props.nowIso });
+  const canSettleThread = !props.snoozed && props.settlementSupported;
   const focusPane = () => {
     props.onFocus(threadKey);
     const completedAt = thread.latestTurn?.completedAt;
