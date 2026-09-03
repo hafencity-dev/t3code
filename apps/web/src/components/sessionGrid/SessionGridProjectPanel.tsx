@@ -165,6 +165,7 @@ const SortableGridProject = memo(function SortableGridProject(props: SortableGri
             className="size-4"
             cwd={project.workspaceRoot}
             environmentId={project.environmentId}
+            projectName={project.displayName}
           />
           <span className="min-w-0 flex-1">
             <span className="block truncate text-[13px] font-medium leading-4 text-sidebar-foreground">

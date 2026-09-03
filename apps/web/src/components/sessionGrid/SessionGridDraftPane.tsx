@@ -53,6 +53,7 @@ export const SessionGridDraftPane = memo(function SessionGridDraftPane(
         className="size-3.5 shrink-0"
         cwd={props.project.workspaceRoot}
         environmentId={props.draft.environmentId}
+        projectName={props.project.title}
       />
       <div className="min-w-0 flex-1">
         <div className="truncate text-xs font-semibold leading-4 text-foreground">New session</div>

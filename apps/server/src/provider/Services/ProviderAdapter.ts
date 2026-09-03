@@ -35,7 +35,6 @@ export interface ProviderAdapterCapabilities {
    * Declares whether changing the model on an existing session is supported.
    */
   readonly sessionModelSwitch: ProviderSessionModelSwitchMode;
-
   /**
    * Where this adapter can attach caller-supplied instructions. `session`
    * attaches them once when the session opens. `unsupported` adapters receive
@@ -44,6 +43,9 @@ export interface ProviderAdapterCapabilities {
    * read.
    */
   readonly instructionInjection: ProviderInstructionInjectionMode; // fork: f2
+  /** Starts a resumed turn with no synthetic user prompt. Omitted means the
+      adapter needs an explicit continuation instruction. */
+  readonly promptlessTurnContinuation?: boolean;
 }
 
 export interface ProviderThreadTurnSnapshot {

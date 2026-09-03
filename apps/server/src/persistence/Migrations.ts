@@ -57,6 +57,10 @@ import ForkMigration0040 from "./Migrations/040_RepairForkMigrationCollisions.ts
 import UpstreamMigration0041 from "./Migrations/041_AuthSessionClientConnection.ts";
 import UpstreamMigration0042 from "./Migrations/042_ProjectionThreadLinkedPullRequest.ts";
 import UpstreamMigration0043 from "./Migrations/043_ProjectionThreadsUnsettledAt.ts";
+import UpstreamMigration0044 from "./Migrations/044_ClearAutomaticProjectModelDefaults.ts";
+import UpstreamMigration0045 from "./Migrations/045_ProjectionProjectsAutoPull.ts";
+import UpstreamMigration0046 from "./Migrations/046_RepairAutomaticSettlementTimestamps.ts";
+import UpstreamMigration0047 from "./Migrations/047_ProjectionProjectIcon.ts";
 
 // fork: released 2code databases already used IDs 39 and 40. Re-run every
 // colliding migration idempotently at the next free ID so those databases gain
@@ -125,6 +129,10 @@ export const migrationEntries = [
   [42, "AuthSessionClientConnection", UpstreamMigration0041],
   [43, "ProjectionThreadLinkedPullRequest", UpstreamMigration0042],
   [44, "ProjectionThreadsUnsettledAt", UpstreamMigration0043],
+  [45, "ClearAutomaticProjectModelDefaults", UpstreamMigration0044],
+  [46, "ProjectionProjectsAutoPull", UpstreamMigration0045],
+  [47, "RepairAutomaticSettlementTimestamps", UpstreamMigration0046],
+  [48, "ProjectionProjectIcon", UpstreamMigration0047],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);

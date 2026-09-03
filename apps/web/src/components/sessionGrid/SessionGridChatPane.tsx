@@ -211,6 +211,7 @@ export const SessionGridChatPane = memo(function SessionGridChatPane(
         className="size-3.5 shrink-0"
         cwd={props.project.workspaceRoot}
         environmentId={thread.environmentId}
+        projectName={props.project.title}
       />
       <Link
         className="min-w-0 flex-1 outline-none"
