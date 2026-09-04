@@ -24,6 +24,7 @@ import {
   type ProviderDriverKind,
   type ProviderRuntimeEvent,
   type ProviderSession,
+  type SystemPromptTarget,
 } from "@t3tools/contracts";
 import { expandAssistantCitationsForProvider } from "@t3tools/shared/assistantCitations";
 import { causeErrorTag } from "@t3tools/shared/observability";
@@ -286,6 +287,17 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       Effect.tap(() => Effect.sync(() => McpProviderSession.clearMcpProviderSession(threadId))),
     );
 
+  // fork: f2 system prompt injection — every adapter start, including a
+  // persisted-session recovery, must resolve the current rule set.
+  const resolveSessionInstructions = Effect.fn("ProviderService.resolveSessionInstructions")(
+    function* (adapter: ProviderAdapterShape<ProviderAdapterError>, target: SystemPromptTarget) {
+      if (adapter.capabilities.instructionInjection === "unsupported") {
+        return undefined;
+      }
+      return yield* systemPromptResolver.resolve(target);
+    },
+  );
+
   const publishRuntimeEvent = (event: ProviderRuntimeEvent): Effect.Effect<void> =>
     Effect.succeed(event).pipe(
       Effect.tap((canonicalEvent) =>
@@ -455,6 +467,11 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
 
       const persistedCwd = readPersistedCwd(input.binding.runtimePayload);
       const persistedModelSelection = readPersistedModelSelection(input.binding.runtimePayload);
+      const instructions = yield* resolveSessionInstructions(adapter, {
+        driverKind: adapter.provider,
+        instanceId: bindingInstanceId,
+        modelSlug: persistedModelSelection?.model,
+      });
 
       yield* prepareMcpSession(input.binding.threadId, bindingInstanceId);
       const resumed = yield* adapter
@@ -466,6 +483,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           ...(persistedModelSelection ? { modelSelection: persistedModelSelection } : {}),
           ...(hasResumeCursor ? { resumeCursor: input.binding.resumeCursor } : {}),
           runtimeMode: input.binding.runtimeMode ?? "full-access",
+          ...(instructions !== undefined ? { instructions } : {}), // fork: f2
         })
         .pipe(Effect.onError(() => clearMcpSession(input.binding.threadId)));
       if (resumed.provider !== adapter.provider) {
@@ -652,17 +670,11 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           "provider.cwd.effective": effectiveCwd ?? "",
         });
         const adapter = yield* registry.getByInstance(resolvedInstanceId);
-        // fork: f2 system prompt injection — resolved here because this is the
-        // only place holding both the driver kind and the adapter's declared
-        // capability. Adapters that cannot take instructions receive none.
-        const instructions =
-          adapter.capabilities.instructionInjection === "unsupported"
-            ? undefined
-            : yield* systemPromptResolver.resolve({
-                driverKind: resolvedProvider,
-                instanceId: resolvedInstanceId,
-                modelSlug: input.modelSelection?.model,
-              });
+        const instructions = yield* resolveSessionInstructions(adapter, {
+          driverKind: resolvedProvider,
+          instanceId: resolvedInstanceId,
+          modelSlug: input.modelSelection?.model,
+        });
         yield* prepareMcpSession(threadId, resolvedInstanceId);
         const session = yield* adapter
           .startSession({

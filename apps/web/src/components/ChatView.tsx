@@ -7741,7 +7741,10 @@ function ChatViewContent(props: ChatViewProps) {
     ) : null
   ) : null;
 
-  const runContextToolbar = showComposerContextStrip ? (
+  // fork: project session grid — grid headers only mount visible controls;
+  // normal chats keep the hidden measurement host required by resting mode.
+  const mountRunContextToolbar = isGridPane ? showComposerContextStrip : mountComposerContextStrip;
+  const runContextToolbar = mountRunContextToolbar ? (
     <BranchToolbar
       placement={isGridPane ? "grid-header" : "composer"}
       environmentId={activeThread.environmentId}
@@ -7765,6 +7768,12 @@ function ChatViewContent(props: ChatViewProps) {
         : {})}
       {...(hasMultipleEnvironments ? { onEnvironmentChange } : {})}
       availableEnvironments={logicalProjectEnvironments}
+      {...(!isGridPane
+        ? {
+            composerControlsHostRef: setRestingComposerControlsHost,
+            contextStripVisible: showComposerContextStrip,
+          }
+        : {})}
     />
   ) : null;
   const workspaceFileDropHandlers = makeWorkspaceFileDropHandlers({
@@ -7786,12 +7795,13 @@ function ChatViewContent(props: ChatViewProps) {
       {isGridPane && !shouldUseRightPanelSheet && ownsGlobalInteraction && rightPanelPortalTarget
         ? createPortal(
             <>
-              {rightPanelOpen && activeThreadRef ? (
+              {rightPanelPresent && activeThreadRef ? (
                 <RightPanelTabs
                   mode="inline"
+                  open={rightPanelOpen}
                   environmentId={activeThreadRef.environmentId}
-                  surfaces={rightPanelState.surfaces}
-                  activeSurfaceId={activeRightPanelSurface?.id ?? null}
+                  surfaces={renderedRightPanelSurfaces}
+                  activeSurfaceId={renderedRightPanelSurface?.id ?? null}
                   pendingSurfaceIds={pendingFileSurfaceIds}
                   previewSessions={activePreviewState.sessions}
                   desktopByTabId={activePreviewState.desktopByTabId}
@@ -8270,7 +8280,7 @@ function ChatViewContent(props: ChatViewProps) {
           ))}
       </div>
 
-      {!isGridPane && !shouldUseRightPanelSheet && rightPanelOpen && activeThreadRef ? (
+      {!isGridPane && !shouldUseRightPanelSheet && rightPanelPresent && activeThreadRef ? (
         <RightPanelTabs
           mode="inline"
           open={rightPanelOpen}
@@ -8322,10 +8332,10 @@ function ChatViewContent(props: ChatViewProps) {
             {sourceControlContent}
           </SourceControlPanelShell>
         </RightPanelSheet>
-      ) : shouldUseRightPanelSheet && rightPanelOpen && activeThreadRef ? (
+      ) : shouldUseRightPanelSheet && rightPanelPresent && activeThreadRef ? (
         <RightPanelSheet
           animationDurationMs={panelAnimationsActive ? panelAnimationDurationMs : 0}
-          open
+          open={rightPanelOpen}
           onClose={closePreviewPanel}
         >
           <RightPanelTabs

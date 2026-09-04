@@ -569,6 +569,47 @@ it.effect("ProviderServiceLive omits instructions when nothing resolves", () =>
   }).pipe(Effect.provide(NodeServices.layer)),
 );
 
+it.effect("ProviderServiceLive reapplies resolved instructions when recovering a session", () =>
+  Effect.gen(function* () {
+    const codex = makeFakeCodexAdapter(CODEX_DRIVER, "session");
+    yield* Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const threadId = asThreadId("thread-recovered-injection");
+      const initial = yield* provider.startSession(threadId, {
+        providerInstanceId: codexInstanceId,
+        threadId,
+        modelSelection: createModelSelection(codexInstanceId, "gpt-5.6-sol"),
+        runtimeMode: "full-access",
+      });
+
+      yield* codex.stopAll();
+      codex.startSession.mockClear();
+
+      const resumedTurn = yield* provider.sendTurn({
+        threadId,
+        input: "Continue after the server restart.",
+      });
+
+      assert.equal(resumedTurn.threadId, threadId);
+      assert.equal(codex.startSession.mock.calls.length, 1);
+      assert.deepEqual(codex.startSession.mock.calls[0]?.[0], {
+        threadId,
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        cwd: process.cwd(),
+        modelSelection: createModelSelection(codexInstanceId, "gpt-5.6-sol"),
+        resumeCursor: initial.resumeCursor,
+        runtimeMode: "full-access",
+        instructions: "Keep orchestrating with the configured subagents.",
+      });
+    }).pipe(
+      Effect.provide(
+        makeInjectionLayer(codex, "Keep orchestrating with the configured subagents."),
+      ),
+    );
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
 it.effect(
   "ProviderServiceLive allows enabled custom instances when legacy driver is disabled",
   () =>

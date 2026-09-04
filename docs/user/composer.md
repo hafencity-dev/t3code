@@ -69,12 +69,12 @@ when starting a thread or changing an existing thread's model.
 
 ## Model defaults
 
-T3 Code remembers the last provider, model, and model options you selected and reuses that
+The app remembers the last provider, model, and model options you selected and reuses that
 selection for new threads. A model configured in a project's settings overrides the remembered
 selection for that project; resetting the project setting returns it to the remembered selection.
 
-Model options shown as provider defaults remain display values until you choose them in T3 Code.
-T3 Code only sends options you selected explicitly, so an unset reasoning level or service tier can
+Model options shown as provider defaults remain display values until you choose them in the app.
+The app only sends options you selected explicitly, so an unset reasoning level or service tier can
 still come from the provider's own configuration.
 
 ## Quote an assistant response

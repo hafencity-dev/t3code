@@ -41,6 +41,7 @@ import { ScreenRotationIcon } from "~/browser/ScreenRotationIcon";
 import { previewBridge } from "~/components/preview/previewBridge";
 import { cn, randomUUID } from "~/lib/utils";
 import { useEnvironments } from "~/state/environments";
+import { APP_BASE_NAME } from "../../branding";
 import { isElectron } from "../../env";
 
 import { Badge } from "../ui/badge";
@@ -469,7 +470,7 @@ function BrowserRecordingFrameRateSetting({ disabled }: { readonly disabled: boo
 
 const LINK_TARGET_LABELS: Readonly<Record<BrowserLinkTarget, string>> = {
   system: "Your default browser",
-  app: "T3 Code",
+  app: APP_BASE_NAME,
 };
 
 function BrowserLinkTargetSetting({ disabled }: { readonly disabled: boolean }) {

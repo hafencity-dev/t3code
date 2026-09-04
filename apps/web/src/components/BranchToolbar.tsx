@@ -503,40 +503,122 @@ export const BranchToolbar = memo(function BranchToolbar({
 
   if (!hasActiveThread || !activeProject) return null;
 
+  // fork: project session grid — pane headers keep their compact, bottom-opening
+  // controls while the canonical composer retains upstream's responsive strip
+  // and resting-composer controls host.
+  if (placement === "grid-header") {
+    return (
+      <ComposerSurface.ContextStrip
+        ref={setStripElement}
+        data-branch-toolbar-placement={placement}
+        data-compact={labelsOverflow ? "" : undefined}
+        className="group/composer-context flex min-w-0 w-fit max-w-full items-center justify-end gap-1"
+      >
+        {isMobile && showGitControls && showWorkspaceControl ? (
+          <MobileRunContextSelector
+            popupSide="bottom"
+            envLocked={envLocked}
+            envModeLocked={envModeLocked}
+            environmentId={environmentId}
+            availableEnvironments={availableEnvironments}
+            showEnvironmentPicker={showEnvironmentPicker}
+            showEnvironmentIndicator={showEnvironmentIndicator}
+            onEnvironmentChange={onEnvironmentChange}
+            effectiveEnvMode={effectiveEnvMode}
+            activeWorktreePath={activeWorktreePath}
+            onEnvModeChange={onEnvModeChange}
+            previousWorktreeLabel={previousWorktreeLabel}
+            onUsePreviousWorktree={onUsePreviousWorktree}
+          />
+        ) : showRunLocationControls ? (
+          <div className="flex min-w-0 flex-1 items-center gap-1">
+            {showEnvironmentIndicator && availableEnvironments && (
+              <>
+                <BranchToolbarEnvironmentSelector
+                  envLocked={envLocked}
+                  environmentId={environmentId}
+                  availableEnvironments={availableEnvironments}
+                  {...(showEnvironmentPicker && onEnvironmentChange ? { onEnvironmentChange } : {})}
+                />
+                {showGitControls && showWorkspaceControl ? (
+                  <Separator
+                    orientation="vertical"
+                    className="mx-0.5 h-3.5!"
+                    data-composer-context-control
+                  />
+                ) : null}
+              </>
+            )}
+            {showGitControls && showWorkspaceControl ? (
+              <BranchToolbarEnvModeSelector
+                envLocked={envModeLocked}
+                effectiveEnvMode={effectiveEnvMode}
+                activeWorktreePath={activeWorktreePath}
+                onEnvModeChange={onEnvModeChange}
+                previousWorktreeLabel={previousWorktreeLabel}
+                onUsePreviousWorktree={onUsePreviousWorktree}
+              />
+            ) : null}
+          </div>
+        ) : null}
+
+        {showGitControls ? (
+          <BranchToolbarBranchSelector
+            className="min-w-0 justify-end"
+            popupSide="bottom"
+            environmentId={environmentId}
+            threadId={threadId}
+            {...(draftId ? { draftId } : {})}
+            envLocked={envLocked}
+            {...(effectiveEnvModeOverride ? { effectiveEnvModeOverride } : {})}
+            {...(activeThreadBranchOverride !== undefined ? { activeThreadBranchOverride } : {})}
+            {...(onActiveThreadBranchOverrideChange ? { onActiveThreadBranchOverrideChange } : {})}
+            startFromOrigin={startFromOrigin}
+            onStartFromOriginChange={onStartFromOriginChange}
+            {...(onCheckoutPullRequestRequest ? { onCheckoutPullRequestRequest } : {})}
+            {...(onComposerFocusRequest ? { onComposerFocusRequest } : {})}
+          />
+        ) : null}
+      </ComposerSurface.ContextStrip>
+    );
+  }
+
   return (
     <ComposerSurface.ContextStrip
       ref={setStripElement}
       data-branch-toolbar-placement={placement}
       data-compact={labelsOverflow ? "" : undefined}
-      className={
-        placement === "grid-header"
-          ? "group/composer-context flex min-w-0 w-fit max-w-full items-center justify-end gap-1"
-          : undefined
-      }
+      className={cn(
+        "gap-1 text-xs font-normal text-muted-foreground/70",
+        !contextStripVisible && "pointer-events-none invisible absolute inset-x-0 top-full",
+      )}
     >
-      {isMobile && showGitControls && showWorkspaceControl ? (
-        <MobileRunContextSelector
-          popupSide={placement === "grid-header" ? "bottom" : "top"}
-          envLocked={envLocked}
-          envModeLocked={envModeLocked}
-          environmentId={environmentId}
-          availableEnvironments={availableEnvironments}
-          showEnvironmentPicker={showEnvironmentPicker}
-          showEnvironmentIndicator={showEnvironmentIndicator}
-          onEnvironmentChange={onEnvironmentChange}
-          effectiveEnvMode={effectiveEnvMode}
-          activeWorktreePath={activeWorktreePath}
-          onEnvModeChange={onEnvModeChange}
-          previousWorktreeLabel={previousWorktreeLabel}
-          onUsePreviousWorktree={onUsePreviousWorktree}
-        />
-      ) : showRunLocationControls ? (
+      {showGitControls ? (
+        <div className="contents @3xl/composer-surface:hidden">
+          <MobileRunContextSelector
+            popupSide="top"
+            envLocked={envLocked}
+            envModeLocked={envModeLocked}
+            environmentId={environmentId}
+            availableEnvironments={availableEnvironments}
+            showEnvironmentPicker={showEnvironmentPicker}
+            showEnvironmentIndicator={showEnvironmentIndicator}
+            onEnvironmentChange={onEnvironmentChange}
+            effectiveEnvMode={effectiveEnvMode}
+            activeWorktreePath={activeWorktreePath}
+            onEnvModeChange={onEnvModeChange}
+            previousWorktreeLabel={previousWorktreeLabel}
+            onUsePreviousWorktree={onUsePreviousWorktree}
+          />
+        </div>
+      ) : null}
+      {showGitControls || showEnvironmentIndicator ? (
         <div
-          className={
-            placement === "grid-header"
-              ? "flex min-w-0 flex-1 items-center gap-1"
-              : "flex min-w-10 flex-1 items-center gap-1"
-          }
+          className={cn(
+            "min-h-7 min-w-10 items-center gap-1 sm:min-h-6",
+            showGitControls ? "hidden @3xl/composer-surface:flex" : "flex",
+            composerControlsHostRef ? "shrink" : "flex-1",
+          )}
         >
           {showEnvironmentIndicator && availableEnvironments && (
             <>
@@ -546,7 +628,7 @@ export const BranchToolbar = memo(function BranchToolbar({
                 availableEnvironments={availableEnvironments}
                 {...(showEnvironmentPicker && onEnvironmentChange ? { onEnvironmentChange } : {})}
               />
-              {showGitControls && showWorkspaceControl ? (
+              {showGitControls ? (
                 <Separator
                   orientation="vertical"
                   className="mx-0.5 h-3.5!"
@@ -555,7 +637,7 @@ export const BranchToolbar = memo(function BranchToolbar({
               ) : null}
             </>
           )}
-          {showGitControls && showWorkspaceControl ? (
+          {showGitControls ? (
             <BranchToolbarEnvModeSelector
               envLocked={envModeLocked}
               effectiveEnvMode={effectiveEnvMode}
@@ -568,14 +650,19 @@ export const BranchToolbar = memo(function BranchToolbar({
         </div>
       ) : null}
 
+      {composerControlsHostRef ? (
+        <div
+          ref={composerControlsHostRef}
+          data-composer-context-control
+          data-chat-resting-composer-controls-host="true"
+          className="flex min-w-0 flex-1 items-center justify-start overflow-x-clip overflow-y-visible"
+        />
+      ) : null}
+
       {showGitControls ? (
         <BranchToolbarBranchSelector
-          className={
-            placement === "grid-header"
-              ? "min-w-0 justify-end"
-              : "min-w-0 flex-1 justify-end md:ml-auto md:flex-initial"
-          }
-          popupSide={placement === "grid-header" ? "bottom" : "top"}
+          className="min-w-0 flex-initial justify-end @3xl/composer-surface:ml-auto"
+          popupSide="top"
           environmentId={environmentId}
           threadId={threadId}
           {...(draftId ? { draftId } : {})}

@@ -3641,6 +3641,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     isMobileViewport,
     isFocused: isComposerFocused && !isComposerScrollCollapsed,
     hasExpandedChrome: composerHasExpandedChrome,
+    isCompact: compact,
   });
   // The relocated controls live in the context strip whenever the composer is
   // collapsed for any reason, the desktop resting layout or the phone
@@ -3817,7 +3818,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   ]);
 
   const restingHiddenBlockCount = composerControlsInStrip ? restingControlsHiddenBlockCount : 0;
-  const composerControlsCompact = !composerControlsInStrip && isComposerFooterCompact;
+  const composerControlsCompact = !composerControlsInStrip && (compact || isComposerFooterCompact);
   const restingBlockDefs = [
     ...(providerTraitsPicker
       ? [
@@ -4622,7 +4623,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
 
   // Render
   // ------------------------------------------------------------------
-  const footerUsesCompactControls = compact || isComposerFooterCompact;
   const primaryActionsUseCompactControls = compact || isComposerPrimaryActionsCompact;
 
   return (
@@ -4935,11 +4935,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
             <SessionGridComposerLayout compact={compact}>
               <div
                 ref={setComposerMenuAnchor}
+                data-chat-composer-body="true"
                 className={cn(
                   "relative",
                   compact ? "px-2.5 pt-1.5 pb-0.5" : "px-3 pt-3.5 pb-2 sm:px-4 sm:pt-4",
                   isComposerApprovalState && "pb-3 sm:pb-4",
                   isComposerCollapsedMobile && "hidden",
+                  isComposerResting && "py-2 sm:py-2",
                 )}
               >
                 {isStashMenuOpen && !composerMenuOpen && !isComposerApprovalState && (
@@ -5035,27 +5037,17 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   !isComposerApprovalState &&
                   pendingUserInputs.length === 0 &&
                   (composerVideos.length > 0 ||
-                    composerImages.some(
-                      (image) =>
-                        !composerPreviewAnnotations.some(
-                          (annotation) => annotation.id === image.id,
-                        ),
-                    )) && (
+                    (!isComposerResting && standaloneComposerImages.length > 0)) && (
                     <div className="mb-3 flex flex-wrap gap-2">
-                      {composerImages
-                        .filter(
-                          (image) =>
-                            !composerPreviewAnnotations.some(
-                              (annotation) => annotation.id === image.id,
-                            ),
-                        )
-                        .map((image) => {
+                      {!isComposerResting &&
+                        standaloneComposerImages.map((image) => {
                           const upload = supportsAttachmentUploads
                             ? uploadsByImageId[image.id]
                             : undefined;
                           return (
                             <div
                               key={image.id}
+                              data-chat-composer-expanded-image="true"
                               className="relative h-16 w-16 overflow-hidden rounded-lg border border-border/80 bg-background"
                             >
                               {image.previewUrl ? (
@@ -5313,7 +5305,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     </div>
                   )}
 
-                <div className="relative">
+                <div
+                  className={cn(
+                    "relative",
+                    isComposerResting && "flex min-w-0 items-center gap-1",
+                    isComposerResting && (showComposerAttachAction ? "pr-20" : "pr-12"),
+                  )}
+                >
                   <ComposerPromptEditor
                     editorRef={composerEditorRef}
                     value={
@@ -5330,13 +5328,24 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                         : []
                     }
                     skills={selectedProviderSkills}
+                    containerClassName={cn(isComposerResting && "min-w-0 flex-1")}
                     className={cn(
                       compact && "min-h-7! max-h-24!",
                       showMobilePendingAnswerActions && "max-sm:pb-11",
+                      isComposerResting &&
+                        "max-h-8 min-h-8 overflow-hidden whitespace-nowrap! leading-8",
+                    )}
+                    placeholderClassName={cn(
+                      isComposerResting &&
+                        "flex items-center overflow-hidden whitespace-nowrap leading-8",
                     )}
                     onRemoveTerminalContext={removeComposerTerminalContextFromDraft}
                     onChange={onPromptChange}
+                    onVisibleSelectionChange={expandComposerForEditorChange}
                     onCommandKeyDown={onComposerCommandKey}
+                    onPageScrollKeyDown={onPageScrollKeyDown}
+                    onPageScrollKeyUp={onPageScrollKeyUp}
+                    onPageScrollRelease={onPageScrollRelease}
                     onPaste={onComposerPaste}
                     placeholder={
                       isComposerApprovalState
@@ -5356,6 +5365,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     }
                     disabled={isConnecting || isComposerApprovalState || projectSelectionRequired}
                   />
+                  {isComposerResting ? collapsedComposerImagePreviews : null}
                   {showMobilePendingAnswerActions ? (
                     <div
                       data-chat-composer-mobile-pending-actions="true"
@@ -5395,99 +5405,39 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
               {isComposerCollapsedMobile || isComposerApprovalState ? null : (
                 <div
                   data-chat-composer-footer="true"
-                  data-chat-composer-footer-compact={footerUsesCompactControls ? "true" : "false"}
+                  data-chat-composer-footer-compact={composerControlsCompact ? "true" : "false"}
                   className={cn(
                     "flex min-w-0 flex-nowrap items-center justify-between gap-2 overflow-visible",
                     compact ? "px-2 pb-1.5" : "px-3 pb-3 sm:px-4 sm:pb-4",
                     pendingUserInputs.length > 0 && (compact ? "pt-1" : "pt-2"),
-                    footerUsesCompactControls ? "gap-1.5" : "gap-2 sm:gap-0",
+                    composerControlsCompact ? "gap-1.5" : "gap-2 sm:gap-0",
                     showMobilePendingAnswerActions && "hidden sm:flex",
+                    isComposerResting &&
+                      "absolute bottom-px right-px z-10 h-12 w-auto gap-0 py-0 sm:gap-0 sm:py-0",
                   )}
                 >
-                  <div className="-m-1 -ms-3.5 flex min-w-0 flex-1 items-center gap-1 overflow-x-auto p-1 ps-3.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-                    {noProviderAvailable ? (
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="ghost"
-                        disabled
-                        data-chat-provider-unavailable="true"
-                        className="shrink-0 gap-2 px-2 text-secondary-label sm:px-3"
-                      >
-                        <CircleAlertIcon className="size-4" />
-                        No provider available
-                      </Button>
-                    ) : (
-                      <ProviderModelPicker
-                        compact={footerUsesCompactControls}
-                        activeInstanceId={selectedInstanceId}
-                        model={selectedModelForPickerWithCustomFallback}
-                        lockedProvider={lockedProvider}
-                        lockedContinuationGroupKey={lockedContinuationGroupKey}
-                        instanceEntries={providerInstanceEntries}
-                        keybindings={keybindings}
-                        modelOptionsByInstance={modelOptionsByInstance}
-                        triggerClassName="-ms-2.5"
-                        terminalOpen={terminalOpen}
-                        open={isComposerModelPickerOpen}
-                        {...(composerProviderState.modelPickerIconClassName
-                          ? {
-                              activeProviderIconClassName:
-                                composerProviderState.modelPickerIconClassName,
-                            }
-                          : {})}
-                        onOpenChange={(open) => {
-                          setIsComposerModelPickerOpen(open);
-                        }}
-                        getModelDisabledReason={getModelDisabledReason}
-                        onInstanceModelChange={onProviderModelSelect}
-                      />
+                  <div
+                    ref={composerFooterControlsRef}
+                    data-chat-composer-controls="left"
+                    data-chat-composer-footer-controls="true"
+                    className={cn(
+                      "-m-1 -ms-3.5 flex min-w-0 flex-1 items-center gap-1 overflow-x-auto p-1 ps-3.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden",
+                      isComposerResting && "hidden",
                     )}
-
-                    {footerUsesCompactControls ? (
-                      <CompactComposerControlsMenu
-                        interactionMode={interactionMode}
-                        runtimeMode={runtimeMode}
-                        showInteractionModeToggle={
-                          composerProviderControls.showInteractionModeToggle
-                        }
-                        traitsMenuContent={providerTraitsMenuContent}
-                        onToggleInteractionMode={toggleInteractionMode}
-                        onRuntimeModeChange={handleRuntimeModeChange}
-                      />
-                    ) : (
-                      <>
-                        {providerTraitsPicker ? (
-                          <>
-                            <ComposerControlSeparator
-                              size="sm"
-                              className="mx-0.5 hidden h-4 sm:block"
-                            />
-                            {providerTraitsPicker}
-                          </>
-                        ) : null}
-                        <ComposerFooterModeControls
-                          showInteractionModeToggle={
-                            composerProviderControls.showInteractionModeToggle
-                          }
-                          interactionMode={interactionMode}
-                          runtimeMode={runtimeMode}
-                          onToggleInteractionMode={toggleInteractionMode}
-                          onRuntimeModeChange={handleRuntimeModeChange}
-                        />
-                      </>
-                    )}
+                  >
+                    {composerControlsInStrip ? null : composerControls}
                   </div>
 
                   {/* Right side: send / stop button */}
                   <div
                     data-chat-composer-actions="right"
+                    data-chat-composer-transition-actions="true"
                     data-chat-composer-primary-actions-compact={
-                      primaryActionsUseCompactControls ? "true" : "false"
+                      isComposerResting || primaryActionsUseCompactControls ? "true" : "false"
                     }
                     className="flex shrink-0 flex-nowrap items-center justify-end gap-2"
                   >
-                    {fileStagingLimit !== null && pendingUserInputs.length === 0 ? (
+                    {showComposerAttachAction ? (
                       <>
                         <input
                           ref={attachmentInputRef}
@@ -5521,8 +5471,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       </>
                     ) : null}
                     <ComposerFooterPrimaryActions
-                      compact={primaryActionsUseCompactControls}
-                      activeContextWindow={activeContextWindow}
+                      compact={isComposerResting || primaryActionsUseCompactControls}
+                      activeContextWindow={
+                        settings.contextWindowMeterEnabled ? activeContextWindow : null
+                      }
                       activeThreadModelDisplayName={activeThreadModelDisplayName}
                       pendingAction={pendingPrimaryAction}
                       isRunning={phase === "running"}
@@ -5540,9 +5492,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       }
                       isPreparingWorktree={isPreparingWorktree}
                       hasSendableContent={composerSendState.hasSendableContent}
-                      preserveComposerFocusOnPointerDown={isMobileViewport}
+                      preserveComposerFocusOnPointerDown={isMobileViewport || isComposerResting}
                       showSendWhileRunning={isMobileViewport}
-                      showSecondaryStatus={!compact}
+                      showSecondaryStatus={!compact && !isComposerResting}
                       onPreviousPendingQuestion={onPreviousActivePendingUserInputQuestion}
                       onInterrupt={handleInterruptPrimaryAction}
                       onImplementPlanInNewThread={handleImplementPlanInNewThreadPrimaryAction}

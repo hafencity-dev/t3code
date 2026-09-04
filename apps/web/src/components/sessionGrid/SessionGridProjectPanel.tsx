@@ -165,6 +165,7 @@ const SortableGridProject = memo(function SortableGridProject(props: SortableGri
             className="size-4"
             cwd={project.workspaceRoot}
             environmentId={project.environmentId}
+            projectIcon={project.projectIcon}
             projectName={project.displayName}
           />
           <span className="min-w-0 flex-1">
@@ -442,7 +443,7 @@ export function SessionGridProjectPanel() {
                         : []),
                     ]
                   : [`This removes ${members.length} grouped project entries.`]),
-                "This permanently clears conversation history for those threads.",
+                "This permanently clears conversation history for those threads and any archived threads.",
                 "Project files on disk are not removed.",
                 "This action cannot be undone.",
               ].join("\n")
@@ -456,7 +457,9 @@ export function SessionGridProjectPanel() {
                         : []),
                     ]
                   : [`This removes ${members.length} grouped project entries.`]),
+                "This permanently clears all archived conversation history for this project.",
                 "Project files on disk are not removed.",
+                "This action cannot be undone.",
               ].join("\n"),
         ),
       );
@@ -464,17 +467,13 @@ export function SessionGridProjectPanel() {
 
       const draftStore = useComposerDraftStore.getState();
       for (const member of members) {
-        const memberThreads = projectThreads.filter(
-          (thread) =>
-            thread.environmentId === member.environmentId && thread.projectId === member.id,
-        );
         const projectRef = scopeProjectRef(member.environmentId, member.id);
         const projectDraft = draftStore.getDraftThreadByProjectRef(projectRef);
         const result = await deleteProject({
           environmentId: member.environmentId,
           input: {
             projectId: member.id,
-            ...(memberThreads.length > 0 ? { force: true } : {}),
+            force: true,
           },
         });
         if (result._tag === "Failure") {

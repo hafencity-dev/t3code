@@ -28,6 +28,8 @@ export function shouldUseRestingComposerLayout(input: {
   isMobileViewport: boolean;
   isFocused: boolean;
   hasExpandedChrome: boolean;
+  /** fork: project session grid — compact panes own a distinct low-profile layout. */
+  isCompact: boolean;
 }): boolean {
   // Passive draft content is deliberately absent here. Resting only clamps
   // the prompt row and overlays its actions; non-image attachment and context
@@ -38,6 +40,7 @@ export function shouldUseRestingComposerLayout(input: {
   // desktop width, and where the strip is missing or too narrow the controls
   // simply return when the composer is focused.
   return (
+    !input.isCompact &&
     input.isExistingThread &&
     !input.isMobileViewport &&
     !input.isFocused &&
