@@ -23,10 +23,15 @@ describe("pinned Claude Codex runtime", () => {
     "registers Astra for OAuth and preserves effort and live fast mode on the real Codex wire",
     async () => {
       const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-codex-runtime-"));
+      let reply: "text" | "tool" | "truncated" | "empty-once" = "text";
       const received: Array<{
         model: string;
         reasoning: { effort: string };
         service_tier?: string;
+        max_output_tokens?: number;
+        max_tokens?: number;
+        tools?: Array<{ name: string }>;
+        input?: Array<{ type: string; call_id?: string; output?: string }>;
       }> = [];
       const endpoint = NodeHttp.createServer((request, response) => {
         const chunks: Buffer[] = [];
@@ -34,6 +39,66 @@ describe("pinned Claude Codex runtime", () => {
         request.on("end", () => {
           received.push(JSON.parse(Buffer.concat(chunks).toString("utf8")));
           response.setHeader("content-type", "text/event-stream");
+          if (reply === "empty-once") {
+            reply = "text";
+            response.end(
+              `data: ${JSON.stringify({
+                type: "response.incomplete",
+                response: {
+                  id: "resp_empty",
+                  status: "incomplete",
+                  output: [],
+                  incomplete_details: { reason: "max_output_tokens" },
+                  usage: { input_tokens: 1, output_tokens: 0, total_tokens: 1 },
+                },
+              })}\n\n`,
+            );
+            return;
+          }
+          if (reply === "tool") {
+            const item = {
+              type: "function_call",
+              id: "fc_fixture",
+              call_id: "call_fixture",
+              name: received.at(-1)?.tools?.[0]?.name,
+              arguments: '{"path":"README.md"}',
+              status: "completed",
+            };
+            const result = {
+              id: "resp_tool",
+              model: "gpt-6-astra",
+              output: [item],
+              status: "completed",
+              usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+            };
+            const events = [
+              {
+                type: "response.created",
+                response: { ...result, output: [], status: "in_progress" },
+              },
+              {
+                type: "response.output_item.added",
+                output_index: 0,
+                item: { ...item, arguments: "", status: "in_progress" },
+              },
+              {
+                type: "response.function_call_arguments.delta",
+                output_index: 0,
+                item_id: item.id,
+                delta: item.arguments,
+              },
+              {
+                type: "response.function_call_arguments.done",
+                output_index: 0,
+                item_id: item.id,
+                arguments: item.arguments,
+              },
+              { type: "response.output_item.done", output_index: 0, item },
+              { type: "response.completed", response: result },
+            ];
+            response.end(events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(""));
+            return;
+          }
           const message = {
             id: "msg_test",
             type: "message",
@@ -81,7 +146,16 @@ describe("pinned Claude Codex runtime", () => {
               text: "OK",
             },
             { type: "response.output_item.done", output_index: 0, item: message },
-            { type: "response.completed", response: result },
+            reply === "truncated"
+              ? {
+                  type: "response.incomplete",
+                  response: {
+                    ...result,
+                    status: "incomplete",
+                    incomplete_details: { reason: "max_output_tokens" },
+                  },
+                }
+              : { type: "response.completed", response: result },
           ];
           response.end(events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(""));
         });
@@ -182,6 +256,99 @@ describe("pinned Claude Codex runtime", () => {
           }
         }
         expect(received).toHaveLength(24);
+        for (const request of received) {
+          // Codex subscription translation deliberately does not expose an output cap.
+          expect(request).not.toHaveProperty("max_tokens");
+          expect(request).not.toHaveProperty("max_output_tokens");
+        }
+        const post = (payload: Record<string, unknown>, path = "/v1/messages") =>
+          fetch(`${routing.environment.ANTHROPIC_BASE_URL}${path}`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              model: "gpt-6-astra(high)",
+              max_tokens: 1024,
+              messages: [{ role: "user", content: "Read README.md" }],
+              ...payload,
+            }),
+          });
+        const count = await post({}, "/v1/messages/count_tokens");
+        expect(count.status, await count.clone().text()).toBe(200);
+        expect(((await count.json()) as { input_tokens: number }).input_tokens).toBeGreaterThan(0);
+        expect(received).toHaveLength(24); // Token counting is local to the runtime.
+        for (const stream of [false, true]) {
+          reply = "tool";
+          const tools = [
+            {
+              name: "mcp__repo.read",
+              description: "Read a file",
+              input_schema: {
+                type: "object",
+                properties: { path: { type: "string" } },
+                required: ["path"],
+              },
+            },
+          ];
+          const toolResponse = await post({ stream, tools });
+          const toolBody = await toolResponse.text();
+          expect(toolResponse.status, toolBody).toBe(200);
+          expect(toolBody).toContain('"name":"mcp__repo.read"');
+          expect(toolBody).toContain('"type":"tool_use"');
+          expect(toolBody).toContain('"stop_reason":"tool_use"');
+          reply = "text";
+          const followup = await post({
+            stream,
+            tools,
+            messages: [
+              { role: "user", content: "Read README.md" },
+              {
+                role: "assistant",
+                content: [
+                  {
+                    type: "tool_use",
+                    id: "call_fixture",
+                    name: "mcp__repo.read",
+                    input: { path: "README.md" },
+                  },
+                ],
+              },
+              {
+                role: "user",
+                content: [
+                  { type: "tool_result", tool_use_id: "call_fixture", content: "Hello 世界" },
+                ],
+              },
+            ],
+          });
+          expect(followup.status, await followup.clone().text()).toBe(200);
+          await followup.text();
+          expect(received.at(-1)?.input).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: "function_call_output",
+                call_id: "call_fixture",
+                output: "Hello 世界",
+              }),
+            ]),
+          );
+          reply = "truncated";
+          const truncated = await post({ stream });
+          expect(await truncated.text()).toContain('"stop_reason":"max_tokens"');
+        }
+        reply = "empty-once";
+        const retried = await post({ stream: true });
+        const retriedBody = await retried.text();
+        // A retryable HTTP error must reach the SDK, never an empty successful turn.
+        expect(retried.status, retriedBody).toBe(502);
+        expect(JSON.parse(retriedBody)).toMatchObject({
+          type: "error",
+          error: { type: "api_error" },
+        });
+        const nextTurn = await post({ stream: true });
+        const nextBody = await nextTurn.text();
+        expect(nextTurn.status, nextBody).toBe(200);
+        expect(nextBody).toContain('"text":"OK"');
+        expect(nextBody).toContain('"type":"message_stop"');
       } finally {
         bridge.dispose();
         endpoint.closeAllConnections();

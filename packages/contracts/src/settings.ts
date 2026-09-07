@@ -566,6 +566,9 @@ export const DEFAULT_CLAUDE_CODEX_MODEL_PREFERENCES: ClaudeCodexModelPreferences
 /** Per-Claude-instance routing. Omitted from a Claude config means disabled,
  * preserving the behavior of every pre-feature settings file. */
 export const ClaudeCodexRoutingSettings = Schema.Struct({
+  requestTimeoutSeconds: Schema.optionalKey(
+    Schema.Int.check(Schema.isBetween({ minimum: 60, maximum: 7200 })),
+  ),
   enabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   model: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
   modelPreferences: ClaudeCodexModelPreferences.pipe(

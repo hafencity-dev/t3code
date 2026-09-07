@@ -365,6 +365,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     to: "/settings/model-routing",
     targetId: "model-routing",
   },
+  {
+    id: "model-routing-timeout",
+    title: "Routing request timeout",
+    to: "/settings/model-routing",
+    searchTerms: ["gpt codex bridge timeout tokens limits compact duration"],
+  },
   // fork: f5 GPT fast
   {
     id: "model-routing-gpt-fast",

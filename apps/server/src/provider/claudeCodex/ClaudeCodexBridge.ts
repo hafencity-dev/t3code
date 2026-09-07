@@ -60,28 +60,28 @@ const FALLBACK_MODELS = [
 
 const ARTIFACTS: Readonly<Record<string, { readonly file: string; readonly sha256: string }>> = {
   "darwin-arm64": {
-    file: "CLIProxyAPI_7.2.152_darwin_aarch64.tar.gz",
-    sha256: "37c3f48b2cd78f3fa1a26e4e0966617d00efad4bbea16599c6a00640b49f8af1",
+    file: "CLIProxyAPI_7.2.154_darwin_aarch64.tar.gz",
+    sha256: "90645a2d71bf7247e06b517757b498d0d0306afa9c48173aae7e2a230df2d546",
   },
   "darwin-x64": {
-    file: "CLIProxyAPI_7.2.152_darwin_amd64.tar.gz",
-    sha256: "cb8545345a4986937f6321c687c8bf36e4f2f483664cab74074dd176fa6c01d2",
+    file: "CLIProxyAPI_7.2.154_darwin_amd64.tar.gz",
+    sha256: "62171996db7a9a2aa4ff00c68ba8255d7721790e34c6260f915631a9d44576e2",
   },
   "linux-arm64": {
-    file: "CLIProxyAPI_7.2.152_linux_aarch64.tar.gz",
-    sha256: "4ac6b5859cf001300b3aa063f49466d4fee80255f2cf14c6eab549874d88f57b",
+    file: "CLIProxyAPI_7.2.154_linux_aarch64.tar.gz",
+    sha256: "3a0cd18d64e3b9990ca72136dbb1da97eedddade00ee6768e8b49fab1de6925e",
   },
   "linux-x64": {
-    file: "CLIProxyAPI_7.2.152_linux_amd64.tar.gz",
-    sha256: "0168181ea302c00d1ccae636eba70072d1ab88b271669ede796d3ed65d54bd8d",
+    file: "CLIProxyAPI_7.2.154_linux_amd64.tar.gz",
+    sha256: "2a2256ceff048d5fa813aa54e8daa43e870b40e698d5cd21efad46e25aa5a1f9",
   },
   "win32-arm64": {
-    file: "CLIProxyAPI_7.2.152_windows_aarch64.zip",
-    sha256: "8a378ad0d562fba0b0ce4ca61c8e871c4166d019b85ffd2df7b5d0f6e3522bdb",
+    file: "CLIProxyAPI_7.2.154_windows_aarch64.zip",
+    sha256: "4d5166b256f13e814d087c98a8526ff42a5f83f63411025a679b31495a54cd19",
   },
   "win32-x64": {
-    file: "CLIProxyAPI_7.2.152_windows_amd64.zip",
-    sha256: "7b01cc85bc58881d7c4640066efdf474875b7f5b5d57367e426c6bc4fcf764ce",
+    file: "CLIProxyAPI_7.2.154_windows_amd64.zip",
+    sha256: "e50bd9362edb89d0816329f17372f00f1a68b8f72991cca41d39b4528c234563",
   },
 };
 
@@ -290,7 +290,7 @@ export function parseClaudeCodexModelsPayload(value: unknown): Array<ClaudeCodex
 }
 
 function stopChild(child: ChildProcess | null, force = false): void {
-  if (!child || child.exitCode !== null) return;
+  if (!child || child.exitCode !== null || child.signalCode !== null) return;
   try {
     child.kill(force ? "SIGKILL" : "SIGTERM");
   } catch {
@@ -298,7 +298,7 @@ function stopChild(child: ChildProcess | null, force = false): void {
   }
   if (!force) {
     setTimeout(() => {
-      if (child.exitCode === null) {
+      if (child.exitCode === null && child.signalCode === null) {
         try {
           child.kill("SIGKILL");
         } catch {
@@ -328,10 +328,13 @@ export class ClaudeCodexBridge {
   #loginCancellationGeneration = 0;
   #installPromise: Promise<ClaudeCodexBridgeStatus> | null = null;
   #startPromise: Promise<void> | null = null;
+  #startupAbort: AbortController | null = null;
+  #ready = false;
   #port = 0;
   #apiKey = "";
   #lastError: string | undefined;
   #modelCatalog: CachedModelCatalog | null = null;
+  #verifiedModels = new Set<string>();
 
   constructor(
     stateDirectory: string,
@@ -378,7 +381,7 @@ export class ClaudeCodexBridge {
       supported: artifactForHost(this.#platform, this.#architecture) !== undefined,
       installed: fs.existsSync(this.#binaryPath()),
       authenticated: directoryHasCodexBridgeCredential(this.#authDir),
-      running: this.#proxy !== null && this.#proxy.exitCode === null && this.#port > 0,
+      running: this.#ready,
       version: CLAUDE_CODEX_BRIDGE_VERSION,
       ...(this.#lastError ? { error: this.#lastError } : {}),
       ...(account ? { account } : {}),
@@ -402,7 +405,7 @@ export class ClaudeCodexBridge {
     }
     if (fs.existsSync(this.#binaryPath())) return this.status();
     this.#ensurePrivateDirectories();
-    const archive = path.join(this.#rootDir, `${artifact.file}.partial`);
+    const archive = path.join(this.#rootDir, `${randomBytes(8).toString("hex")}-${artifact.file}`);
     const extractDirectory = path.join(this.#rootDir, `extract-${randomBytes(8).toString("hex")}`);
     try {
       await download(`${RELEASE_BASE}/${artifact.file}`, archive);
@@ -442,12 +445,13 @@ export class ClaudeCodexBridge {
       if (!fs.existsSync(extractedBinary)) {
         throw new Error("Downloaded runtime did not contain cli-proxy-api.");
       }
-      fs.copyFileSync(extractedBinary, this.#binaryPath());
-      if (this.#platform !== "win32") fs.chmodSync(this.#binaryPath(), 0o700);
+      if (this.#platform !== "win32") fs.chmodSync(extractedBinary, 0o700);
       const license = path.join(extractDirectory, "LICENSE");
       if (fs.existsSync(license)) {
         fs.copyFileSync(license, path.join(this.#runtimeDir, "LICENSE"));
       }
+      // Publish only a complete executable; interrupted installs remain retryable.
+      fs.renameSync(extractedBinary, this.#binaryPath());
       this.#lastError = undefined;
     } catch (cause) {
       this.#lastError = cause instanceof Error ? cause.message : String(cause);
@@ -489,6 +493,10 @@ export class ClaudeCodexBridge {
       'proxy-url: ""',
       "request-retry: 3",
       "max-retry-credentials: 1",
+      "max-retry-interval: 30",
+      "streaming:",
+      "  keepalive-seconds: 15",
+      "  bootstrap-retries: 2",
       "disable-cooling: false",
       "save-cooldown-status: false",
       "disable-claude-cloak-mode: true",
@@ -593,7 +601,7 @@ export class ClaudeCodexBridge {
         abortSignal?.removeEventListener("abort", abort);
         if (this.#loginProcess === processHandle) this.#loginProcess = null;
         try {
-          if (terminationSignal) {
+          if (terminationSignal || cancelled()) {
             emit({ _tag: "failed", message: "Codex bridge sign-in was cancelled." });
             return;
           }
@@ -613,6 +621,9 @@ export class ClaudeCodexBridge {
             `Codex sign-in exited with code ${code ?? "unknown"}.`;
           this.#lastError = message;
           emit({ _tag: "failed", message });
+        } catch (cause) {
+          this.#lastError = cause instanceof Error ? cause.message : String(cause);
+          emit({ _tag: "failed", message: this.#lastError });
         } finally {
           fs.rmSync(this.#stagingAuthDir, { recursive: true, force: true });
           fs.rmSync(this.#loginConfigPath, { force: true });
@@ -651,15 +662,47 @@ export class ClaudeCodexBridge {
     child: ChildProcess,
     port: number,
     apiKey: string,
+    signal: AbortSignal,
   ): Promise<Array<ClaudeCodexBridgeModel>> {
     return new Promise((resolve, reject) => {
-      const deadline = Date.now() + 15_000;
+      let request: NodeHttp.ClientRequest | undefined;
+      let retryTimer: ReturnType<typeof setTimeout> | undefined;
+      let settled = false;
+      const finish = (error?: Error, models?: Array<ClaudeCodexBridgeModel>) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(deadline);
+        clearTimeout(retryTimer);
+        signal.removeEventListener("abort", aborted);
+        child.removeListener("error", failed);
+        child.removeListener("exit", exited);
+        request?.destroy();
+        if (error) reject(error);
+        else resolve(models!);
+      };
+      const failed = (error: Error) => finish(error);
+      const exited = () =>
+        finish(new Error(this.#lastError || "Codex bridge exited during startup."));
+      const aborted = () => finish(new Error("Codex bridge startup was cancelled."));
+      const deadline = setTimeout(
+        () => finish(new Error("Codex bridge health check timed out.")),
+        15_000,
+      );
+      child.once("error", failed);
+      child.once("exit", exited);
+      signal.addEventListener("abort", aborted, { once: true });
       const probe = () => {
-        if (child.exitCode !== null) {
-          reject(new Error(`Codex bridge exited during startup (${child.exitCode}).`));
-          return;
-        }
-        const request = http.request(
+        if (settled) return;
+        if (signal.aborted) return aborted();
+        if (child.exitCode !== null || child.signalCode !== null) return exited();
+        let retried = false;
+        const retry = () => {
+          if (settled || retried) return;
+          retried = true;
+          request?.destroy();
+          retryTimer = setTimeout(probe, 125);
+        };
+        request = http.request(
           {
             hostname: "127.0.0.1",
             port,
@@ -686,12 +729,13 @@ export class ClaudeCodexBridge {
             });
             response.once("error", retry);
             response.once("end", () => {
+              if (settled || retried) return;
               try {
                 const models = parseClaudeCodexModelsPayload(
                   JSON.parse(Buffer.concat(chunks).toString("utf8")),
                 );
-                // The HTTP listener starts before OAuth model registration finishes.
-                if (models.length > 0) resolve(models);
+                // The listener starts before OAuth model registration finishes.
+                if (models.length > 0) finish(undefined, models);
                 else retry();
               } catch {
                 retry();
@@ -699,14 +743,6 @@ export class ClaudeCodexBridge {
             });
           },
         );
-        let retried = false;
-        const retry = () => {
-          if (retried) return;
-          retried = true;
-          request.destroy();
-          if (Date.now() >= deadline) reject(new Error("Codex bridge health check timed out."));
-          else setTimeout(probe, 125).unref();
-        };
         request.once("timeout", retry);
         request.once("error", retry);
         request.end();
@@ -717,16 +753,22 @@ export class ClaudeCodexBridge {
 
   async ensureReady(): Promise<void> {
     if (this.#startPromise) return this.#startPromise;
-    if (this.#proxy && this.#proxy.exitCode === null && this.#port > 0 && this.#apiKey) return;
+    if (this.#ready) return;
+    const startupAbort = new AbortController();
+    this.#startupAbort = startupAbort;
+    const checkCancelled = () => startupAbort.signal.throwIfAborted();
     this.#startPromise = (async () => {
       const installed = await this.install();
+      checkCancelled();
       if (!installed.installed) {
         throw new Error(installed.error ?? "Codex bridge runtime is not installed.");
       }
       if (!directoryHasCodexBridgeCredential(this.#authDir)) {
         throw new Error("Codex is not connected for Claude model routing.");
       }
-      this.#port = await freeLoopbackPort();
+      const port = await freeLoopbackPort();
+      checkCancelled();
+      this.#port = port;
       this.#apiKey = randomBytes(32).toString("hex");
       this.#writeConfig(this.#configPath, this.#port, this.#apiKey, this.#authDir);
       const child = spawn(this.#binaryPath(), ["-local-model", "-config", this.#configPath], {
@@ -744,22 +786,35 @@ export class ClaudeCodexBridge {
       child.stderr?.on("data", (chunk: Buffer | string) => {
         stderr = `${stderr}${chunk.toString()}`.slice(-16_384);
       });
-      child.once("exit", (code) => {
+      // Spawn errors must never escape as an unhandled EventEmitter error.
+      child.on("error", (error) => {
+        if (this.#proxy === child) this.#lastError = error.message;
+      });
+      child.once("exit", (code, signal) => {
         if (this.#proxy !== child) return;
+        this.#ready = false;
         this.#proxy = null;
         this.#port = 0;
         this.#apiKey = "";
-        if (code && code !== 0) {
-          this.#lastError = stderr.trim() || `Codex bridge exited with code ${code}.`;
+        if (signal || code !== 0) {
+          this.#lastError = stderr.trim() || `Codex bridge exited (${signal ?? code}).`;
         }
       });
       try {
-        const models = await this.#waitForHealth(child, this.#port, this.#apiKey);
+        const models = await this.#waitForHealth(
+          child,
+          this.#port,
+          this.#apiKey,
+          startupAbort.signal,
+        );
+        checkCancelled();
         this.#modelCatalog = { models, fetchedAt: Date.now() };
         this.#persistModels(this.#modelCatalog);
+        this.#ready = true;
         this.#lastError = undefined;
       } catch (cause) {
         stopChild(child);
+        this.#ready = false;
         this.#proxy = null;
         this.#port = 0;
         this.#apiKey = "";
@@ -772,6 +827,7 @@ export class ClaudeCodexBridge {
       })
       .finally(() => {
         this.#startPromise = null;
+        if (this.#startupAbort === startupAbort) this.#startupAbort = null;
       });
     return this.#startPromise;
   }
@@ -849,6 +905,7 @@ export class ClaudeCodexBridge {
   }
 
   #persistModels(catalog: CachedModelCatalog): void {
+    for (const model of catalog.models) this.#verifiedModels.add(model.id);
     this.#ensurePrivateDirectories();
     fs.writeFileSync(
       this.#modelCachePath,
@@ -920,6 +977,7 @@ export class ClaudeCodexBridge {
   async hybridEnvironment(
     requestedModel?: string,
     anthropicBaseUrl?: string,
+    requestTimeoutSeconds = 1800,
   ): Promise<{
     readonly environment: NodeJS.ProcessEnv;
     readonly model: string;
@@ -944,16 +1002,18 @@ export class ClaudeCodexBridge {
       }
       return candidate;
     })();
-    const routerKey = anthropicUpstream.href;
+    const routerKey = `${anthropicUpstream.href}|${requestTimeoutSeconds}`;
     let router = this.#routers.get(routerKey);
     if (!router) {
       router = new ClaudeCodexHybridRouter({
-        codexUpstream: () =>
-          this.#proxy && this.#proxy.exitCode === null && this.#port > 0 && this.#apiKey
-            ? { port: this.#port, token: this.#apiKey }
-            : null,
-        onCodexUnavailable: () => void this.ensureReady().catch(() => undefined),
-        isCodexModel: (model) => this.#isCodexModel(model),
+        codexUpstream: async () => {
+          await this.ensureReady();
+          return this.#ready ? { port: this.#port, token: this.#apiKey } : null;
+        },
+        requestTimeoutMs: requestTimeoutSeconds * 1000,
+        // Remember verified routes across account switches. The current account
+        // is still checked by the runtime; an old router must be able to restart it.
+        isCodexModel: (model) => this.#verifiedModels.has(model) || this.#isCodexModel(model),
         fastModeEnabled: () => this.#fastModeEnabled, // fork: f5 GPT fast
         anthropicUpstream,
       });
@@ -980,6 +1040,8 @@ export class ClaudeCodexBridge {
   }
 
   #stopProxy(force = false): void {
+    this.#startupAbort?.abort();
+    this.#ready = false;
     const proxy = this.#proxy;
     this.#proxy = null;
     this.#port = 0;

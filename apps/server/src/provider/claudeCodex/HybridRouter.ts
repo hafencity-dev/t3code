@@ -1,4 +1,4 @@
-// @effect-diagnostics nodeBuiltinImport:off
+// @effect-diagnostics nodeBuiltinImport:off globalTimers:off
 /**
  * Loopback-only Anthropic/Codex request router (fork feature f5).
  *
@@ -34,8 +34,12 @@ const HOP_BY_HOP_HEADERS = new Set([
 ]);
 
 export interface ClaudeCodexHybridRouterDeps {
-  readonly codexUpstream: () => { readonly port: number; readonly token: string } | null;
-  readonly onCodexUnavailable?: (() => void) | undefined;
+  readonly codexUpstream: () =>
+    | { readonly port: number; readonly token: string }
+    | null
+    | Promise<{ readonly port: number; readonly token: string } | null>;
+  /** Bound even a stream that sends keep-alives forever. */
+  readonly requestTimeoutMs?: number | undefined;
   readonly isCodexModel: (modelId: string) => boolean;
   readonly fastModeEnabled?: (() => boolean) | undefined; // fork: f5 GPT fast
   /** Ordinary Claude traffic keeps the instance's original API origin. */
@@ -82,7 +86,8 @@ function sendJsonError(
       response.destroy(error);
       return;
     }
-    const body = Buffer.from(JSON.stringify({ error: message }));
+    const type = status === 400 || status === 413 ? "invalid_request_error" : "api_error";
+    const body = Buffer.from(JSON.stringify({ type: "error", error: { type, message } }));
     response.writeHead(status, {
       "content-type": "application/json",
       "content-length": body.length,
@@ -117,6 +122,9 @@ export class ClaudeCodexHybridRouter {
       let listening = false;
       const server = http.createServer((request, response) => {
         response.on("error", () => undefined);
+        request.once("error", (error) =>
+          sendJsonError(response, 400, "Request body could not be read.", error),
+        );
         try {
           this.#handleRequest(request, response);
         } catch (cause) {
@@ -210,11 +218,14 @@ export class ClaudeCodexHybridRouter {
     const realPathname = parsed.pathname.slice(capabilityPath.length);
     const realPath = `${realPathname}${parsed.search}`;
     const isMessageRequest = request.method === "POST" && realPathname === "/v1/messages";
+    const isTokenCountRequest =
+      request.method === "POST" && realPathname === "/v1/messages/count_tokens";
+    const routesByModel = isMessageRequest || isTokenCountRequest;
     const hasJsonBody =
       request.method === "POST" &&
       /(?:^|[+/])json(?:;|$)/iu.test(String(request.headers["content-type"] ?? ""));
-    if (!isMessageRequest && !hasJsonBody) {
-      this.#forward(request, response, realPath, "anthropic");
+    if (!routesByModel && !hasJsonBody) {
+      void this.#forward(request, response, realPath, "anthropic");
       return;
     }
 
@@ -233,9 +244,6 @@ export class ClaudeCodexHybridRouter {
       }
       chunks.push(data);
     });
-    request.once("error", (error) => {
-      if (!rejected) sendJsonError(response, 400, "Request body could not be read.", error);
-    });
     request.once("end", () => {
       if (rejected || response.destroyed) return;
       const body = Buffer.concat(chunks, size);
@@ -246,50 +254,59 @@ export class ClaudeCodexHybridRouter {
         sendJsonError(response, 400, "Request body was not valid JSON.");
         return;
       }
-      const translated = isMessageRequest ? claudeCodexEffortPayload(payload) : payload;
-      const model =
-        translated &&
-        typeof translated === "object" &&
-        !Array.isArray(translated) &&
-        typeof (translated as { model?: unknown }).model === "string"
-          ? (translated as { model: string }).model
-          : undefined;
-      const upstream = isMessageRequest
-        ? classifyClaudeCodexUpstream(model, this.#deps.isCodexModel)
-        : "anthropic";
-      if (upstream === "reject") {
-        sendJsonError(response, 400, `Unsupported routed model: ${model?.trim() || "unknown"}.`);
-        return;
+      try {
+        const translated = routesByModel ? claudeCodexEffortPayload(payload) : payload;
+        const model =
+          translated &&
+          typeof translated === "object" &&
+          !Array.isArray(translated) &&
+          typeof (translated as { model?: unknown }).model === "string"
+            ? (translated as { model: string }).model
+            : undefined;
+        const upstream = routesByModel
+          ? classifyClaudeCodexUpstream(model, this.#deps.isCodexModel)
+          : "anthropic";
+        if (upstream === "reject") {
+          sendJsonError(response, 400, `Unsupported routed model: ${model?.trim() || "unknown"}.`);
+          return;
+        }
+        // fork: f5 apply the live global setting only after verifying the Codex route.
+        const finalPayload =
+          upstream === "codex" && isMessageRequest
+            ? claudeCodexFastModePayload(translated, this.#deps.fastModeEnabled?.() ?? false)
+            : translated;
+        void this.#forward(
+          request,
+          response,
+          realPath,
+          upstream,
+          finalPayload === payload ? body : Buffer.from(JSON.stringify(finalPayload)),
+        );
+      } catch (cause) {
+        sendJsonError(
+          response,
+          502,
+          "Claude/Codex routing failed.",
+          cause instanceof Error ? cause : undefined,
+        );
       }
-      // fork: f5 apply the live global setting only after verifying the Codex route.
-      const finalPayload =
-        upstream === "codex"
-          ? claudeCodexFastModePayload(translated, this.#deps.fastModeEnabled?.() ?? false)
-          : translated;
-      this.#forward(
-        request,
-        response,
-        realPath,
-        upstream,
-        finalPayload === payload ? body : Buffer.from(JSON.stringify(finalPayload)),
-      );
     });
   }
 
-  #forward(
+  async #forward(
     request: NodeHttp.IncomingMessage,
     response: NodeHttp.ServerResponse,
     path: string,
     upstream: "codex" | "anthropic",
     body?: Buffer,
-  ): void {
+  ): Promise<void> {
     try {
       const headers = headersWithoutHopByHop(request.headers);
       let target: URL;
       if (upstream === "codex") {
-        const codex = this.#deps.codexUpstream();
+        const codex = await this.#deps.codexUpstream();
+        if (response.destroyed) return;
         if (!codex) {
-          this.#deps.onCodexUnavailable?.();
           sendJsonError(response, 502, "Codex bridge is not available.");
           return;
         }
@@ -300,6 +317,7 @@ export class ClaudeCodexHybridRouter {
       } else {
         target = this.#deps.anthropicUpstream ?? ANTHROPIC_ORIGIN;
       }
+      if (response.destroyed) return;
       headers.host = target.host;
       if (body) {
         delete headers["transfer-encoding"];
@@ -340,9 +358,20 @@ export class ClaudeCodexHybridRouter {
           }
         },
       );
-      upstreamRequest.once("error", (error) =>
-        sendJsonError(response, 502, "Upstream is unavailable.", error),
-      );
+      const timeout = () => {
+        sendJsonError(response, 504, "Claude/Codex upstream timed out. Retry the request.");
+        upstreamRequest.destroy();
+      };
+      // Socket inactivity catches dead connections; the deadline also bounds
+      // streams that remain open indefinitely while emitting keep-alives.
+      upstreamRequest.setTimeout(5 * 60_000, timeout);
+      const deadline = setTimeout(timeout, this.#deps.requestTimeoutMs ?? 30 * 60_000);
+      deadline.unref();
+      response.once("close", () => clearTimeout(deadline));
+      upstreamRequest.once("error", (error) => {
+        clearTimeout(deadline);
+        sendJsonError(response, 502, "Upstream is unavailable.", error);
+      });
       request.once("aborted", () => upstreamRequest.destroy());
       response.once("close", () => {
         if (!response.writableEnded) upstreamRequest.destroy();

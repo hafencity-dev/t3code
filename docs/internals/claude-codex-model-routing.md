@@ -19,8 +19,17 @@ random local bearer token. Claude aliases and full Claude model IDs are sent to 
 instance's original Anthropic-compatible upstream. Unknown model IDs are rejected so the router
 cannot accidentally forward Anthropic credentials to an unintended destination.
 
-Each distinct original upstream gets its own router. This preserves custom `ANTHROPIC_BASE_URL`
-configurations when multiple Claude instances run concurrently.
+Routers are shared only when the original upstream and request deadline agree. This preserves custom
+`ANTHROPIC_BASE_URL` configurations and per-instance deadlines for concurrent Claude instances.
+Message and token-count requests use the same model routing. Remember previously verified model
+routes across account switches: clearing the account catalog must not prevent an existing router
+from reaching the supervisor to restart the runtime. The runtime still validates the current account.
+
+The Codex subscription translator does not forward Anthropic `max_tokens` as an output cap. Do not
+add an output-token control without verifying that it reaches and is supported by that upstream.
+The router bounds total request duration even when SSE keep-alives continue, and cancels upstream
+work on downstream disconnect. Retrying a response after output has started belongs to the SDK; the
+router must not replay a partially delivered tool call.
 
 When routing is enabled, the Claude provider snapshot includes the configured Codex model as a
 non-legacy model with `subProvider: "via Codex"`. This makes the route available in every client that

@@ -83,6 +83,19 @@ the next request, including already-running sessions, and does not affect Claude
 native Codex threads. Priority processing is subject to provider availability; each server keeps its
 own value.
 
+## Request Duration And Token Limits
+
+In **Settings → Model Routing**, choose **Request timeout** for the selected Claude instance.
+The default is 30 minutes per model request, including reasoning. Increase it for unusually long
+requests or reduce it to surface stalled requests sooner. Changes apply to new provider sessions.
+Disconnected clients cancel their upstream work; interrupted requests can be retried in the same chat.
+
+GPT output limits are managed by Codex. Claude's `max_tokens` value is not an adjustable GPT output
+cap through this bridge. For long conversations, use **Settings → Providers → Claude Code →
+Auto-compact after** to choose when history is compacted. This controls conversation context, not
+response length; stay within the context capacity of the models used by that instance. Token counts
+are estimates and do not guarantee that a request fits the provider's context window.
+
 ## Routing Prompt
 
 The injected routing text has three separate layers:
@@ -118,4 +131,6 @@ Codex model IDs go to the local bridge.
 
 If a new Claude session says the bridge is unavailable, return to **Settings → Model Routing** and
 check that the bridge account is connected. Disconnecting the bridge removes its isolated local
-credentials but does not sign out the normal Codex provider.
+credentials but does not sign out the normal Codex provider. Existing chats keep their routes when
+you reconnect the account. If the bridge process exits, the next GPT request starts it again before
+forwarding; ordinary Claude traffic remains available.

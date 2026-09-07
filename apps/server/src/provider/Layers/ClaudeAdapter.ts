@@ -4697,6 +4697,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
               claudeCodexBridge.hybridEnvironment(
                 claudeSettings.codexRouting?.model,
                 claudeEnvironment.ANTHROPIC_BASE_URL,
+                claudeSettings.codexRouting?.requestTimeoutSeconds, // fork: bounded bridge requests
               ),
             catch: (cause) =>
               new ProviderAdapterProcessError({

@@ -696,6 +696,36 @@ export function ModelRoutingSettingsPanel() {
                 </div>
               }
             />
+            <SettingsRow
+              {...searchableSetting("model-routing-timeout")}
+              title="Request timeout"
+              description="Maximum duration of a routed model request, including reasoning. Applies to new sessions."
+              control={
+                <Select
+                  value={String(routing.requestTimeoutSeconds ?? 1800)}
+                  onValueChange={(value) =>
+                    saveRouting({ ...routing, requestTimeoutSeconds: Number(value) })
+                  }
+                >
+                  <SelectTrigger className="w-40" aria-label="Routing request timeout">
+                    <SelectValue>
+                      {(routing.requestTimeoutSeconds ?? 1800) / 60} minutes
+                    </SelectValue>
+                  </SelectTrigger>
+                  <SelectPopup>
+                    {[300, 900, 1800, 3600, 7200].map((seconds) => (
+                      <SelectItem key={seconds} value={String(seconds)}>
+                        {seconds / 60} minutes
+                      </SelectItem>
+                    ))}
+                  </SelectPopup>
+                </Select>
+              }
+            />
+            <SettingsRow
+              title="Token limits"
+              description="GPT output limits are managed by Codex and cannot be changed here. Configure Auto-compact after in the Claude provider settings to control when conversation history is compacted."
+            />
           </>
         ) : (
           <SettingsRow

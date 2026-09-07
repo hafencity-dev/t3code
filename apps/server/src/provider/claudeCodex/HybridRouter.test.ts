@@ -1,6 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off globalFetch:off
 import * as NodeHttp from "node:http";
-import { describe, expect, it } from "@effect/vitest";
+import { describe, expect, it, vi } from "@effect/vitest";
 
 import { claudeCodexFastModePayload } from "./ClaudeCodexFastMode.ts";
 import {
@@ -140,8 +140,20 @@ it("applies live fast mode only to Codex messages and preserves other request by
       expect(received).toHaveLength(count);
     }
 
+    for (const model of ["gpt-6-astra", "gpt-6-astra(high)", "opus"]) {
+      expect(await post(JSON.stringify({ model }), "/v1/messages/count_tokens?beta=true")).toBe(
+        200,
+      );
+      expect(JSON.parse(received.at(-1)!.body).model).toBe(
+        model === "opus" ? model : "gpt-6-astra",
+      );
+      expect(received.at(-1)?.headers.authorization).toBe(
+        model === "opus" ? "Bearer claude-fixture" : "Bearer codex-fixture",
+      );
+    }
+    expect(await post('{ "model": "unknown" }', "/v1/messages/count_tokens")).toBe(400);
     const nonMessage = '{ "model": "gpt-6-astra", "speed": "fast" }\n';
-    expect(await post(nonMessage, "/v1/messages/count_tokens")).toBe(200);
+    expect(await post(nonMessage, "/v1/other")).toBe(200);
     expect(received.at(-1)?.body).toBe(nonMessage);
     expect(received.at(-1)?.headers.authorization).toBe("Bearer claude-fixture");
 
@@ -159,3 +171,146 @@ it("applies live fast mode only to Codex messages and preserves other request by
     await new Promise<void>((resolve) => endpoint.close(() => resolve()));
   }
 });
+
+// Real sockets and explicit request receipts keep failure tests deterministic.
+async function withEndpoint(
+  handle: NodeHttp.RequestListener,
+  run: (port: number) => Promise<void>,
+) {
+  const endpoint = NodeHttp.createServer(handle);
+  try {
+    await new Promise<void>((resolve) => endpoint.listen(0, "127.0.0.1", resolve));
+    const address = endpoint.address();
+    if (!address || typeof address === "string") throw new Error("Missing fixture port");
+    await run(address.port);
+  } finally {
+    endpoint.closeAllConnections();
+    await new Promise<void>((resolve) => endpoint.close(() => resolve()));
+  }
+}
+
+const messageRequest = () => ({
+  method: "POST",
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify({ model: "gpt-6-astra", messages: [] }),
+});
+
+it("waits for recovery before forwarding and survives rejected startup", async () => {
+  await withEndpoint(
+    (_req, res) => res.end("recovered"),
+    async (port) => {
+      const ready = Promise.withResolvers<void>();
+      const requested = Promise.withResolvers<void>();
+      let fail = true;
+      const router = new ClaudeCodexHybridRouter({
+        isCodexModel: isCodex,
+        codexUpstream: async () => {
+          if (fail) throw new Error("fixture startup failure");
+          requested.resolve();
+          await ready.promise;
+          return { port, token: "fixture" };
+        },
+      });
+      try {
+        const url = `${await router.start()}/v1/messages`;
+        const failed = await fetch(url, messageRequest());
+        expect(failed.status).toBe(502);
+        expect(await failed.json()).toMatchObject({ type: "error", error: { type: "api_error" } });
+        fail = false;
+        const response = fetch(url, messageRequest());
+        await requested.promise;
+        ready.resolve();
+        expect(await (await response).text()).toBe("recovered");
+      } finally {
+        ready.resolve();
+        router.stop();
+      }
+    },
+  );
+});
+
+it.each([false, true])(
+  "bounds stalled requests (headers sent: %s) and allows the next turn",
+  async (stream) => {
+    const received = Promise.withResolvers<void>();
+    const disconnected = Promise.withResolvers<void>();
+    let stall = true;
+    await withEndpoint(
+      (_req, res) => {
+        if (!stall) return res.end("next turn");
+        res.once("close", () => disconnected.resolve());
+        if (stream) {
+          res.writeHead(200, { "content-type": "text/event-stream" });
+          res.write(": keepalive\n\n");
+        }
+        received.resolve();
+      },
+      async (port) => {
+        const router = new ClaudeCodexHybridRouter({
+          isCodexModel: isCodex,
+          codexUpstream: () => ({ port, token: "fixture" }),
+          requestTimeoutMs: 1800_000,
+        });
+        try {
+          const url = `${await router.start()}/v1/messages`;
+          vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+          const response = fetch(url, messageRequest());
+          await received.promise;
+          // Read streaming headers before advancing the request deadline.
+          const streamingResponse = stream ? await response : undefined;
+          await vi.advanceTimersByTimeAsync(1800_000);
+          if (streamingResponse) {
+            await expect(streamingResponse.text()).rejects.toThrow();
+          } else {
+            expect((await response).status).toBe(504);
+            expect(await (await response).json()).toMatchObject({ type: "error" });
+          }
+          await disconnected.promise;
+          vi.useRealTimers();
+          stall = false;
+          expect(await (await fetch(url, messageRequest())).text()).toBe("next turn");
+        } finally {
+          vi.useRealTimers();
+          router.stop();
+        }
+      },
+    );
+  },
+);
+
+it.each(["/v1/messages", "/v1/models"])(
+  "cancels upstream work when the client disconnects from %s",
+  async (path) => {
+    const received = Promise.withResolvers<void>();
+    const disconnected = Promise.withResolvers<void>();
+    await withEndpoint(
+      (_req, res) => {
+        res.once("close", () => disconnected.resolve());
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        res.write(": ping\n\n");
+        received.resolve();
+      },
+      async (port) => {
+        const router = new ClaudeCodexHybridRouter({
+          isCodexModel: isCodex,
+          codexUpstream: () => ({ port, token: "fixture" }),
+          anthropicUpstream: new URL(`http://127.0.0.1:${port}`),
+        });
+        try {
+          const controller = new AbortController();
+          const response = fetch(`${await router.start()}${path}`, {
+            ...(path === "/v1/messages" ? messageRequest() : {}),
+            signal: controller.signal,
+          });
+          await received.promise;
+          const body = await response;
+          controller.abort();
+          await expect(body.text()).rejects.toThrow();
+          await disconnected.promise;
+        } finally {
+          router.stop();
+        }
+      },
+    );
+  },
+);

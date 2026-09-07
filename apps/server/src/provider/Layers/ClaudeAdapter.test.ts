@@ -481,6 +481,7 @@ describe("ClaudeAdapterLive", () => {
   // fork: f5 Claude Code → Codex routing
   it.effect("remaps the Haiku slot and prepends the managed routing prompt", () => {
     let receivedAnthropicBaseUrl: string | undefined;
+    let receivedRequestTimeout: number | undefined;
     const harness = makeHarness({
       claudeConfig: {
         codexRouting: {
@@ -490,11 +491,13 @@ describe("ClaudeAdapterLive", () => {
           promptMode: "managed",
           customPrompt: "",
           additionalInstructions: "Use the project's verification commands.",
+          requestTimeoutSeconds: 3600,
         },
       },
       codexBridge: {
-        hybridEnvironment: async (model, anthropicBaseUrl) => {
+        hybridEnvironment: async (model, anthropicBaseUrl, requestTimeoutSeconds) => {
           receivedAnthropicBaseUrl = anthropicBaseUrl;
+          receivedRequestTimeout = requestTimeoutSeconds;
           return {
             model: model?.trim() || "gpt-5.6-sol",
             environment: {
@@ -519,6 +522,7 @@ describe("ClaudeAdapterLive", () => {
       assert.equal(options?.env?.ANTHROPIC_DEFAULT_HAIKU_MODEL, "gpt-5.5");
       assert.equal(options?.env?.ANTHROPIC_BASE_URL, "http://127.0.0.1:7777/x/test-capability");
       assert.equal(receivedAnthropicBaseUrl, "https://router.example.test/anthropic");
+      assert.equal(receivedRequestTimeout, 3600);
       const prompt = options?.systemPrompt;
       assert.isObject(prompt);
       const append =
