@@ -278,6 +278,23 @@ const makeFixture = Effect.fn("makeAntigravityTextGenerationFixture")(function* 
 });
 
 it.layer(NodeServices.layer)("AntigravityTextGeneration", (it) => {
+  it.effect("generates a fork thread subtitle in an isolated helper workspace", () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeFixture({ outputs: ['{"subtitle":"Validating remote login"}'] });
+      expect(
+        yield* fixture.textGeneration.generateThreadSubtitle({
+          cwd: fixture.projectDirectory,
+          modelSelection,
+          missionTitle: "Repair Google login",
+          context: "The remote callback was implemented and its tests are running.",
+          phase: "working",
+        }),
+      ).toEqual({ subtitle: "Validating remote login" });
+      expect(fixture.state.workspaces).not.toContain(fixture.projectDirectory);
+      yield* fixture.assertCleaned;
+    }).pipe(Effect.scoped),
+  );
+
   it.effect(
     "generates all helper types in empty workspaces and removes only owned session files",
     () =>

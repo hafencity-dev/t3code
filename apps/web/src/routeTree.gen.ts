@@ -19,8 +19,8 @@ import { Route as ChatIndexRouteImport } from './routes/_chat.index'
 import { Route as SettingsSourceControlRouteImport } from './routes/settings.source-control'
 import { Route as SettingsProvidersRouteImport } from './routes/settings.providers'
 import { Route as SettingsPromptRouteImport } from './routes/settings.prompt'
-import { Route as SettingsModelRoutingRouteImport } from './routes/settings.model-routing'
 import { Route as SettingsProjectsRouteImport } from './routes/settings.projects'
+import { Route as SettingsModelRoutingRouteImport } from './routes/settings.model-routing'
 import { Route as SettingsKeybindingsRouteImport } from './routes/settings.keybindings'
 import { Route as SettingsIntegrationsRouteImport } from './routes/settings.integrations'
 import { Route as SettingsGeneralRouteImport } from './routes/settings.general'
@@ -84,14 +84,14 @@ const SettingsPromptRoute = SettingsPromptRouteImport.update({
   path: '/prompt',
   getParentRoute: () => SettingsRoute,
 } as any)
-const SettingsModelRoutingRoute = SettingsModelRoutingRouteImport.update({
-  id: '/model-routing',
-  path: '/model-routing',
-  getParentRoute: () => SettingsRoute,
-} as any)
 const SettingsProjectsRoute = SettingsProjectsRouteImport.update({
   id: '/projects',
   path: '/projects',
+  getParentRoute: () => SettingsRoute,
+} as any)
+const SettingsModelRoutingRoute = SettingsModelRoutingRouteImport.update({
+  id: '/model-routing',
+  path: '/model-routing',
   getParentRoute: () => SettingsRoute,
 } as any)
 const SettingsKeybindingsRoute = SettingsKeybindingsRouteImport.update({
@@ -167,8 +167,8 @@ export interface FileRoutesByFullPath {
   '/pair': typeof PairRoute
   '/settings': typeof SettingsRouteWithChildren
   '/usage': typeof UsageRoute
-  '/grid': typeof ChatGridRoute
   '/welcome': typeof WelcomeRoute
+  '/grid': typeof ChatGridRoute
   '/pull-requests': typeof ChatPullRequestsRoute
   '/connect/callback': typeof ConnectCallbackRoute
   '/projects/$projectKey': typeof ProjectsProjectKeyRoute
@@ -180,8 +180,8 @@ export interface FileRoutesByFullPath {
   '/settings/integrations': typeof SettingsIntegrationsRoute
   '/settings/keybindings': typeof SettingsKeybindingsRoute
   '/settings/model-routing': typeof SettingsModelRoutingRoute
-  '/settings/prompt': typeof SettingsPromptRoute
   '/settings/projects': typeof SettingsProjectsRoute
+  '/settings/prompt': typeof SettingsPromptRoute
   '/settings/providers': typeof SettingsProvidersRoute
   '/settings/source-control': typeof SettingsSourceControlRoute
   '/$environmentId/$threadId': typeof ChatEnvironmentIdThreadIdRoute
@@ -192,8 +192,8 @@ export interface FileRoutesByTo {
   '/pair': typeof PairRoute
   '/settings': typeof SettingsRouteWithChildren
   '/usage': typeof UsageRoute
-  '/grid': typeof ChatGridRoute
   '/welcome': typeof WelcomeRoute
+  '/grid': typeof ChatGridRoute
   '/pull-requests': typeof ChatPullRequestsRoute
   '/connect/callback': typeof ConnectCallbackRoute
   '/projects/$projectKey': typeof ProjectsProjectKeyRoute
@@ -205,8 +205,8 @@ export interface FileRoutesByTo {
   '/settings/integrations': typeof SettingsIntegrationsRoute
   '/settings/keybindings': typeof SettingsKeybindingsRoute
   '/settings/model-routing': typeof SettingsModelRoutingRoute
-  '/settings/prompt': typeof SettingsPromptRoute
   '/settings/projects': typeof SettingsProjectsRoute
+  '/settings/prompt': typeof SettingsPromptRoute
   '/settings/providers': typeof SettingsProvidersRoute
   '/settings/source-control': typeof SettingsSourceControlRoute
   '/': typeof ChatIndexRoute
@@ -220,8 +220,8 @@ export interface FileRoutesById {
   '/pair': typeof PairRoute
   '/settings': typeof SettingsRouteWithChildren
   '/usage': typeof UsageRoute
-  '/_chat/grid': typeof ChatGridRoute
   '/welcome': typeof WelcomeRoute
+  '/_chat/grid': typeof ChatGridRoute
   '/_chat/pull-requests': typeof ChatPullRequestsRoute
   '/connect_/callback': typeof ConnectCallbackRoute
   '/projects/$projectKey': typeof ProjectsProjectKeyRoute
@@ -233,8 +233,8 @@ export interface FileRoutesById {
   '/settings/integrations': typeof SettingsIntegrationsRoute
   '/settings/keybindings': typeof SettingsKeybindingsRoute
   '/settings/model-routing': typeof SettingsModelRoutingRoute
-  '/settings/prompt': typeof SettingsPromptRoute
   '/settings/projects': typeof SettingsProjectsRoute
+  '/settings/prompt': typeof SettingsPromptRoute
   '/settings/providers': typeof SettingsProvidersRoute
   '/settings/source-control': typeof SettingsSourceControlRoute
   '/_chat/': typeof ChatIndexRoute
@@ -249,8 +249,8 @@ export interface FileRouteTypes {
     | '/pair'
     | '/settings'
     | '/usage'
-    | '/grid'
     | '/welcome'
+    | '/grid'
     | '/pull-requests'
     | '/connect/callback'
     | '/projects/$projectKey'
@@ -262,8 +262,8 @@ export interface FileRouteTypes {
     | '/settings/integrations'
     | '/settings/keybindings'
     | '/settings/model-routing'
-    | '/settings/prompt'
     | '/settings/projects'
+    | '/settings/prompt'
     | '/settings/providers'
     | '/settings/source-control'
     | '/$environmentId/$threadId'
@@ -274,8 +274,8 @@ export interface FileRouteTypes {
     | '/pair'
     | '/settings'
     | '/usage'
-    | '/grid'
     | '/welcome'
+    | '/grid'
     | '/pull-requests'
     | '/connect/callback'
     | '/projects/$projectKey'
@@ -287,8 +287,8 @@ export interface FileRouteTypes {
     | '/settings/integrations'
     | '/settings/keybindings'
     | '/settings/model-routing'
-    | '/settings/prompt'
     | '/settings/projects'
+    | '/settings/prompt'
     | '/settings/providers'
     | '/settings/source-control'
     | '/'
@@ -301,8 +301,8 @@ export interface FileRouteTypes {
     | '/pair'
     | '/settings'
     | '/usage'
-    | '/_chat/grid'
     | '/welcome'
+    | '/_chat/grid'
     | '/_chat/pull-requests'
     | '/connect_/callback'
     | '/projects/$projectKey'
@@ -314,8 +314,8 @@ export interface FileRouteTypes {
     | '/settings/integrations'
     | '/settings/keybindings'
     | '/settings/model-routing'
-    | '/settings/prompt'
     | '/settings/projects'
+    | '/settings/prompt'
     | '/settings/providers'
     | '/settings/source-control'
     | '/_chat/'
@@ -406,18 +406,18 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof SettingsPromptRouteImport
       parentRoute: typeof SettingsRoute
     }
-    '/settings/model-routing': {
-      id: '/settings/model-routing'
-      path: '/model-routing'
-      fullPath: '/settings/model-routing'
-      preLoaderRoute: typeof SettingsModelRoutingRouteImport
-      parentRoute: typeof SettingsRoute
-    }
     '/settings/projects': {
       id: '/settings/projects'
       path: '/projects'
       fullPath: '/settings/projects'
       preLoaderRoute: typeof SettingsProjectsRouteImport
+      parentRoute: typeof SettingsRoute
+    }
+    '/settings/model-routing': {
+      id: '/settings/model-routing'
+      path: '/model-routing'
+      fullPath: '/settings/model-routing'
+      preLoaderRoute: typeof SettingsModelRoutingRouteImport
       parentRoute: typeof SettingsRoute
     }
     '/settings/keybindings': {
@@ -541,8 +541,8 @@ interface SettingsRouteChildren {
   SettingsIntegrationsRoute: typeof SettingsIntegrationsRoute
   SettingsKeybindingsRoute: typeof SettingsKeybindingsRoute
   SettingsModelRoutingRoute: typeof SettingsModelRoutingRoute
-  SettingsPromptRoute: typeof SettingsPromptRoute
   SettingsProjectsRoute: typeof SettingsProjectsRoute
+  SettingsPromptRoute: typeof SettingsPromptRoute
   SettingsProvidersRoute: typeof SettingsProvidersRoute
   SettingsSourceControlRoute: typeof SettingsSourceControlRoute
 }
@@ -556,8 +556,8 @@ const SettingsRouteChildren: SettingsRouteChildren = {
   SettingsIntegrationsRoute: SettingsIntegrationsRoute,
   SettingsKeybindingsRoute: SettingsKeybindingsRoute,
   SettingsModelRoutingRoute: SettingsModelRoutingRoute,
-  SettingsPromptRoute: SettingsPromptRoute,
   SettingsProjectsRoute: SettingsProjectsRoute,
+  SettingsPromptRoute: SettingsPromptRoute,
   SettingsProvidersRoute: SettingsProvidersRoute,
   SettingsSourceControlRoute: SettingsSourceControlRoute,
 }

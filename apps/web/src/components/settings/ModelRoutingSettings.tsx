@@ -464,7 +464,9 @@ export function ModelRoutingSettingsPanel() {
 
   const status = statusQuery.data;
   const effectiveModel = effectiveClaudeCodexModel(routing.model);
-  const modelOptions = modelsQuery.data?.models ?? [{ id: DEFAULT_CLAUDE_CODEX_MODEL }];
+  const modelOptions = (modelsQuery.data?.models ?? [{ id: DEFAULT_CLAUDE_CODEX_MODEL }]).filter(
+    (model) => model.id !== "gpt-5.6-sol",
+  );
   const exactPrompt = resolveClaudeCodexRoutingPrompt(routing, effectiveModel);
   const managedPreferencesActive = routing.promptMode === "managed";
   const claudeSubagentModels = selected ? claudeSubagentModelOptions(selected.models) : [];
