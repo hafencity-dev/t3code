@@ -138,6 +138,7 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   /** Server can manage the local Codex compatibility bridge used to remap
       Claude Code's Haiku subagent slot. */
   claudeCodexRouting: Schema.optionalKey(Schema.Boolean), // fork: f5
+  claudeCodexFastMode: Schema.optionalKey(Schema.Boolean), // fork: f5
   /** Server can durably mark running provider turns before a self-update and
       continue them after the replacement process starts. */
   serverUpdateThreadContinuation: Schema.optionalKey(Schema.Boolean),

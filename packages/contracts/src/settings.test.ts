@@ -440,6 +440,24 @@ describe("ServerSettings.providerInstances (slice-2 invariant)", () => {
 });
 
 describe("Claude Code Codex routing", () => {
+  it("defaults global GPT fast mode to false", () => {
+    expect(decodeServerSettings({}).claudeCodexFastModeEnabled).toBe(false);
+    expect(DEFAULT_SERVER_SETTINGS.claudeCodexFastModeEnabled).toBe(false);
+  });
+
+  it("accepts global GPT fast mode patches in both directions", () => {
+    for (const enabled of [true, false]) {
+      expect(decodeServerSettingsPatch({ claudeCodexFastModeEnabled: enabled })).toEqual({
+        claudeCodexFastModeEnabled: enabled,
+      });
+      expect(
+        decodeServerSettings({ claudeCodexFastModeEnabled: enabled }).claudeCodexFastModeEnabled,
+      ).toBe(enabled);
+    }
+    expect(decodeServerSettingsPatch({})).not.toHaveProperty("claudeCodexFastModeEnabled");
+    expect(() => decodeServerSettingsPatch({ claudeCodexFastModeEnabled: "true" })).toThrow();
+  });
+
   it("is absent and inactive for legacy Claude settings", () => {
     expect(decodeServerSettings({}).providers.claudeAgent.codexRouting).toBeUndefined();
   });

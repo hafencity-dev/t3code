@@ -74,6 +74,7 @@ import { useScaledTextRole } from "../settings/appearance/useScaledTextRole";
 import type { RemoteClientConnectionState } from "../../lib/connection";
 import { resolveProviderOptionDescriptors } from "../../lib/providerOptions";
 import { ComposerCommandPopover } from "./ComposerCommandPopover";
+import { ClaudeCodexFastModeControl } from "./ClaudeCodexFastModeControl"; // fork: f5 GPT fast
 import { useComposerCommandMenu } from "./use-composer-command-menu";
 import {
   ComposerDictationCancelAction,
@@ -759,6 +760,12 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
                       )}
                       onPickMedia={props.onPickDraftMedia}
                       onPickFiles={props.onPickDraftFiles}
+                    />
+                    {/* fork: f5 GPT fast */}
+                    <ClaudeCodexFastModeControl
+                      environmentId={props.environmentId}
+                      serverConfig={props.serverConfig}
+                      providerInstanceId={currentModelSelection.instanceId}
                     />
                     <View className="min-w-0 shrink" style={{ maxWidth: 152 }}>
                       <ComposerInlineControl

@@ -76,6 +76,9 @@ import {
   SettingsSection,
 } from "./settingsLayout";
 import { searchableSetting } from "./settingsSearch";
+// fork: f5 GPT fast
+import { CLAUDE_CODEX_FAST_MODE_DESCRIPTION } from "../chat/ClaudeCodexFastModeControl.logic";
+import { ClaudeCodexFastModeEnvironmentSettings } from "./ClaudeCodexFastModeEnvironmentSettings"; // fork: f5 GPT fast
 
 const PROMPT_MODES: ReadonlyArray<{
   readonly value: ClaudeCodexRoutingPromptMode;
@@ -449,6 +452,29 @@ export function ModelRoutingSettingsPanel() {
     }
   };
 
+  // fork: f5 GPT fast
+  const fastModeSupported = serverConfig?.environment.capabilities.claudeCodexFastMode === true;
+  const gptFastSetting = primary ? (
+    <SettingsRow
+      {...searchableSetting("model-routing-gpt-fast")}
+      title="GPT Fast"
+      description={CLAUDE_CODEX_FAST_MODE_DESCRIPTION}
+      serverScoped
+      aria-disabled={!fastModeSupported || undefined}
+      status={!fastModeSupported ? "Update the environment to enable GPT Fast." : undefined}
+      control={
+        <Switch
+          checked={settings.claudeCodexFastModeEnabled === true}
+          disabled={!fastModeSupported}
+          aria-label="GPT Fast"
+          onCheckedChange={(next) => updateSettings({ claudeCodexFastModeEnabled: next })}
+        />
+      }
+    />
+  ) : (
+    <ClaudeCodexFastModeEnvironmentSettings />
+  );
+
   if (!supported) {
     return (
       <SettingsPageContainer>
@@ -457,6 +483,8 @@ export function ModelRoutingSettingsPanel() {
             title="Not available on this server"
             description="Update the environment to configure Claude Code → Codex routing."
           />
+          {/* fork: f5 GPT fast — hosted targets remain reachable without primary routing. */}
+          {gptFastSetting}
         </SettingsSection>
       </SettingsPageContainer>
     );
@@ -586,6 +614,8 @@ export function ModelRoutingSettingsPanel() {
             </Alert>
           ) : null}
         </SettingsRow>
+        {/* fork: f5 GPT fast */}
+        {gptFastSetting}
       </SettingsSection>
 
       <SettingsSection title="Haiku slot">

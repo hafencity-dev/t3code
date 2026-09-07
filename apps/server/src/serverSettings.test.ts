@@ -10,6 +10,8 @@ import {
 import { createModelSelection } from "@t3tools/shared/model";
 import { fromLenientJson } from "@t3tools/shared/schemaJson"; // fork: f2
 import { assert, it } from "@effect/vitest";
+import { vi } from "vite-plus/test"; // fork: f5 singleton bridge observation
+import { HostProcessArchitecture, HostProcessPlatform } from "@t3tools/shared/hostProcess"; // fork: f5
 import * as Effect from "effect/Effect";
 import * as Duration from "effect/Duration";
 import * as FileSystem from "effect/FileSystem";
@@ -17,6 +19,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
+import * as Queue from "effect/Queue"; // fork: f5 GPT fast binding receipts
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
@@ -24,6 +27,11 @@ import * as ServerSecretStore from "./auth/ServerSecretStore.ts";
 import * as ServerConfig from "./config.ts";
 import { SqlitePersistenceMemory } from "./persistence/Layers/Sqlite.ts";
 import * as ServerSettingsModule from "./serverSettings.ts";
+import {
+  bindClaudeCodexFastMode,
+  ClaudeCodexFastModeLive,
+} from "./provider/claudeCodex/ClaudeCodexFastModeBinding.ts"; // fork: f5
+import { getClaudeCodexBridge } from "./provider/claudeCodex/ClaudeCodexBridge.ts"; // fork: f5
 import { resolveProviderInstanceTerminalEnvironment } from "./terminal/Manager.ts";
 
 const decodeSettingsPatch = Schema.decodeUnknownEffect(ServerSettingsPatch);
@@ -316,6 +324,198 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         ["global", "codex"],
       );
     }).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
+  // fork: f5 use setter receipts to await binding updates without polling or sleeps.
+  it.effect("binds GPT fast mode initially and after persisted settings updates", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
+        yield* serverSettings.updateSettings({ claudeCodexFastModeEnabled: true });
+        const applied = yield* Queue.make<boolean>();
+        yield* bindClaudeCodexFastMode(
+          {
+            setFastModeEnabled: (enabled) => {
+              Queue.offerUnsafe(applied, enabled);
+            },
+          },
+          serverSettings,
+        );
+        assert.strictEqual(yield* Queue.take(applied), true);
+
+        for (const enabled of [false, true]) {
+          yield* serverSettings.updateSettings({ claudeCodexFastModeEnabled: enabled });
+          assert.strictEqual(yield* Queue.take(applied), enabled);
+        }
+
+        const config = yield* ServerConfig.ServerConfig;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const persisted = yield* decodeServerSettingsJson(
+          yield* fileSystem.readFileString(config.settingsPath),
+        );
+        assert.strictEqual(persisted.claudeCodexFastModeEnabled, true);
+      }),
+    ).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
+  it.effect("buffers GPT fast mode changes made during the initial snapshot read", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
+        // Warm the cache so this test observes only the deliberate update.
+        yield* serverSettings.getSettings;
+        let initialRead = true;
+        const applied = yield* Queue.make<boolean>();
+        yield* bindClaudeCodexFastMode(
+          {
+            setFastModeEnabled: (enabled) => {
+              Queue.offerUnsafe(applied, enabled);
+            },
+          },
+          {
+            subscribeChanges: serverSettings.subscribeChanges,
+            getSettings: Effect.gen(function* () {
+              const snapshot = yield* serverSettings.getSettings;
+              if (initialRead) {
+                initialRead = false;
+                yield* serverSettings.updateSettings({ claudeCodexFastModeEnabled: true });
+              }
+              return snapshot;
+            }),
+          },
+        );
+        assert.strictEqual(yield* Queue.take(applied), false);
+        assert.strictEqual(yield* Queue.take(applied), true);
+      }),
+    ).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
+  it.effect("does not replay stale GPT fast snapshots after reading current settings", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
+        yield* serverSettings.updateSettings({ claudeCodexFastModeEnabled: true });
+        const applied = yield* Queue.make<boolean>();
+        let initialRead = true;
+        yield* bindClaudeCodexFastMode(
+          {
+            setFastModeEnabled: (enabled) => {
+              Queue.offerUnsafe(applied, enabled);
+            },
+          },
+          {
+            subscribeChanges: serverSettings.subscribeChanges,
+            getSettings: Effect.gen(function* () {
+              if (initialRead) {
+                initialRead = false;
+                yield* serverSettings.updateSettings({ claudeCodexFastModeEnabled: false });
+                yield* serverSettings.updateSettings({ claudeCodexFastModeEnabled: true });
+              }
+              return yield* serverSettings.getSettings;
+            }),
+          },
+        );
+        // Initial read and both buffered notifications must all apply latest=true.
+        assert.strictEqual(yield* Queue.take(applied), true);
+        assert.strictEqual(yield* Queue.take(applied), true);
+        assert.strictEqual(yield* Queue.take(applied), true);
+      }),
+    ).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
+  it.effect(
+    "initializes GPT fast before startup without clients and shares one server subscription",
+    () =>
+      Effect.gen(function* () {
+        const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
+        const config = yield* ServerConfig.ServerConfig;
+        const fileSystem = yield* FileSystem.FileSystem;
+        // Seed persisted state, not the service cache, to exercise cold startup.
+        yield* fileSystem.writeFileString(
+          config.settingsPath,
+          '{"claudeCodexFastModeEnabled":true}',
+        );
+        const bridge = getClaudeCodexBridge(
+          config.stateDir,
+          yield* HostProcessPlatform,
+          yield* HostProcessArchitecture,
+        );
+        const applied = yield* Queue.make<boolean>();
+        let activeSubscriptions = 0;
+        let subscriptions = 0;
+        let currentFastMode: boolean | undefined;
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const originalSetter = bridge.setFastModeEnabled.bind(bridge);
+            yield* Effect.acquireRelease(
+              Effect.sync(() =>
+                vi.spyOn(bridge, "setFastModeEnabled").mockImplementation((enabled) => {
+                  originalSetter(enabled);
+                  currentFastMode = enabled;
+                  Queue.offerUnsafe(applied, enabled);
+                }),
+              ),
+              (spy) => Effect.sync(() => spy.mockRestore()),
+            );
+            const settings = {
+              ...serverSettings,
+              subscribeChanges: Effect.gen(function* () {
+                yield* Effect.acquireRelease(
+                  Effect.sync(() => {
+                    subscriptions++;
+                    activeSubscriptions++;
+                  }),
+                  () =>
+                    Effect.sync(() => {
+                      activeSubscriptions--;
+                    }),
+                );
+                return yield* serverSettings.subscribeChanges;
+              }),
+            };
+            let startupRan = false;
+            const startup = Layer.effectDiscard(
+              Effect.sync(() => {
+                // Assert at entry, without waiting for an asynchronous binding to catch up.
+                assert.strictEqual(currentFastMode, true);
+                startupRan = true;
+              }),
+            ).pipe(Layer.provide(ClaudeCodexFastModeLive));
+            // Two consumers of the prerequisite must share its single server lifetime.
+            const anotherConsumer = Layer.effectDiscard(Effect.void).pipe(
+              Layer.provide(ClaudeCodexFastModeLive),
+            );
+            yield* Layer.build(Layer.mergeAll(startup, anotherConsumer)).pipe(
+              Effect.provideService(ServerSettingsModule.ServerSettingsService, settings),
+            );
+            assert.isTrue(startupRan);
+            assert.strictEqual(yield* Queue.take(applied), true);
+            assert.strictEqual(subscriptions, 1);
+            assert.strictEqual(activeSubscriptions, 1);
+            yield* serverSettings.updateSettings({ claudeCodexFastModeEnabled: false });
+            assert.strictEqual(yield* Queue.take(applied), false);
+          }),
+        );
+        assert.strictEqual(activeSubscriptions, 0);
+      }).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
+  it.effect("binds GPT fast mode with the empty-subscription settings test layer", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
+        let applied: boolean | undefined;
+        yield* bindClaudeCodexFastMode(
+          {
+            setFastModeEnabled: (enabled) => {
+              applied = enabled;
+            },
+          },
+          serverSettings,
+        );
+        assert.strictEqual(applied, true);
+      }),
+    ).pipe(Effect.provide(ServerSettingsModule.layerTest({ claudeCodexFastModeEnabled: true }))),
   );
 
   it.effect("buffers changes after a subscription is acquired but before it is consumed", () =>

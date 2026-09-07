@@ -73,6 +73,16 @@ respectively. A Claude and Codex subagent form blind independent views in parall
 adjudicates the disagreements. Routine work does not pay for the extra pass. The main session always
 owns the final answer.
 
+## GPT Fast
+
+**GPT Fast** is a server-wide setting that requests priority processing for every GPT request that
+goes through this server's Claude Code → Codex bridge, main agents and subagents alike. Turn it on
+in **Settings → Model Routing** under **GPT Fast**, or with the **GPT Fast** toggle in the
+composer's traits area when a thread uses a Claude provider with Codex routing enabled. It applies to
+the next request, including already-running sessions, and does not affect Claude's own fast mode or
+native Codex threads. Priority processing is subject to provider availability; each server keeps its
+own value.
+
 ## Routing Prompt
 
 The injected routing text has three separate layers:

@@ -1060,6 +1060,10 @@ export const ServerSettings = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
   observability: ObservabilitySettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+  // fork: f5 global GPT fast mode, independent of provider instance lifecycles
+  claudeCodexFastModeEnabled: Schema.Boolean.pipe(
+    Schema.withDecodingDefault(Effect.succeed(false)),
+  ),
   // fork: f2 system prompt injection
   systemPromptInjection: SystemPromptInjectionSettings.pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
@@ -1296,6 +1300,7 @@ export const ServerSettingsPatch = Schema.Struct({
   // merge of it has no meaning and a half-applied array is a silently wrong
   // prompt. The settings UI sends the complete object on every edit.
   systemPromptInjection: Schema.optionalKey(SystemPromptInjectionSettings),
+  claudeCodexFastModeEnabled: Schema.optionalKey(Schema.Boolean), // fork: f5 GPT fast
   // Per-entry, unlike `providerInstances`: a client only ever adds or removes
   // one source, and sending the whole map races another edit that has not
   // echoed back yet. `null` removes; the server merges into its current map.

@@ -12,6 +12,7 @@ import * as NodeHttp from "node:http";
 import * as NodeHttps from "node:https";
 
 import { claudeCodexEffortPayload } from "./ClaudeCodexEffort.ts";
+import { claudeCodexFastModePayload } from "./ClaudeCodexFastMode.ts"; // fork: f5 GPT fast
 
 const http = NodeHttp;
 const https = NodeHttps;
@@ -36,6 +37,7 @@ export interface ClaudeCodexHybridRouterDeps {
   readonly codexUpstream: () => { readonly port: number; readonly token: string } | null;
   readonly onCodexUnavailable?: (() => void) | undefined;
   readonly isCodexModel: (modelId: string) => boolean;
+  readonly fastModeEnabled?: (() => boolean) | undefined; // fork: f5 GPT fast
   /** Ordinary Claude traffic keeps the instance's original API origin. */
   readonly anthropicUpstream?: URL | undefined;
 }
@@ -259,12 +261,17 @@ export class ClaudeCodexHybridRouter {
         sendJsonError(response, 400, `Unsupported routed model: ${model?.trim() || "unknown"}.`);
         return;
       }
+      // fork: f5 apply the live global setting only after verifying the Codex route.
+      const finalPayload =
+        upstream === "codex"
+          ? claudeCodexFastModePayload(translated, this.#deps.fastModeEnabled?.() ?? false)
+          : translated;
       this.#forward(
         request,
         response,
         realPath,
         upstream,
-        translated === payload ? body : Buffer.from(JSON.stringify(translated)),
+        finalPayload === payload ? body : Buffer.from(JSON.stringify(finalPayload)),
       );
     });
   }

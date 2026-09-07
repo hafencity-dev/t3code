@@ -230,6 +230,7 @@ export const make = Effect.gen(function* () {
       threadTitleRegeneration: true,
       systemPromptInjection: true, // fork: f2 system prompt injection
       claudeCodexRouting: true, // fork: f5 Claude Code → Codex routing
+      claudeCodexFastMode: true, // fork: f5
       threadPullRequestLinking: true,
       environmentIcon: true,
       ...(serverSelfUpdate === null ? {} : { serverSelfUpdate }),

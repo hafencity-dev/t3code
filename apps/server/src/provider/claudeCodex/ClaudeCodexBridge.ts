@@ -319,6 +319,7 @@ export class ClaudeCodexBridge {
   readonly #modelCachePath: string;
   readonly #platform: NodeJS.Platform;
   readonly #architecture: NodeJS.Architecture;
+  #fastModeEnabled = false; // fork: f5 GPT fast
   #proxy: ChildProcess | null = null;
   #routers = new Map<string, ClaudeCodexHybridRouter>();
   #routerStarts = new Map<string, Promise<string>>();
@@ -345,6 +346,11 @@ export class ClaudeCodexBridge {
     this.#configPath = path.join(this.#rootDir, "config.yaml");
     this.#loginConfigPath = path.join(this.#rootDir, "login-config.yaml");
     this.#modelCachePath = path.join(this.#rootDir, "models-cache.json");
+  }
+
+  // fork: f5 routers read this setting per request without restarting the bridge.
+  setFastModeEnabled(enabled: boolean): void {
+    this.#fastModeEnabled = enabled;
   }
 
   #binaryPath(): string {
@@ -948,6 +954,7 @@ export class ClaudeCodexBridge {
             : null,
         onCodexUnavailable: () => void this.ensureReady().catch(() => undefined),
         isCodexModel: (model) => this.#isCodexModel(model),
+        fastModeEnabled: () => this.#fastModeEnabled, // fork: f5 GPT fast
         anthropicUpstream,
       });
       this.#routers.set(routerKey, router);

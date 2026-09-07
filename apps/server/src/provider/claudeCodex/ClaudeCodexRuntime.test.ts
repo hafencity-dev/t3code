@@ -20,10 +20,14 @@ const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 
 describe("pinned Claude Codex runtime", () => {
   it.skipIf(!binary || HostProcessPlatform.defaultValue() === "win32")(
-    "registers Astra for OAuth and preserves each effort on the real Codex wire",
+    "registers Astra for OAuth and preserves effort and live fast mode on the real Codex wire",
     async () => {
       const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-codex-runtime-"));
-      const received: Array<{ model: string; reasoning: { effort: string } }> = [];
+      const received: Array<{
+        model: string;
+        reasoning: { effort: string };
+        service_tier?: string;
+      }> = [];
       const endpoint = NodeHttp.createServer((request, response) => {
         const chunks: Buffer[] = [];
         request.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
@@ -131,38 +135,53 @@ describe("pinned Claude Codex runtime", () => {
           { mode: 0o700 },
         );
         const routing = await bridge.hybridEnvironment("gpt-6-astra");
-        for (const stream of [false, true]) {
-          for (const effort of ["low", "medium", "high", "xhigh", "max", "default"]) {
-            const selection = createModelSelection(
-              ProviderInstanceId.make("claudeAgent"),
-              "gpt-6-astra",
-              [{ id: "reasoningEffort", value: effort }],
-            );
-            const response = await fetch(`${routing.environment.ANTHROPIC_BASE_URL}/v1/messages`, {
-              method: "POST",
-              headers: { "content-type": "application/json" },
-              body: JSON.stringify({
-                model: claudeCodexTransportModel(selection.model, selection),
-                max_tokens: 16,
-                stream,
-                messages: [{ role: "user", content: "Reply OK" }],
-              }),
-            });
-            const body = await response.text();
-            expect(response.status, body).toBe(200);
-            if (stream) {
-              expect(body).toContain('"text":"OK"');
-              expect(body).toContain('"type":"message_stop"');
-            } else {
-              expect(JSON.parse(body)).toMatchObject({ content: [{ type: "text", text: "OK" }] });
+        // Reuse the same routing URL to verify changes without restarting the runtime.
+        for (const fastMode of [true, false]) {
+          bridge.setFastModeEnabled(fastMode);
+          for (const stream of [false, true]) {
+            for (const effort of ["low", "medium", "high", "xhigh", "max", "default"]) {
+              const selection = createModelSelection(
+                ProviderInstanceId.make("claudeAgent"),
+                "gpt-6-astra",
+                [{ id: "reasoningEffort", value: effort }],
+              );
+              const response = await fetch(
+                `${routing.environment.ANTHROPIC_BASE_URL}/v1/messages`,
+                {
+                  method: "POST",
+                  headers: { "content-type": "application/json" },
+                  body: JSON.stringify({
+                    model: claudeCodexTransportModel(selection.model, selection),
+                    max_tokens: 16,
+                    service_tier: "auto",
+                    // Enabled must work without a client fast hint; disabled must remove it.
+                    ...(fastMode ? {} : { speed: "fast" }),
+                    stream,
+                    messages: [{ role: "user", content: "Reply OK" }],
+                  }),
+                },
+              );
+              const body = await response.text();
+              expect(response.status, body).toBe(200);
+              if (stream) {
+                expect(body).toContain('"text":"OK"');
+                expect(body).toContain('"type":"message_stop"');
+              } else {
+                expect(JSON.parse(body)).toMatchObject({ content: [{ type: "text", text: "OK" }] });
+              }
+              expect(received.at(-1)?.model).toBe("gpt-6-astra");
+              if (fastMode) {
+                expect(received.at(-1)?.service_tier).toBe("priority");
+              } else {
+                expect(received.at(-1)).not.toHaveProperty("service_tier");
+              }
+              expect(received.at(-1)?.reasoning.effort).toBe(
+                effort === "default" ? "medium" : effort,
+              );
             }
-            expect(received.at(-1)?.model).toBe("gpt-6-astra");
-            expect(received.at(-1)?.reasoning.effort).toBe(
-              effort === "default" ? "medium" : effort,
-            );
           }
         }
-        expect(received).toHaveLength(12);
+        expect(received).toHaveLength(24);
       } finally {
         bridge.dispose();
         endpoint.closeAllConnections();

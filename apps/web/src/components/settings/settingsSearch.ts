@@ -365,6 +365,13 @@ export const SETTINGS_SEARCH_ITEMS = [
     to: "/settings/model-routing",
     targetId: "model-routing",
   },
+  // fork: f5 GPT fast
+  {
+    id: "model-routing-gpt-fast",
+    title: "GPT Fast",
+    to: "/settings/model-routing",
+    searchTerms: ["gpt fast priority codex bridge server-wide main agent subagents"],
+  },
   {
     id: "model-routing-preferences",
     title: "Model preferences",
