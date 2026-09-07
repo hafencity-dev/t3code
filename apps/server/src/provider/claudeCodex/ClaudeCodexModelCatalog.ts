@@ -5,9 +5,7 @@ import {
   type ServerProviderModel,
 } from "@t3tools/contracts";
 import { effectiveClaudeCodexModel } from "@t3tools/shared/claudeCodexRouting";
-import { createModelCapabilities } from "@t3tools/shared/model";
-
-const ROUTED_CODEX_CAPABILITIES = createModelCapabilities({ optionDescriptors: [] });
+import { claudeCodexCapabilities } from "./ClaudeCodexEffort.ts";
 
 export function formatClaudeCodexModelName(model: string): string {
   const parts = model
@@ -38,7 +36,7 @@ export function claudeCodexRoutedModel(
     shortName: name,
     subProvider: CLAUDE_CODEX_ROUTED_SUB_PROVIDER,
     isCustom: false,
-    capabilities: ROUTED_CODEX_CAPABILITIES,
+    capabilities: claudeCodexCapabilities(slug),
   };
 }
 

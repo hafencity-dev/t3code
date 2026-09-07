@@ -6,6 +6,8 @@
  *
  * @module ClaudeAdapterLive
  */
+// fork: transport GPT effort independently of Claude SDK effort enums.
+import { claudeCodexTransportModel } from "../claudeCodex/ClaudeCodexEffort.ts";
 import {
   type CanUseTool,
   query,
@@ -4648,6 +4650,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       const apiModelId = modelSelection
         ? resolveClaudeCatalogApiModelId(modelCatalog, modelSelection)
         : undefined;
+      const transportModelId =
+        claudeCodexBridge && apiModelId && modelSelection
+          ? claudeCodexTransportModel(apiModelId, modelSelection)
+          : apiModelId;
       const initialContextWindow = selectedClaudeContextWindow(modelCatalog, modelSelection);
       const rawEffort = getModelSelectionStringOptionValue(modelSelection, "effort");
       const effort =
@@ -4723,7 +4729,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       ];
       const queryOptions: ClaudeQueryOptions = {
         ...(input.cwd ? { cwd: input.cwd } : {}),
-        ...(apiModelId ? { model: apiModelId } : {}),
+        ...(transportModelId ? { model: transportModelId } : {}),
         pathToClaudeCodeExecutable: claudeBinaryPath,
         systemPrompt: {
           type: "preset",
@@ -4840,7 +4846,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         streamFiber: undefined,
         startedAt,
         basePermissionMode: permissionMode,
-        currentApiModelId: apiModelId,
+        currentApiModelId: transportModelId,
         currentEffort: effectiveEffort ?? undefined,
         resumeSessionId: sessionId,
         pendingApprovals,
@@ -4969,7 +4975,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     }
 
     if (modelSelection?.model) {
-      const apiModelId = resolveClaudeCatalogApiModelId(modelCatalog, modelSelection);
+      const resolvedApiModelId = resolveClaudeCatalogApiModelId(modelCatalog, modelSelection);
+      // fork: setModel carries changed effort on the next request.
+      const apiModelId = claudeCodexBridge
+        ? claudeCodexTransportModel(resolvedApiModelId, modelSelection)
+        : resolvedApiModelId;
       if (context.currentApiModelId !== apiModelId) {
         yield* Effect.tryPromise({
           try: () => context.query.setModel(apiModelId),

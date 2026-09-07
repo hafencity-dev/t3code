@@ -11,6 +11,8 @@ import * as NodeCrypto from "node:crypto";
 import * as NodeHttp from "node:http";
 import * as NodeHttps from "node:https";
 
+import { claudeCodexEffortPayload } from "./ClaudeCodexEffort.ts";
+
 const http = NodeHttp;
 const https = NodeHttps;
 const randomBytes = NodeCrypto.randomBytes;
@@ -242,12 +244,13 @@ export class ClaudeCodexHybridRouter {
         sendJsonError(response, 400, "Request body was not valid JSON.");
         return;
       }
+      const translated = isMessageRequest ? claudeCodexEffortPayload(payload) : payload;
       const model =
-        payload &&
-        typeof payload === "object" &&
-        !Array.isArray(payload) &&
-        typeof (payload as { model?: unknown }).model === "string"
-          ? (payload as { model: string }).model
+        translated &&
+        typeof translated === "object" &&
+        !Array.isArray(translated) &&
+        typeof (translated as { model?: unknown }).model === "string"
+          ? (translated as { model: string }).model
           : undefined;
       const upstream = isMessageRequest
         ? classifyClaudeCodexUpstream(model, this.#deps.isCodexModel)
@@ -256,7 +259,13 @@ export class ClaudeCodexHybridRouter {
         sendJsonError(response, 400, `Unsupported routed model: ${model?.trim() || "unknown"}.`);
         return;
       }
-      this.#forward(request, response, realPath, upstream, body);
+      this.#forward(
+        request,
+        response,
+        realPath,
+        upstream,
+        translated === payload ? body : Buffer.from(JSON.stringify(translated)),
+      );
     });
   }
 

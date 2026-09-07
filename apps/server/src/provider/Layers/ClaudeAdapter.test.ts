@@ -580,6 +580,71 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("changes Astra effort through the bridge without changing its stored model", () => {
+    const harness = makeHarness({
+      claudeConfig: {
+        codexRouting: {
+          enabled: true,
+          model: "gpt-6-astra",
+          modelPreferences: DEFAULT_CLAUDE_CODEX_MODEL_PREFERENCES,
+          promptMode: "managed",
+          customPrompt: "",
+          additionalInstructions: "Keep the final response concise.",
+        },
+      },
+      codexBridge: {
+        hybridEnvironment: async (model) => ({
+          model: model?.trim() || "gpt-5.6-sol",
+          environment: {
+            ANTHROPIC_BASE_URL: "http://127.0.0.1:7777/x/test-capability",
+            ANTHROPIC_DEFAULT_HAIKU_MODEL: model,
+          },
+        }),
+      },
+    });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "auto",
+        modelSelection: createModelSelection(
+          ProviderInstanceId.make("claudeAgent"),
+          "gpt-6-astra",
+          [{ id: "reasoningEffort", value: "max" }],
+        ),
+      });
+
+      const options = harness.getLastCreateQueryInput()?.options;
+      assert.equal(options?.model, "gpt-6-astra(max)");
+      assert.isUndefined(options?.effort);
+      for (const options of [[{ id: "reasoningEffort", value: "low" }], []]) {
+        yield* adapter.sendTurn({
+          threadId: THREAD_ID,
+          input: "hello",
+          attachments: [],
+          modelSelection: createModelSelection(
+            ProviderInstanceId.make("claudeAgent"),
+            "gpt-6-astra",
+            options,
+          ),
+        });
+      }
+      assert.deepEqual(harness.query.setModelCalls, ["gpt-6-astra(low)", "gpt-6-astra"]);
+      const prompt = options?.systemPrompt;
+      assert.isObject(prompt);
+      const append =
+        typeof prompt === "object" && prompt && "append" in prompt ? prompt.append : "";
+      assert.include(String(append), "Codex main session through Claude Code");
+      assert.include(String(append), "It is not running an Anthropic model");
+      assert.notInclude(String(append), "Subagent routing");
+      assert.match(String(append), /Keep the final response concise\.$/u);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect("derives auto permission mode from auto runtime policy without skip flag", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {

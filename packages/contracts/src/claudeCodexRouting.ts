@@ -11,7 +11,7 @@ import * as Schema from "effect/Schema";
 import { TrimmedNonEmptyString, TrimmedString } from "./baseSchemas.ts";
 import { ProviderSignInEvent } from "./providerAuth.ts";
 
-export const CLAUDE_CODEX_BRIDGE_VERSION = "7.2.120";
+export const CLAUDE_CODEX_BRIDGE_VERSION = "7.2.152";
 
 /** Stable catalog marker for the single Codex model exposed through a Claude instance. */
 export const CLAUDE_CODEX_ROUTED_SUB_PROVIDER = "via Codex";

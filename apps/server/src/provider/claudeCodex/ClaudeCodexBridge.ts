@@ -60,28 +60,28 @@ const FALLBACK_MODELS = [
 
 const ARTIFACTS: Readonly<Record<string, { readonly file: string; readonly sha256: string }>> = {
   "darwin-arm64": {
-    file: "CLIProxyAPI_7.2.120_darwin_aarch64.tar.gz",
-    sha256: "01ebcb3a683560c91f532fb124ac30edcc68945859e3ddf4880e09f1979ffdee",
+    file: "CLIProxyAPI_7.2.152_darwin_aarch64.tar.gz",
+    sha256: "37c3f48b2cd78f3fa1a26e4e0966617d00efad4bbea16599c6a00640b49f8af1",
   },
   "darwin-x64": {
-    file: "CLIProxyAPI_7.2.120_darwin_amd64.tar.gz",
-    sha256: "1f2dd819f3176d5ad85ad089d8aafff3214182a6135957ce6c938ad3273bd737",
+    file: "CLIProxyAPI_7.2.152_darwin_amd64.tar.gz",
+    sha256: "cb8545345a4986937f6321c687c8bf36e4f2f483664cab74074dd176fa6c01d2",
   },
   "linux-arm64": {
-    file: "CLIProxyAPI_7.2.120_linux_aarch64.tar.gz",
-    sha256: "5ba28b842b9add6388b77b1672fd0ec9904ca1814c896b507ddebe5df42b4ec9",
+    file: "CLIProxyAPI_7.2.152_linux_aarch64.tar.gz",
+    sha256: "4ac6b5859cf001300b3aa063f49466d4fee80255f2cf14c6eab549874d88f57b",
   },
   "linux-x64": {
-    file: "CLIProxyAPI_7.2.120_linux_amd64.tar.gz",
-    sha256: "8933332737338be5d5cedae4b96254b9afc8dfe0f13c4322738c65fd7931ce0a",
+    file: "CLIProxyAPI_7.2.152_linux_amd64.tar.gz",
+    sha256: "0168181ea302c00d1ccae636eba70072d1ab88b271669ede796d3ed65d54bd8d",
   },
   "win32-arm64": {
-    file: "CLIProxyAPI_7.2.120_windows_aarch64.zip",
-    sha256: "3c78311457d36f34822b9e9633c23cf6cd5d810bbc4bb697dcb5ad0135bf38d3",
+    file: "CLIProxyAPI_7.2.152_windows_aarch64.zip",
+    sha256: "8a378ad0d562fba0b0ce4ca61c8e871c4166d019b85ffd2df7b5d0f6e3522bdb",
   },
   "win32-x64": {
-    file: "CLIProxyAPI_7.2.120_windows_amd64.zip",
-    sha256: "eb08b7905c9c9b88ebb1e7fcfa35777494d1e042228f6b7f25786e53848d352b",
+    file: "CLIProxyAPI_7.2.152_windows_amd64.zip",
+    sha256: "7b01cc85bc58881d7c4640066efdf474875b7f5b5d57367e426c6bc4fcf764ce",
   },
 };
 
@@ -641,7 +641,11 @@ export class ClaudeCodexBridge {
     return this.status();
   }
 
-  #waitForHealth(child: ChildProcess, port: number, apiKey: string): Promise<void> {
+  #waitForHealth(
+    child: ChildProcess,
+    port: number,
+    apiKey: string,
+  ): Promise<Array<ClaudeCodexBridgeModel>> {
     return new Promise((resolve, reject) => {
       const deadline = Date.now() + 15_000;
       const probe = () => {
@@ -659,12 +663,40 @@ export class ClaudeCodexBridge {
             timeout: 500,
           },
           (response) => {
-            response.resume();
-            if (response.statusCode === 200) resolve();
-            else retry();
+            if (response.statusCode !== 200) {
+              response.resume();
+              retry();
+              return;
+            }
+            const chunks: Array<Buffer> = [];
+            let size = 0;
+            response.on("data", (chunk: Buffer) => {
+              size += chunk.length;
+              if (size > MAX_MODEL_RESPONSE_BYTES) {
+                response.destroy(new Error("Codex model catalog response was too large."));
+                return;
+              }
+              chunks.push(chunk);
+            });
+            response.once("error", retry);
+            response.once("end", () => {
+              try {
+                const models = parseClaudeCodexModelsPayload(
+                  JSON.parse(Buffer.concat(chunks).toString("utf8")),
+                );
+                // The HTTP listener starts before OAuth model registration finishes.
+                if (models.length > 0) resolve(models);
+                else retry();
+              } catch {
+                retry();
+              }
+            });
           },
         );
+        let retried = false;
         const retry = () => {
+          if (retried) return;
+          retried = true;
           request.destroy();
           if (Date.now() >= deadline) reject(new Error("Codex bridge health check timed out."));
           else setTimeout(probe, 125).unref();
@@ -678,8 +710,8 @@ export class ClaudeCodexBridge {
   }
 
   async ensureReady(): Promise<void> {
-    if (this.#proxy && this.#proxy.exitCode === null && this.#port > 0 && this.#apiKey) return;
     if (this.#startPromise) return this.#startPromise;
+    if (this.#proxy && this.#proxy.exitCode === null && this.#port > 0 && this.#apiKey) return;
     this.#startPromise = (async () => {
       const installed = await this.install();
       if (!installed.installed) {
@@ -716,7 +748,9 @@ export class ClaudeCodexBridge {
         }
       });
       try {
-        await this.#waitForHealth(child, this.#port, this.#apiKey);
+        const models = await this.#waitForHealth(child, this.#port, this.#apiKey);
+        this.#modelCatalog = { models, fetchedAt: Date.now() };
+        this.#persistModels(this.#modelCatalog);
         this.#lastError = undefined;
       } catch (cause) {
         stopChild(child);
@@ -794,7 +828,9 @@ export class ClaudeCodexBridge {
       const raw = JSON.parse(fs.readFileSync(this.#modelCachePath, "utf8")) as {
         data?: unknown;
         fetchedAt?: unknown;
+        runtimeVersion?: unknown;
       };
+      if (raw.runtimeVersion !== CLAUDE_CODEX_BRIDGE_VERSION) return null;
       const models = parseClaudeCodexModelsPayload({ data: raw.data });
       const fetchedAt =
         typeof raw.fetchedAt === "number" && Number.isFinite(raw.fetchedAt) ? raw.fetchedAt : 0;
@@ -811,6 +847,7 @@ export class ClaudeCodexBridge {
     fs.writeFileSync(
       this.#modelCachePath,
       JSON.stringify({
+        runtimeVersion: CLAUDE_CODEX_BRIDGE_VERSION,
         fetchedAt: catalog.fetchedAt,
         data: catalog.models.map((model) => ({
           id: model.id,
@@ -869,7 +906,6 @@ export class ClaudeCodexBridge {
 
   #isCodexModel(model: string): boolean {
     const normalized = model.trim();
-    if (/^(?:gpt-|codex)/iu.test(normalized)) return true;
     return (
       this.#readCachedModels()?.models.some((candidate) => candidate.id === normalized) ?? false
     );
@@ -883,6 +919,12 @@ export class ClaudeCodexBridge {
     readonly model: string;
   }> {
     await this.ensureReady();
+    const model = this.subagentModel(requestedModel);
+    if (!this.#isCodexModel(model)) {
+      throw new Error(
+        `Codex bridge ${CLAUDE_CODEX_BRIDGE_VERSION} does not offer ${model} for the connected account. Choose an available routing model in Settings → Model routing.`,
+      );
+    }
     const anthropicUpstream = (() => {
       if (!anthropicBaseUrl?.trim()) return new URL("https://api.anthropic.com");
       const candidate = new URL(anthropicBaseUrl);
@@ -921,7 +963,6 @@ export class ClaudeCodexBridge {
       }
       baseUrl = await start;
     }
-    const model = this.subagentModel(requestedModel);
     return {
       model,
       environment: {
