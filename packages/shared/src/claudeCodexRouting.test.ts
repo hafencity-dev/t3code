@@ -22,7 +22,15 @@ describe("Claude Codex routing prompt", () => {
   });
 
   it("uses the verified default for blank model selections", () => {
-    expect(effectiveClaudeCodexModel("  ")).toBe("gpt-5.6-sol");
+    expect(effectiveClaudeCodexModel("  ")).toBe("gpt-6-astra");
+  });
+
+  it("upgrades saved Sol routing across the bridge and task preferences", () => {
+    expect(effectiveClaudeCodexModel(" gpt-5.6-sol ")).toBe("gpt-6-astra");
+    const prompt = buildManagedClaudeCodexRoutingPrompt("gpt-5.6-sol");
+    expect(prompt).toContain("gpt-6-astra");
+    expect(prompt).not.toContain("gpt-5.6-sol");
+    expect(effectiveClaudeCodexModel("gpt-5.5")).toBe("gpt-5.5");
   });
 
   it("renders each structured task preference and the selected second-opinion policy", () => {

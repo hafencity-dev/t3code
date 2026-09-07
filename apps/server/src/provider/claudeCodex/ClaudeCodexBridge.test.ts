@@ -4,6 +4,7 @@ import * as NodePath from "node:path";
 import { describe, expect, it } from "@effect/vitest";
 
 import {
+  ClaudeCodexBridge,
   commitStagedClaudeCodexAuth,
   directoryHasCodexBridgeCredential,
   parseClaudeCodexModelsPayload,
@@ -13,6 +14,16 @@ const fs = NodeFS;
 const path = NodePath;
 
 describe("ClaudeCodexBridge", () => {
+  it("routes new and previously saved Sol subagents to Astra", () => {
+    const bridge = new ClaudeCodexBridge("/unused-routing-test", {
+      platform: "darwin",
+      architecture: "arm64",
+    });
+    expect(bridge.subagentModel()).toBe("gpt-6-astra");
+    expect(bridge.subagentModel(" gpt-5.6-sol ")).toBe("gpt-6-astra");
+    expect(bridge.subagentModel("gpt-5.5")).toBe("gpt-5.5");
+  });
+
   it("accepts only well-formed, unique model catalog entries", () => {
     expect(
       parseClaudeCodexModelsPayload({

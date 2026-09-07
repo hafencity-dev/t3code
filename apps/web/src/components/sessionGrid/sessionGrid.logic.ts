@@ -8,7 +8,6 @@ import type {
 } from "../../sidebarProjectGrouping";
 import {
   firstValidTimestampMs,
-  parseTimestampMs,
   resolveThreadStatusPill,
   sortSettledThreadsForSidebar,
   sortThreadsForSidebar,
@@ -475,4 +474,9 @@ export function sessionGridLastActivityAt(thread: EnvironmentThreadShell): strin
       .toSorted((left, right) => parseTimestampMs(right) - parseTimestampMs(left))[0] ??
     thread.createdAt
   );
+}
+
+function parseTimestampMs(value: string): number {
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : 0;
 }

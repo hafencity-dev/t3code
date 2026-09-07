@@ -13,10 +13,12 @@ import {
   type ClaudeCodexTaskRoute,
 } from "@t3tools/contracts";
 
-export const DEFAULT_CLAUDE_CODEX_MODEL = "gpt-5.6-sol";
+export const DEFAULT_CLAUDE_CODEX_MODEL = "gpt-6-astra";
 
 export function effectiveClaudeCodexModel(model: string | undefined): string {
-  return model?.trim() || DEFAULT_CLAUDE_CODEX_MODEL;
+  const selected = model?.trim();
+  // fork: upgrade the former managed Sol route, including saved configurations.
+  return !selected || selected === "gpt-5.6-sol" ? DEFAULT_CLAUDE_CODEX_MODEL : selected;
 }
 
 export function buildClaudeCodexBridgePrompt(model: string): string {

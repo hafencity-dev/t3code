@@ -138,10 +138,13 @@ export function DraftHeroHeadline({
             value={activeProjectKey}
             onValueChange={(value) => {
               const entry = projectEntryByKey.get(value as string);
-              if (!entry || value === activeProjectKey || !draftId) {
+              if (!entry || value === activeProjectKey) {
                 return;
               }
               const project = entry.targetProject;
+              if (!draftId) {
+                return;
+              }
               // Project selection changes the target of the open draft in
               // place. The prompt stays in the same composer session, so the
               // sidebar only gets a draft row if the user later navigates away.
@@ -153,26 +156,33 @@ export function DraftHeroHeadline({
               );
               if (!hasExplicitComposerModelSelection(currentDraft)) {
                 applyStickyState(draftId);
-                if (project.defaultModelSelection) {
-                  setModelSelection(draftId, project.defaultModelSelection, {
+                const defaultModelSelection =
+                  project.defaultModelSelection ??
+                  environments.find(
+                    (environment) => environment.environmentId === project.environmentId,
+                  )?.serverConfig?.settings.defaultModelSelection;
+                if (defaultModelSelection) {
+                  setModelSelection(draftId, defaultModelSelection, {
                     replaceOptions: true,
                   });
                 }
               }
             }}
           >
-            {projectPickerEntries.map(({ group }) => (
-              <MenuRadioItem key={group.projectKey} value={group.projectKey} closeOnClick>
-                <Tooltip>
-                  <TooltipTrigger render={<span className="block min-w-0 truncate" />}>
-                    {group.displayName}
-                  </TooltipTrigger>
-                  <TooltipPopup side="top" className="max-w-80">
-                    {group.displayName}
-                  </TooltipPopup>
-                </Tooltip>
-              </MenuRadioItem>
-            ))}
+            {projectPickerEntries.map(({ group }) => {
+              return (
+                <MenuRadioItem key={group.projectKey} value={group.projectKey} closeOnClick>
+                  <Tooltip>
+                    <TooltipTrigger render={<span className="block min-w-0 truncate" />}>
+                      {group.displayName}
+                    </TooltipTrigger>
+                    <TooltipPopup side="top" className="max-w-80">
+                      {group.displayName}
+                    </TooltipPopup>
+                  </Tooltip>
+                </MenuRadioItem>
+              );
+            })}
           </MenuRadioGroup>
           <MenuSeparator />
           <MenuItem onClick={openAddProject}>
@@ -194,11 +204,7 @@ export function DraftHeroHeadline({
   return (
     <h1 className="mx-auto w-full max-w-5xl text-center font-normal text-2xl text-foreground tracking-tight sm:text-3xl">
       {hasResolvedProject ? (
-        <span className="inline-flex max-w-full items-baseline justify-center whitespace-nowrap">
-          <span>What should we build in</span>
-          <span className="ml-[0.25em] inline-flex min-w-0 items-baseline">{projectSelector}</span>
-          <span>?</span>
-        </span>
+        <>What should we build in {projectSelector}?</>
       ) : canChooseProject ? (
         <>{projectSelector} to start</>
       ) : (

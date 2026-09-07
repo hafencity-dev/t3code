@@ -71,6 +71,8 @@ const Migration0041 = Effect.gen(function* () {
   yield* ForkMigration0039;
   yield* ForkMigration0040;
 });
+import Migration0048 from "./Migrations/048_ProjectionThreadBranchPullRequest.ts";
+import Migration0049 from "./Migrations/049_ProjectionThreadsActiveOrderKey.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -133,6 +135,8 @@ export const migrationEntries = [
   [46, "ProjectionProjectsAutoPull", UpstreamMigration0045],
   [47, "RepairAutomaticSettlementTimestamps", UpstreamMigration0046],
   [48, "ProjectionProjectIcon", UpstreamMigration0047],
+  [49, "ProjectionThreadBranchPullRequest", Migration0048],
+  [50, "ProjectionThreadsActiveOrderKey", Migration0049],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);

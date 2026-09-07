@@ -26,7 +26,7 @@ import type {
 } from "@t3tools/contracts";
 import { CLAUDE_CODEX_BRIDGE_VERSION } from "@t3tools/contracts";
 
-import { DEFAULT_CLAUDE_CODEX_MODEL } from "@t3tools/shared/claudeCodexRouting";
+import { effectiveClaudeCodexModel } from "@t3tools/shared/claudeCodexRouting";
 import { ClaudeCodexHybridRouter } from "./HybridRouter.ts";
 
 const fs = NodeFS;
@@ -50,6 +50,7 @@ const MAX_RUNTIME_ARCHIVE_BYTES = 256 * 1024 * 1024;
 const MODEL_CACHE_TTL_MS = 5 * 60_000;
 const MAX_MODEL_RESPONSE_BYTES = 1024 * 1024;
 const FALLBACK_MODELS = [
+  "gpt-6-astra",
   "gpt-5.6-sol",
   "gpt-5.5",
   "gpt-5.4",
@@ -863,14 +864,7 @@ export class ClaudeCodexBridge {
   }
 
   subagentModel(requested?: string): string {
-    const trimmed = requested?.trim();
-    if (trimmed) return trimmed;
-    const liveIds = new Set(this.#readCachedModels()?.models.map((model) => model.id) ?? []);
-    return (
-      FALLBACK_MODELS.find((model) => liveIds.has(model)) ??
-      this.#readCachedModels()?.models[0]?.id ??
-      DEFAULT_CLAUDE_CODEX_MODEL
-    );
+    return effectiveClaudeCodexModel(requested);
   }
 
   #isCodexModel(model: string): boolean {

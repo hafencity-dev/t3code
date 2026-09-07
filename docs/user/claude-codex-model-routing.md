@@ -18,6 +18,9 @@ The bridge account is separate from the normal Codex provider in T3 Code. It bel
 environment that runs Claude Code, so the same setup works from the web, desktop, and remote
 clients. Tokens stay on that environment and are not sent to the client.
 
+The default route is **GPT-6 Astra**. Previously saved GPT-5.6 Sol routes also use Astra when
+a new Claude session starts. Other explicitly configured models keep their selection.
+
 ## What Is Remapped
 
 These Claude Code calls use the configured Codex model after routing is enabled:

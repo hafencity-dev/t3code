@@ -27,13 +27,13 @@ describe("Claude Codex routed model catalog", () => {
         codexRouting: {
           ...DEFAULT_CLAUDE_CODEX_ROUTING_SETTINGS,
           enabled: true,
-          model: "gpt-5.6-sol",
+          model: "gpt-6-astra",
         },
       }),
     ).toMatchObject({
-      slug: "gpt-5.6-sol",
-      name: "GPT-5.6 Sol",
-      shortName: "GPT-5.6 Sol",
+      slug: "gpt-6-astra",
+      name: "GPT-6 Astra",
+      shortName: "GPT-6 Astra",
       subProvider: "via Codex",
       isCustom: false,
     });
@@ -43,26 +43,26 @@ describe("Claude Codex routed model catalog", () => {
     const models = [
       model("claude-opus-5"),
       { ...model("gpt-5.4-mini"), subProvider: "via Codex" },
-      model("gpt-5.6-sol"),
+      model("gpt-6-astra"),
       model("claude-opus-4-6", true),
     ];
     const routed = withClaudeCodexRoutedModel(models, {
       codexRouting: {
         ...DEFAULT_CLAUDE_CODEX_ROUTING_SETTINGS,
         enabled: true,
-        model: "gpt-5.6-sol",
+        model: "gpt-6-astra",
       },
     });
     expect(routed.map((entry) => entry.slug)).toEqual([
       "claude-opus-5",
-      "gpt-5.6-sol",
+      "gpt-6-astra",
       "claude-opus-4-6",
     ]);
     expect(routed[1]?.subProvider).toBe("via Codex");
   });
 
   it("formats model ids without hiding their identity", () => {
-    expect(formatClaudeCodexModelName("gpt-5.6-sol")).toBe("GPT-5.6 Sol");
+    expect(formatClaudeCodexModelName("gpt-6-astra")).toBe("GPT-6 Astra");
     expect(formatClaudeCodexModelName("codex-mini-latest")).toBe("Codex Mini Latest");
   });
 });

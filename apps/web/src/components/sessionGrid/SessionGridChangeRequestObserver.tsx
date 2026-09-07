@@ -6,11 +6,7 @@ import { memo, useEffect, useMemo } from "react";
 import { gitEnvironment } from "../../state/git";
 import { useEnvironmentQuery } from "../../state/query";
 import { vcsEnvironment } from "../../state/vcs";
-import {
-  prStatusIndicator,
-  resolveThreadPr,
-  type PrStatusIndicator,
-} from "../ThreadStatusIndicators";
+import { prStatusIndicator, type PrStatusIndicator } from "../ThreadStatusIndicators";
 import {
   isSessionGridMissingChangeRequestError,
   sessionGridChangeRequestKey,
@@ -91,10 +87,7 @@ export const SessionGridChangeRequestObserverGroup = memo(
       }
       return threads.flatMap((thread): SessionGridChangeRequestObservation[] => {
         if (thread.branch !== data.refName) return [];
-        const pr = resolveThreadPr({
-          threadBranch: thread.branch,
-          gitStatus: data,
-        });
+        const pr = data.pr;
         return [
           {
             key: observationKey(thread),

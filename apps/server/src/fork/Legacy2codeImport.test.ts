@@ -94,6 +94,8 @@ const makeEngine = (
 ) =>
   ({
     readEvents: () => Stream.empty,
+    readThreadEvents: () => Stream.empty,
+    getThreadReplayStats: () => Effect.die("unused"),
     dispatch: (command: OrchestrationCommand) =>
       Effect.gen(function* () {
         yield* Ref.update(commands, (current) => [...current, command]);
@@ -115,6 +117,7 @@ const makeDirectory = (bindings: Ref.Ref<ReadonlyArray<ProviderRuntimeBinding>>)
     getBinding: () => Effect.die("unused"),
     listThreadIds: () => Effect.die("unused"),
     listBindings: () => Effect.die("unused"),
+    recordImportedTranscript: () => Effect.die("unused"),
   }) satisfies ProviderSessionDirectory.ProviderSessionDirectory["Service"];
 
 const writeManifest = (manifest: Legacy2CodeImportManifest) =>

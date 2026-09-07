@@ -6,6 +6,7 @@ import {
   FolderGitIcon,
   FolderIcon,
   HistoryIcon,
+  ScaleIcon,
 } from "lucide-react";
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
@@ -16,6 +17,7 @@ import { useProject, useThread, useThreadShellsForProjectRefs } from "../state/e
 import {
   type EnvMode,
   type EnvironmentOption,
+  resolveContextStripLabelsCompact,
   resolveCurrentWorkspaceLabel,
   resolveEnvModeLabel,
   resolveEffectiveEnvMode,
@@ -40,6 +42,9 @@ import {
 } from "./ui/menu";
 import { Separator } from "./ui/separator";
 import { ComposerSurface } from "./chat/ComposerSurface";
+import { composerFloatingLayerProps } from "./chat/composerEventScope";
+import { measureRestingComposerControls } from "./chat/restingComposerControlsMeasurement";
+import { resolveRestingComposerControlsNaturalWidth } from "./composerFooterLayout";
 import { cn } from "~/lib/utils";
 
 interface BranchToolbarProps {
@@ -55,6 +60,8 @@ interface BranchToolbarProps {
   onActiveThreadBranchOverrideChange?: (branch: string | null) => void;
   startFromOrigin: boolean;
   onStartFromOriginChange: (startFromOrigin: boolean) => void;
+  autoEnvironmentLabel?: string | undefined;
+  onAutoEnvironment?: (() => void) | undefined;
   envLocked: boolean;
   onCheckoutPullRequestRequest?: (reference: string) => void;
   onComposerFocusRequest?: () => void;
@@ -66,6 +73,8 @@ interface BranchToolbarProps {
 
 interface MobileRunContextSelectorProps {
   popupSide: "top" | "bottom";
+  autoEnvironmentLabel?: string | undefined;
+  onAutoEnvironment?: (() => void) | undefined;
   envLocked: boolean;
   envModeLocked: boolean;
   environmentId: EnvironmentId;
@@ -82,6 +91,8 @@ interface MobileRunContextSelectorProps {
 
 const MobileRunContextSelector = memo(function MobileRunContextSelector({
   popupSide,
+  autoEnvironmentLabel,
+  onAutoEnvironment,
   envLocked,
   envModeLocked,
   environmentId,
@@ -115,10 +126,14 @@ const MobileRunContextSelector = memo(function MobileRunContextSelector({
     // Button's base styles apply `-mx-0.5` to descendant SVGs, which eats 4px
     // out of whatever gap we set. mx-0! cancels that so gap-0.5 reads as 2px.
     <span className="inline-flex shrink-0 items-center gap-0.5">
-      <EnvironmentMachineIcon
-        kind={activeEnvironment?.machine ?? "server"}
-        className="size-3 shrink-0 mx-0!"
-      />
+      {autoEnvironmentLabel ? (
+        <ScaleIcon className="size-3 shrink-0 mx-0!" aria-hidden="true" />
+      ) : (
+        <EnvironmentMachineIcon
+          kind={activeEnvironment?.machine ?? "server"}
+          className="size-3 shrink-0 mx-0!"
+        />
+      )}
       <WorkspaceIcon className="size-3 shrink-0 mx-0!" />
     </span>
   ) : (
@@ -135,7 +150,8 @@ const MobileRunContextSelector = memo(function MobileRunContextSelector({
           data-composer-label-motion
           className="block w-full min-w-0 max-w-[240px] origin-left truncate transition-[opacity,transform] duration-180 ease-[cubic-bezier(0.32,0.72,0,1)] group-data-[compact]/composer-context:[transform:translateX(-0.25rem)_scaleX(0.95)] group-data-[compact]/composer-context:opacity-0 motion-reduce:transform-none motion-reduce:transition-opacity"
         >
-          {showEnvironmentIndicator ? (activeEnvironment?.label ?? "Run on") : workspaceLabel}
+          {autoEnvironmentLabel ??
+            (showEnvironmentIndicator ? (activeEnvironment?.label ?? "Run on") : workspaceLabel)}
         </span>
       </span>
     </>
@@ -162,15 +178,35 @@ const MobileRunContextSelector = memo(function MobileRunContextSelector({
         {triggerContent}
         <ChevronDownIcon className="size-3 shrink-0 opacity-50" />
       </MenuTrigger>
-      <MenuPopup align="start" side={popupSide} className="w-64">
+      <MenuPopup align="start" side={popupSide} className="w-64" {...composerFloatingLayerProps}>
         {showEnvironmentPicker && availableEnvironments && onEnvironmentChange ? (
           <>
             <MenuGroup>
               <MenuGroupLabel>Run on</MenuGroupLabel>
               <MenuRadioGroup
-                value={environmentId}
-                onValueChange={(value) => onEnvironmentChange(value as EnvironmentId)}
+                value={autoEnvironmentLabel ? "auto" : environmentId}
+                onValueChange={(value) =>
+                  value === "auto"
+                    ? onAutoEnvironment?.()
+                    : onEnvironmentChange(value as EnvironmentId)
+                }
               >
+                {onAutoEnvironment && (
+                  <MenuRadioItem
+                    value="auto"
+                    disabled={envLocked}
+                    onClick={() => {
+                      if (autoEnvironmentLabel) onAutoEnvironment?.();
+                    }}
+                  >
+                    <span className="flex min-w-0 items-center gap-1.5">
+                      <ScaleIcon className="size-3" aria-hidden="true" />
+                      <span className="min-w-0 truncate">
+                        {autoEnvironmentLabel ?? "Auto balance"}
+                      </span>
+                    </span>
+                  </MenuRadioItem>
+                )}
                 {availableEnvironments.map((env) => (
                   <MenuRadioItem
                     key={env.environmentId}
@@ -241,7 +277,6 @@ const MobileRunContextSelector = memo(function MobileRunContextSelector({
  * the expanded width without remembered values that could go stale or latch
  * the strip compact. A small hysteresis keeps the boundary from flapping.
  */
-const COMPACT_EXPAND_HYSTERESIS_PX = 16;
 const COMPOSER_CONTEXT_MOTION_DURATION_MS = 180;
 const COMPOSER_CONTEXT_MOTION_EASING = "cubic-bezier(0.32, 0.72, 0, 1)";
 const COMPOSER_CONTEXT_CONTROL_SELECTOR = "[data-composer-context-control]";
@@ -287,12 +322,20 @@ function useLabelsOverflow(element: HTMLDivElement | null): boolean {
     let groups = 0;
     for (const child of current.children) {
       if (!(child instanceof HTMLElement)) continue;
-      // The host itself flexes into all remaining room. Measure the controls
-      // inside it so Git labels compact before squeezing out the model picker.
+      // The host itself flexes into all remaining room. Reserve the natural
+      // width of the controls inside it, blocks in overflow included, so Git
+      // labels compact before squeezing out the model picker. Reserving only
+      // the visible controls would let the labels expand into room the
+      // composer just freed, shrink the host, and hide the controls again.
       const hostedControls = child.matches('[data-chat-resting-composer-controls-host="true"]')
         ? child.querySelector<HTMLElement>('[data-chat-composer-resting-controls="true"]')
         : null;
-      const width = hostedControls ? contentWidth(hostedControls) : contentWidth(child);
+      const hostedMeasurement = hostedControls
+        ? measureRestingComposerControls(hostedControls)
+        : null;
+      const width = hostedMeasurement
+        ? resolveRestingComposerControlsNaturalWidth(hostedMeasurement)
+        : contentWidth(hostedControls ?? child);
       if (width <= 1) continue;
       groups += 1;
       needed += width;
@@ -316,9 +359,11 @@ function useLabelsOverflow(element: HTMLDivElement | null): boolean {
         needed += Math.max(0, textWidth - label.clientWidth);
       }
     }
-    const nextOverflows = compact
-      ? needed > available - COMPACT_EXPAND_HYSTERESIS_PX
-      : needed > available;
+    const nextOverflows = resolveContextStripLabelsCompact({
+      compact,
+      neededWidth: needed,
+      availableWidth: available,
+    });
     if (nextOverflows !== compact) {
       pendingControlRectsRef.current = new Map(
         Array.from(current.querySelectorAll<HTMLElement>(COMPOSER_CONTEXT_CONTROL_SELECTOR)).map(
@@ -414,6 +459,8 @@ export const BranchToolbar = memo(function BranchToolbar({
   onActiveThreadBranchOverrideChange,
   startFromOrigin,
   onStartFromOriginChange,
+  autoEnvironmentLabel,
+  onAutoEnvironment,
   envLocked,
   onCheckoutPullRequestRequest,
   onComposerFocusRequest,
@@ -597,6 +644,8 @@ export const BranchToolbar = memo(function BranchToolbar({
         <div className="contents @3xl/composer-surface:hidden">
           <MobileRunContextSelector
             popupSide="top"
+            autoEnvironmentLabel={autoEnvironmentLabel}
+            onAutoEnvironment={onAutoEnvironment}
             envLocked={envLocked}
             envModeLocked={envModeLocked}
             environmentId={environmentId}
@@ -623,6 +672,8 @@ export const BranchToolbar = memo(function BranchToolbar({
           {showEnvironmentIndicator && availableEnvironments && (
             <>
               <BranchToolbarEnvironmentSelector
+                autoEnvironmentLabel={autoEnvironmentLabel}
+                onAutoEnvironment={onAutoEnvironment}
                 envLocked={envLocked}
                 environmentId={environmentId}
                 availableEnvironments={availableEnvironments}
