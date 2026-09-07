@@ -38,7 +38,7 @@ export interface ClaudeCodexHybridRouterDeps {
     | { readonly port: number; readonly token: string }
     | null
     | Promise<{ readonly port: number; readonly token: string } | null>;
-  /** Bound even a stream that sends keep-alives forever. */
+  /** Optional total duration limit. Omitted or zero allows long-running streams. */
   readonly requestTimeoutMs?: number | undefined;
   readonly isCodexModel: (modelId: string) => boolean;
   readonly fastModeEnabled?: (() => boolean) | undefined; // fork: f5 GPT fast
@@ -362,11 +362,12 @@ export class ClaudeCodexHybridRouter {
         sendJsonError(response, 504, "Claude/Codex upstream timed out. Retry the request.");
         upstreamRequest.destroy();
       };
-      // Socket inactivity catches dead connections; the deadline also bounds
-      // streams that remain open indefinitely while emitting keep-alives.
+      // Keep-alives count as connection activity during long reasoning phases.
+      // Only an explicitly configured deadline may cut off an active stream.
       upstreamRequest.setTimeout(5 * 60_000, timeout);
-      const deadline = setTimeout(timeout, this.#deps.requestTimeoutMs ?? 30 * 60_000);
-      deadline.unref();
+      const duration = this.#deps.requestTimeoutMs ?? 0;
+      const deadline = duration > 0 ? setTimeout(timeout, duration) : undefined;
+      deadline?.unref();
       response.once("close", () => clearTimeout(deadline));
       upstreamRequest.once("error", (error) => {
         clearTimeout(deadline);

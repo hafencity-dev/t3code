@@ -977,7 +977,7 @@ export class ClaudeCodexBridge {
   async hybridEnvironment(
     requestedModel?: string,
     anthropicBaseUrl?: string,
-    requestTimeoutSeconds = 1800,
+    requestTimeoutSeconds = 0,
   ): Promise<{
     readonly environment: NodeJS.ProcessEnv;
     readonly model: string;

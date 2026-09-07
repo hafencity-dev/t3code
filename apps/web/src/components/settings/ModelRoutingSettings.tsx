@@ -699,23 +699,25 @@ export function ModelRoutingSettingsPanel() {
             <SettingsRow
               {...searchableSetting("model-routing-timeout")}
               title="Request timeout"
-              description="Maximum duration of a routed model request, including reasoning. Applies to new sessions."
+              description="Optional maximum duration of one model request. No time limit lets active requests continue for hours. Applies to new sessions."
               control={
                 <Select
-                  value={String(routing.requestTimeoutSeconds ?? 1800)}
+                  value={String(routing.requestTimeoutSeconds ?? 0)}
                   onValueChange={(value) =>
                     saveRouting({ ...routing, requestTimeoutSeconds: Number(value) })
                   }
                 >
                   <SelectTrigger className="w-40" aria-label="Routing request timeout">
                     <SelectValue>
-                      {(routing.requestTimeoutSeconds ?? 1800) / 60} minutes
+                      {routing.requestTimeoutSeconds
+                        ? `${routing.requestTimeoutSeconds / 60} minutes`
+                        : "No time limit"}
                     </SelectValue>
                   </SelectTrigger>
                   <SelectPopup>
-                    {[300, 900, 1800, 3600, 7200].map((seconds) => (
+                    {[0, 300, 900, 1800, 3600, 7200].map((seconds) => (
                       <SelectItem key={seconds} value={String(seconds)}>
-                        {seconds / 60} minutes
+                        {seconds === 0 ? "No time limit" : `${seconds / 60} minutes`}
                       </SelectItem>
                     ))}
                   </SelectPopup>

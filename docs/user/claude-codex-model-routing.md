@@ -86,9 +86,15 @@ own value.
 ## Request Duration And Token Limits
 
 In **Settings → Model Routing**, choose **Request timeout** for the selected Claude instance.
-The default is 30 minutes per model request, including reasoning. Increase it for unusually long
-requests or reduce it to surface stalled requests sooner. Changes apply to new provider sessions.
-Disconnected clients cancel their upstream work; interrupted requests can be retried in the same chat.
+The default is **No time limit**: a single active model request may run for hours. You can optionally
+set a maximum duration, including reasoning, but that limit also ends requests that are still making
+progress. Previously selected limits remain in effect until you choose **No time limit**. Changes
+apply to new provider sessions.
+
+Connections with no traffic for five minutes are still closed. Streaming keep-alives count as
+activity during long reasoning phases; they do not guarantee that the model is making progress.
+You can stop an unproductive request yourself. Disconnected clients cancel their upstream work;
+interrupted requests can be retried in the same chat.
 
 GPT output limits are managed by Codex. Claude's `max_tokens` value is not an adjustable GPT output
 cap through this bridge. For long conversations, use **Settings → Providers → Claude Code →

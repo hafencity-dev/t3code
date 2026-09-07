@@ -229,6 +229,47 @@ it("waits for recovery before forwarding and survives rejected startup", async (
   );
 });
 
+it.each([undefined, 0])(
+  "keeps an active stream open for hours when no duration limit is set (%s)",
+  async (requestTimeoutMs) => {
+    const upstream = Promise.withResolvers<NodeHttp.ServerResponse>();
+    await withEndpoint(
+      (_req, res) => {
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        res.write(": started\n\n");
+        upstream.resolve(res);
+      },
+      async (port) => {
+        const router = new ClaudeCodexHybridRouter({
+          isCodexModel: isCodex,
+          codexUpstream: () => ({ port, token: "fixture" }),
+          requestTimeoutMs,
+        });
+        try {
+          const url = `${await router.start()}/v1/messages`;
+          vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+          const response = await fetch(url, messageRequest());
+          const reader = response.body!.getReader();
+          expect(new TextDecoder().decode((await reader.read()).value)).toContain("started");
+          const stream = await upstream.promise;
+          for (let hour = 0; hour < 3; hour += 1) {
+            await vi.advanceTimersByTimeAsync(60 * 60_000);
+            stream.write(": still working\n\n");
+            expect(new TextDecoder().decode((await reader.read()).value)).toContain(
+              "still working",
+            );
+          }
+          stream.end();
+          expect((await reader.read()).done).toBe(true);
+        } finally {
+          vi.useRealTimers();
+          router.stop();
+        }
+      },
+    );
+  },
+);
+
 it.each([false, true])(
   "bounds stalled requests (headers sent: %s) and allows the next turn",
   async (stream) => {

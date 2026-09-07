@@ -440,8 +440,11 @@ describe("ServerSettings.providerInstances (slice-2 invariant)", () => {
 });
 
 describe("Claude Code Codex routing", () => {
-  it("validates the routing deadline without changing legacy defaults", () => {
-    for (const requestTimeoutSeconds of [60, 1800, 7200]) {
+  it("accepts disabling the routing deadline and preserves explicit limits", () => {
+    expect(
+      decodeClaudeSettings({ codexRouting: {} }).codexRouting?.requestTimeoutSeconds,
+    ).toBeUndefined();
+    for (const requestTimeoutSeconds of [0, 60, 1800, 7200]) {
       const settings = decodeClaudeSettings({ codexRouting: { requestTimeoutSeconds } });
       expect(settings.codexRouting?.requestTimeoutSeconds).toBe(requestTimeoutSeconds);
       expect(
@@ -450,7 +453,7 @@ describe("Claude Code Codex routing", () => {
         }).providers?.claudeAgent?.codexRouting?.requestTimeoutSeconds,
       ).toBe(requestTimeoutSeconds);
     }
-    for (const requestTimeoutSeconds of [0, -1, 59, 7201, 1.5, "1800"]) {
+    for (const requestTimeoutSeconds of [-1, 1, 59, 7201, 1.5, "1800"]) {
       expect(() => decodeClaudeSettings({ codexRouting: { requestTimeoutSeconds } })).toThrow();
       expect(() =>
         decodeServerSettingsPatch({
