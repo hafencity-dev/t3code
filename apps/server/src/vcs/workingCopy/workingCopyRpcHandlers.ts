@@ -40,8 +40,10 @@ import type {
   WorkingCopyStashRefInput,
   WorkingCopyStatusInput,
   WorkingCopyTagCommitInput,
+  VcsInvalidationDomain, // fork: repository invalidation
 } from "@t3tools/contracts";
 import type { WorkingCopyService } from "./WorkingCopyService.ts";
+import { WorkingCopyMutationObserver } from "./WorkingCopyMutationObserver.ts"; // fork: repository invalidation
 
 /**
  * `ws.ts`'s scope-checking wrapper. Declared as an interface so the generic
@@ -58,11 +60,34 @@ export interface WorkingCopyObserveRpcEffect {
 export interface WorkingCopyRpcHandlerDeps {
   readonly workingCopy: WorkingCopyService["Service"];
   readonly observeRpcEffect: WorkingCopyObserveRpcEffect;
-  /** Fire-and-forget local status refresh; never fails the RPC. */
-  readonly refreshGitStatus: (cwd: string) => Effect.Effect<void>;
+  /** Settled mutation notification; never fails the RPC. */
+  readonly refreshGitStatus: (
+    cwd: string,
+    domains?: ReadonlyArray<VcsInvalidationDomain>,
+  ) => Effect.Effect<void>;
 }
 
 const TRACE = { "rpc.aggregate": "vcs" } as const;
+
+export function workingCopyMutationDomains(method: string): ReadonlyArray<VcsInvalidationDomain> {
+  switch (method) {
+    case WS_METHODS.workingCopyStagePaths:
+    case WS_METHODS.workingCopyUnstagePaths:
+    case WS_METHODS.workingCopyApplyPatch:
+    case WS_METHODS.workingCopyResolveConflict:
+    case WS_METHODS.workingCopyStashApply:
+      return ["worktree"];
+    case WS_METHODS.workingCopyStashDrop:
+      return ["stashes"];
+    case WS_METHODS.workingCopyStashPush:
+    case WS_METHODS.workingCopyStashPop:
+    case WS_METHODS.workingCopyDiscardPaths:
+    case WS_METHODS.workingCopyRestoreDiscardBackup:
+      return ["worktree", "stashes"];
+    default:
+      return ["worktree", "refs", "stashes"];
+  }
+}
 
 export function makeWorkingCopyRpcHandlers(deps: WorkingCopyRpcHandlerDeps) {
   const { workingCopy, observeRpcEffect, refreshGitStatus } = deps;
@@ -71,13 +96,18 @@ export function makeWorkingCopyRpcHandlers(deps: WorkingCopyRpcHandlerDeps) {
   const read = <A, E, R>(method: string, effect: Effect.Effect<A, E, R>) =>
     observeRpcEffect(method, effect, TRACE);
 
-  /**
-   * Mutations: push the new local status out without waiting for the client to
-   * ask. On failure nothing is refreshed and the error propagates verbatim —
-   * the panel's contract is a toast carrying the full stderr.
-   */
-  const mutate = <A, E, R>(method: string, cwd: string, effect: Effect.Effect<A, E, R>) =>
-    observeRpcEffect(method, effect.pipe(Effect.tap(() => refreshGitStatus(cwd))), TRACE);
+  // The service calls this observer only after containment and lane acquisition.
+  // An ensuring at this RPC boundary would incorrectly announce rejected cwds.
+  const mutate = <A, E, R>(method: string, _cwd: string, effect: Effect.Effect<A, E, R>) =>
+    observeRpcEffect(
+      method,
+      effect.pipe(
+        Effect.provideService(WorkingCopyMutationObserver, {
+          settled: (root) => refreshGitStatus(root, workingCopyMutationDomains(method)),
+        }),
+      ),
+      TRACE,
+    );
 
   return {
     // Reads

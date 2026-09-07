@@ -7,6 +7,7 @@ import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit"; // fork: repository invalidation
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
@@ -73,6 +74,8 @@ import {
   WsRpcGroup,
   ClaudeCodexBridgeError,
   type ClaudeCodexBridgeSignInEvent,
+  type VcsInvalidationDomain, // fork: repository invalidation
+  GitCommandError, // fork: repository invalidation
 } from "@t3tools/contracts";
 import { resolveServerBackgroundActivitySettings } from "@t3tools/shared/backgroundActivitySettings";
 import { HostProcessArchitecture, HostProcessPlatform } from "@t3tools/shared/hostProcess";
@@ -163,6 +166,9 @@ import * as PairingGrantStore from "./auth/PairingGrantStore.ts";
 import * as SessionStore from "./auth/SessionStore.ts";
 import { failEnvironmentAuthInvalid, failEnvironmentInternal } from "./auth/http.ts";
 import * as RelayClient from "@t3tools/shared/relayClient";
+// fork: repository invalidation — a failed git process may have changed the repository.
+const isGitCommandError = Schema.is(GitCommandError);
+
 const isOrchestrationDispatchCommandError = Schema.is(OrchestrationDispatchCommandError);
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
@@ -1306,10 +1312,30 @@ const makeWsRpcLayer = (
           };
         });
 
-      const refreshGitStatus = (cwd: string) =>
+      // fork: mutation revisions are published off the RPC's critical path; the
+      // remote/PR refresh follows and cannot suppress the local notification.
+      const refreshGitStatus = (cwd: string, domains?: ReadonlyArray<VcsInvalidationDomain>) =>
         vcsStatusBroadcaster
-          .refreshStatus(cwd)
-          .pipe(Effect.ignoreCause({ log: true }), Effect.forkDetach, Effect.asVoid);
+          .notifyMutation(cwd, domains)
+          .pipe(
+            Effect.andThen(vcsStatusBroadcaster.refreshStatus(cwd)),
+            Effect.ignoreCause({ log: true }),
+            Effect.forkDetach,
+            Effect.asVoid,
+          );
+      // A failure before git ran (cwd validation, driver resolution) changed
+      // nothing, so only successes and failed git processes notify.
+      const notifyGitExit = (cwd: string) => (exit: Exit.Exit<unknown, unknown>) => {
+        if (Exit.isSuccess(exit)) return refreshGitStatus(cwd);
+        const error = Cause.squash(exit.cause);
+        return isGitCommandError(error) && error.exitCode !== undefined
+          ? refreshGitStatus(cwd)
+          : Effect.void;
+      };
+      const notifyGitMutation =
+        (cwd: string) =>
+        <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E, R> =>
+          effect.pipe(Effect.onExit((exit) => notifyGitExit(cwd)(exit)));
 
       return WsRpcGroup.of({
         // fork: f4 source-control panel — one spread, handlers defined in
@@ -2358,9 +2384,7 @@ const makeWsRpcLayer = (
         [WS_METHODS.sourceControlPublishRepository]: (input) =>
           observeRpcEffect(
             WS_METHODS.sourceControlPublishRepository,
-            sourceControlRepositories
-              .publishRepository(input)
-              .pipe(Effect.tap(() => refreshGitStatus(input.cwd))),
+            sourceControlRepositories.publishRepository(input).pipe(notifyGitMutation(input.cwd)),
             {
               "rpc.aggregate": "source-control",
             },
@@ -2593,13 +2617,7 @@ const makeWsRpcLayer = (
         [WS_METHODS.vcsPull]: (input) =>
           observeRpcEffect(
             WS_METHODS.vcsPull,
-            gitWorkflow.pullCurrentBranch(input.cwd).pipe(
-              Effect.matchCauseEffect({
-                onFailure: (cause) => Effect.failCause(cause),
-                onSuccess: (result) =>
-                  refreshGitStatus(input.cwd).pipe(Effect.ignore({ log: true }), Effect.as(result)),
-              }),
-            ),
+            gitWorkflow.pullCurrentBranch(input.cwd).pipe(notifyGitMutation(input.cwd)),
             { "rpc.aggregate": "git" },
           ),
         [WS_METHODS.gitRunStackedAction]: (input) =>
@@ -2614,12 +2632,10 @@ const makeWsRpcLayer = (
                   },
                 })
                 .pipe(
+                  Effect.onExit((exit) => notifyGitExit(input.cwd)(exit)),
                   Effect.matchCauseEffect({
                     onFailure: (cause) => Queue.failCause(queue, cause),
-                    onSuccess: () =>
-                      refreshGitStatus(input.cwd).pipe(
-                        Effect.andThen(Queue.end(queue).pipe(Effect.asVoid)),
-                      ),
+                    onSuccess: () => Queue.end(queue).pipe(Effect.asVoid),
                   }),
                 ),
             ),
@@ -2636,9 +2652,7 @@ const makeWsRpcLayer = (
         [WS_METHODS.gitPreparePullRequestThread]: (input) =>
           observeRpcEffect(
             WS_METHODS.gitPreparePullRequestThread,
-            gitWorkflow
-              .preparePullRequestThread(input)
-              .pipe(Effect.tap(() => refreshGitStatus(input.cwd))),
+            gitWorkflow.preparePullRequestThread(input).pipe(notifyGitMutation(input.cwd)),
             { "rpc.aggregate": "git" },
           ),
         [WS_METHODS.vcsListRefs]: (input) =>
@@ -2648,33 +2662,31 @@ const makeWsRpcLayer = (
         [WS_METHODS.vcsCreateWorktree]: (input) =>
           observeRpcEffect(
             WS_METHODS.vcsCreateWorktree,
-            gitWorkflow.createWorktree(input).pipe(Effect.tap(() => refreshGitStatus(input.cwd))),
+            gitWorkflow.createWorktree(input).pipe(notifyGitMutation(input.cwd)),
             { "rpc.aggregate": "vcs" },
           ),
         [WS_METHODS.vcsRemoveWorktree]: (input) =>
           observeRpcEffect(
             WS_METHODS.vcsRemoveWorktree,
-            gitWorkflow.removeWorktree(input).pipe(Effect.tap(() => refreshGitStatus(input.cwd))),
+            gitWorkflow.removeWorktree(input).pipe(notifyGitMutation(input.cwd)),
             { "rpc.aggregate": "vcs" },
           ),
         [WS_METHODS.vcsCreateRef]: (input) =>
           observeRpcEffect(
             WS_METHODS.vcsCreateRef,
-            gitWorkflow.createRef(input).pipe(Effect.tap(() => refreshGitStatus(input.cwd))),
+            gitWorkflow.createRef(input).pipe(notifyGitMutation(input.cwd)),
             { "rpc.aggregate": "vcs" },
           ),
         [WS_METHODS.vcsSwitchRef]: (input) =>
           observeRpcEffect(
             WS_METHODS.vcsSwitchRef,
-            gitWorkflow.switchRef(input).pipe(Effect.tap(() => refreshGitStatus(input.cwd))),
+            gitWorkflow.switchRef(input).pipe(notifyGitMutation(input.cwd)),
             { "rpc.aggregate": "vcs" },
           ),
         [WS_METHODS.vcsInit]: (input) =>
           observeRpcEffect(
             WS_METHODS.vcsInit,
-            vcsProvisioning
-              .initRepository(input)
-              .pipe(Effect.tap(() => refreshGitStatus(input.cwd))),
+            vcsProvisioning.initRepository(input).pipe(notifyGitMutation(input.cwd)),
             { "rpc.aggregate": "vcs" },
           ),
         [WS_METHODS.reviewGetDiffPreview]: (input) =>

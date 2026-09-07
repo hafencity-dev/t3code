@@ -14,18 +14,25 @@
  * `confirmedDestructive: true`. Current clients confirm every discard before
  * sending that flag; the refusal remains load-bearing for older clients.
  */
+import * as NodeCrypto from "node:crypto";
 import * as Effect from "effect/Effect";
 
 import {
-  WorkingCopyInvalidRevisionError,
   type WorkingCopyDiscardResult,
   type WorkingCopyError,
   type WorkingCopyStashEntry,
 } from "@t3tools/contracts";
 import * as commands from "./commands.ts";
 import { chunkPathsForExec } from "./WorkingCopyStaging.ts";
-import { DISCARD_BACKUP_KEEP, DISCARD_BACKUP_PREFIX, readStashList } from "./WorkingCopyStash.ts";
-import type { WorkingCopyGit } from "./WorkingCopyGit.ts";
+import {
+  DISCARD_BACKUP_KEEP,
+  DISCARD_BACKUP_PREFIX,
+  readStashList,
+  stashDrop,
+} from "./WorkingCopyStash.ts";
+import { exitError, type WorkingCopyGit } from "./WorkingCopyGit.ts";
+import { withStashIdentity } from "./WorkingCopyStashIdentity.ts";
+import type { StashIdentityInput } from "./StashIdentityFiles.ts";
 
 const OPERATION = "workingCopy.discardPaths";
 const GIT_VERSION = /(\d+)\.(\d+)/;
@@ -66,13 +73,11 @@ export const pruneDiscardBackups = Effect.fn("workingCopy.pruneDiscardBackups")(
     .sort((left, right) => right.index - left.index)
     .slice(0, backups.length - DISCARD_BACKUP_KEEP);
   for (const entry of doomed) {
-    yield* git
-      .run({
-        operation: "workingCopy.pruneDiscardBackups",
-        args: commands.stashDropArgs(entry.ref),
-        mutating: true,
-      })
-      .pipe(Effect.asVoid);
+    yield* stashDrop(git, {
+      ref: entry.commit ?? entry.ref,
+      expectedCommit: entry.commit ?? "",
+      expectedIdentity: entry.identity ?? "",
+    });
   }
 });
 
@@ -149,10 +154,13 @@ export const discardPaths = Effect.fn("workingCopy.discardPaths")(function* (
     return { recoverable: false, discardedPaths: input.paths };
   }
 
+  // The marker finds this exact backup even when an agent or another client
+  // pushes a stash before the list is read back. `stash@{0}` is not evidence.
+  const marker = `[t3-operation:${NodeCrypto.randomUUID()}]`;
   const stashed = yield* git.run({
     operation: OPERATION,
     args: commands.stashPushArgs({
-      message: backupMessage(input.label, input.paths.length),
+      message: `${backupMessage(input.label, input.paths.length)} ${marker}`,
       includeUntracked: true,
       ...(chunks[0] !== undefined ? { paths: chunks[0] } : {}),
     }),
@@ -160,22 +168,35 @@ export const discardPaths = Effect.fn("workingCopy.discardPaths")(function* (
   });
 
   if (stashed.exitCode !== 0) {
-    if (input.confirmedDestructive !== true) {
-      return REQUIRES_CONFIRMATION;
-    }
-    yield* discardDestructively(git, input.paths);
-    return { recoverable: false, discardedPaths: input.paths };
+    // A failed push may already have saved/reset some paths. Never follow a
+    // partial Git failure by another, unbacked destructive operation.
+    return yield* exitError({ operation: OPERATION, args: ["stash", "push"] }, git.cwd, stashed);
   }
 
-  // `stash push` with nothing to save exits 0 and creates no entry, so the
-  // backup ref is read back rather than assumed.
   const entries = yield* readStashList(git);
-  const backup = entries.find((entry) => entry.isDiscardBackup && entry.index === 0);
+  const matches = entries.filter((entry) => entry.isDiscardBackup && entry.label.endsWith(marker));
+  const backup = matches.length === 1 ? matches[0] : undefined;
   if (backup === undefined) {
-    return { recoverable: true, discardedPaths: input.paths };
+    return {
+      recoverable: true,
+      discardedPaths: input.paths,
+      ...(stashed.stdout.includes("No local changes to save")
+        ? {}
+        : {
+            warning:
+              "Git saved the changes, but the exact backup is no longer available. Refresh Recent backups; no other stash was selected for Undo.",
+          }),
+    };
   }
 
-  yield* pruneDiscardBackups(git);
+  const warning = yield* pruneDiscardBackups(git).pipe(
+    Effect.as(undefined as string | undefined),
+    Effect.catch((error) =>
+      Effect.succeed(
+        `Changes were backed up, but old backups could not be pruned: ${error.message}`,
+      ),
+    ),
+  );
 
   return {
     recoverable: true,
@@ -183,6 +204,8 @@ export const discardPaths = Effect.fn("workingCopy.discardPaths")(function* (
     // within the undo toast's 10s window renumbers the stack, and popping
     // `stash@{0}` would then restore the *other* discard and drop its backup.
     backupRef: backup.commit ?? backup.ref,
+    ...(backup.identity !== undefined ? { backupIdentity: backup.identity } : {}),
+    ...(warning !== undefined ? { warning } : {}),
     discardedPaths: input.paths,
   };
 });
@@ -194,47 +217,6 @@ export const listDiscardBackups = Effect.fn("workingCopy.listDiscardBackups")(fu
   return entries.filter((entry) => entry.isDiscardBackup);
 });
 
-/**
- * Undo. `stash pop` restores the bytes and removes the backup in one step.
- *
- * fork: f4 — the handle may be either a `stash@{n}` (what the Stashes list
- * renders right now) or a stash **commit** (what `discardPaths` hands the undo
- * toast). A commit is re-resolved to its current index immediately before the
- * pop, and fails loudly if the entry is gone — a silent fallback to
- * `stash@{0}` is exactly the bug this exists to prevent.
- */
-const OPERATION_RESTORE = "workingCopy.restoreDiscardBackup";
-
-export const restoreDiscardBackup = Effect.fn("workingCopy.restoreDiscardBackup")(function* (
-  git: WorkingCopyGit,
-  ref: string,
-) {
-  const target = yield* resolveBackupRef(git, ref);
-  yield* git.ok({
-    operation: OPERATION_RESTORE,
-    args: commands.stashPopArgs(target),
-    mutating: true,
-  });
-});
-
-const resolveBackupRef = Effect.fn("workingCopy.resolveBackupRef")(function* (
-  git: WorkingCopyGit,
-  ref: string,
-) {
-  if (commands.isStashRef(ref)) {
-    return ref;
-  }
-  const commit = yield* commands.requireHashIsh(OPERATION_RESTORE, ref);
-  const entries = yield* readStashList(git);
-  const match = entries.find(
-    (entry) =>
-      entry.commit !== undefined &&
-      (entry.commit === commit ||
-        entry.commit.startsWith(commit) ||
-        commit.startsWith(entry.commit)),
-  );
-  if (match === undefined) {
-    return yield* new WorkingCopyInvalidRevisionError({ operation: OPERATION_RESTORE, rev: ref });
-  }
-  return match.ref;
-});
+/** Apply the captured backup OID; remove only its uniquely identified entry. */
+export const restoreDiscardBackup = (git: WorkingCopyGit, input: StashIdentityInput) =>
+  withStashIdentity(git, input, "workingCopy.restoreDiscardBackup", true, true, true);

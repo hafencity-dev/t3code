@@ -82,6 +82,7 @@ import * as Log from "./WorkingCopyLog.ts";
 import * as Staging from "./WorkingCopyStaging.ts";
 import * as Stash from "./WorkingCopyStash.ts";
 import { readWorkingCopyStatus } from "./WorkingCopyStatus.ts";
+import { notifyWorkingCopyMutation } from "./WorkingCopyMutationObserver.ts";
 
 /**
  * fork: f4 — the shaped negative for a cwd that is inside an open project but
@@ -302,7 +303,12 @@ export const make = Effect.gen(function* () {
     openRepository(operation, cwd).pipe(
       Effect.flatMap((git) =>
         semaphoreFor(git.cwd).pipe(
-          Effect.flatMap((semaphore) => semaphore.withPermits(1)(run(git))),
+          Effect.flatMap((semaphore) =>
+            semaphore
+              .withPermits(1)(run(git))
+              // fork: remote Git; settled mutations (incl. failures) notify subscribers
+              .pipe(Effect.ensuring(notifyWorkingCopyMutation(git.cwd, operation))),
+          ),
         ),
       ),
       Effect.provideService(FileSystem.FileSystem, fileSystem),
@@ -398,7 +404,7 @@ export const make = Effect.gen(function* () {
       runMutating("workingCopy.discardPaths", input.cwd, (git) => Discard.discardPaths(git, input)),
     restoreDiscardBackup: (input) =>
       runMutating("workingCopy.restoreDiscardBackup", input.cwd, (git) =>
-        Discard.restoreDiscardBackup(git, input.ref),
+        Discard.restoreDiscardBackup(git, input),
       ),
     listDiscardBackups: (input) =>
       withRepository("workingCopy.listDiscardBackups", input.cwd, (git) =>
@@ -433,11 +439,11 @@ export const make = Effect.gen(function* () {
     stashPush: (input) =>
       runMutating("workingCopy.stashPush", input.cwd, (git) => Stash.stashPush(git, input)),
     stashApply: (input) =>
-      runMutating("workingCopy.stashApply", input.cwd, (git) => Stash.stashApply(git, input.ref)),
+      runMutating("workingCopy.stashApply", input.cwd, (git) => Stash.stashApply(git, input)),
     stashPop: (input) =>
-      runMutating("workingCopy.stashPop", input.cwd, (git) => Stash.stashPop(git, input.ref)),
+      runMutating("workingCopy.stashPop", input.cwd, (git) => Stash.stashPop(git, input)),
     stashDrop: (input) =>
-      runMutating("workingCopy.stashDrop", input.cwd, (git) => Stash.stashDrop(git, input.ref)),
+      runMutating("workingCopy.stashDrop", input.cwd, (git) => Stash.stashDrop(git, input)),
     resolveConflict: (input) =>
       runMutating("workingCopy.resolveConflict", input.cwd, (git) =>
         Conflicts.resolveConflict(git, input),

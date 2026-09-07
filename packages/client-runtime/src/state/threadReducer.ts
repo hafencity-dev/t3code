@@ -280,9 +280,7 @@ export function applyThreadDetailEvent(
         kind: "updated",
         thread: {
           ...thread,
-          ...(event.payload.modelSelection !== undefined
-            ? { modelSelection: event.payload.modelSelection }
-            : {}),
+          // Execution snapshots do not own the next-turn picker metadata.
           runtimeMode: event.payload.runtimeMode,
           interactionMode: event.payload.interactionMode,
           updatedAt: event.occurredAt,

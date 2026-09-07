@@ -820,41 +820,27 @@ export function deriveLockedProvider(input: {
   return narrowedThreadProvider ?? narrowedSelectedProvider ?? null;
 }
 
-export function getStartedThreadModelChangeBlockReason(input: {
-  providers: ReadonlyArray<Pick<ServerProvider, "instanceId" | "requiresNewThreadForModelChange">>;
-  hasStartedSession: boolean;
-  currentModelSelection: ModelSelection;
-  currentProviderInstanceId?: ModelSelection["instanceId"] | null | undefined;
-  nextModelSelection: ModelSelection;
-}): { title: string; description: string } | null {
-  if (!input.hasStartedSession) {
-    return null;
-  }
-  const currentModelSelection = {
-    ...input.currentModelSelection,
-    instanceId: input.currentProviderInstanceId ?? input.currentModelSelection.instanceId,
-  };
-  if (
-    currentModelSelection.instanceId === input.nextModelSelection.instanceId &&
-    currentModelSelection.model === input.nextModelSelection.model
-  ) {
-    return null;
-  }
-  const currentProvider = input.providers.find(
-    (snapshot) => snapshot.instanceId === currentModelSelection.instanceId,
-  );
-  const nextProvider = input.providers.find(
-    (snapshot) => snapshot.instanceId === input.nextModelSelection.instanceId,
-  );
-  if (
-    currentProvider?.requiresNewThreadForModelChange !== true &&
-    nextProvider?.requiresNewThreadForModelChange !== true
-  ) {
-    return null;
-  }
+// fork: the same started-thread restriction applies on every client.
+export { getStartedThreadModelChangeBlockReason } from "@t3tools/client-runtime/state/threads";
+
+/** fork: a model pick replaces the whole server selection, so it must carry the
+ * options the draft store used to preserve: the current options when staying on
+ * the same instance, otherwise that instance's sticky options. Traits edits
+ * (including removal and explicit false) still send their own full snapshot. */
+export function resolveModelSelectionForPick(input: {
+  current: ModelSelection | null | undefined;
+  instanceId: ProviderInstanceId;
+  model: string;
+  stickyOptions?: ModelSelection["options"] | undefined;
+}): ModelSelection {
+  const options =
+    input.current && input.current.instanceId === input.instanceId
+      ? input.current.options
+      : input.stickyOptions;
   return {
-    title: "Start a new chat to change models",
-    description: "This provider does not allow switching models after a conversation has started.",
+    instanceId: input.instanceId,
+    model: input.model,
+    ...(options && options.length > 0 ? { options } : {}),
   };
 }
 

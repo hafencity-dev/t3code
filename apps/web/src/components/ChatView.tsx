@@ -298,7 +298,13 @@ import {
   serverEnvironment,
 } from "../state/server";
 import { terminalEnvironment } from "../state/terminal";
-import { threadEnvironment, useEnvironmentThread } from "../state/threads";
+import { threadEnvironment, environmentThreads, useEnvironmentThread } from "../state/threads";
+// fork: remote model metadata with receipt-scoped optimistic UI.
+import {
+  pendingModelSelectionAtom,
+  isModelSelectionSaving,
+  saveThreadModelSelection,
+} from "@t3tools/client-runtime/state/threads";
 import {
   requestOlderThreadTurns,
   threadHasOlderTurns,
@@ -389,6 +395,7 @@ import {
   shouldOpenProactiveTurnDiff,
   shouldRenderPreviewMiniPlayer,
   getStartedThreadModelChangeBlockReason,
+  resolveModelSelectionForPick, // fork: model picks keep saved options
   LAST_INVOKED_SCRIPT_BY_PROJECT_KEY,
   LastInvokedScriptByProjectSchema,
   type LocalDispatchSnapshot,
@@ -1839,6 +1846,10 @@ export default function ChatView(props: ChatViewProps) {
   // depend on which route is mounted.
   const isServerThread = activeServerThread !== null;
   const activeThread = activeServerThread ?? localDraftThread;
+  const pendingModelSelection = useAtomValue(pendingModelSelectionAtom(routeThreadRef));
+  const isModelSaving = isServerThread && pendingModelSelection !== null;
+  const pickerModelSelection =
+    (isServerThread ? pendingModelSelection : null) ?? activeThread?.modelSelection;
   const threadError = isServerThread
     ? (localServerError ?? activeServerThread?.session?.lastError ?? null)
     : localDraftError;
@@ -2385,7 +2396,7 @@ export default function ChatView(props: ChatViewProps) {
     ? (activeEnvironment?.serverConfig ?? null)
     : (primaryEnvironment?.serverConfig ?? null);
   const providerStatuses = serverConfig?.providers ?? EMPTY_PROVIDERS;
-  const selectedProviderByThreadId = composerActiveProvider ?? null;
+  const selectedProviderByThreadId = isServerThread ? null : (composerActiveProvider ?? null);
   const threadProvider =
     activeThread?.modelSelection.instanceId ??
     activeProjectDefaultModelSelection?.instanceId ??
@@ -2624,8 +2635,8 @@ export default function ChatView(props: ChatViewProps) {
         entries: providerInstanceEntries,
         candidateInstanceIds: [
           selectedProviderByThreadId,
+          pickerModelSelection?.instanceId,
           activeThread?.session?.providerInstanceId,
-          activeThread?.modelSelection.instanceId,
           activeProjectDefaultModelSelection?.instanceId,
         ],
         lockedProvider,
@@ -2634,6 +2645,7 @@ export default function ChatView(props: ChatViewProps) {
       }),
     [
       activeProjectDefaultModelSelection?.instanceId,
+      pickerModelSelection?.instanceId,
       activeThread?.modelSelection.instanceId,
       activeThread?.session?.providerInstanceId,
       lockedProvider,
@@ -4598,7 +4610,6 @@ export default function ChatView(props: ChatViewProps) {
     async (input: {
       threadId: ThreadId;
       createdAt: string;
-      modelSelection?: ModelSelection;
       branch?: string;
       runtimeMode: RuntimeMode;
       interactionMode: ProviderInteractionMode;
@@ -4610,7 +4621,6 @@ export default function ChatView(props: ChatViewProps) {
       let result: AtomCommandResult<void, unknown> = AsyncResult.success(undefined);
       const metadataUpdate = resolveThreadMetadataUpdateForNextTurn({
         currentModelSelection: serverThread.modelSelection,
-        ...(input.modelSelection ? { nextModelSelection: input.modelSelection } : {}),
         currentBranch: serverThread.branch,
         ...(input.branch ? { nextBranch: input.branch } : {}),
       });
@@ -6352,6 +6362,7 @@ export default function ChatView(props: ChatViewProps) {
     };
     if (
       !activeThread ||
+      isModelSelectionSaving(appAtomRegistry, routeThreadRef) ||
       isSendBusy ||
       isConnecting ||
       !clientSettingsHydrated ||
@@ -6870,7 +6881,6 @@ export default function ChatView(props: ChatViewProps) {
       const settingsResult = await persistThreadSettingsForNextTurn({
         threadId: threadIdForSend,
         createdAt: messageCreatedAt,
-        ...(ctxSelectedModel ? { modelSelection: ctxSelectedModelSelection } : {}),
         ...(localCheckoutBranchMismatch
           ? { branch: localCheckoutBranchMismatch.currentBranch }
           : {}),
@@ -7304,6 +7314,7 @@ export default function ChatView(props: ChatViewProps) {
       if (
         !activeThread ||
         !isServerThread ||
+        isModelSelectionSaving(appAtomRegistry, routeThreadRef) || // fork: unconfirmed model never sends
         isSendBusy ||
         isConnecting ||
         sendInFlightRef.current
@@ -7361,7 +7372,6 @@ export default function ChatView(props: ChatViewProps) {
       const settingsResult = await persistThreadSettingsForNextTurn({
         threadId: threadIdForSend,
         createdAt: messageCreatedAt,
-        modelSelection: ctxSelectedModelSelection,
         ...(localCheckoutBranchMismatch
           ? { branch: localCheckoutBranchMismatch.currentBranch }
           : {}),
@@ -7456,6 +7466,7 @@ export default function ChatView(props: ChatViewProps) {
       !activeProject ||
       !activeProposedPlan ||
       !isServerThread ||
+      isModelSelectionSaving(appAtomRegistry, routeThreadRef) || // fork: unconfirmed model never sends
       isSendBusy ||
       isConnecting ||
       activeEnvironmentUnavailable ||
@@ -7610,6 +7621,64 @@ export default function ChatView(props: ChatViewProps) {
     composerRef,
   ]);
 
+  const onModelSelectionChange = useCallback(
+    (selection: ModelSelection) => {
+      if (!activeThread || isModelSelectionSaving(appAtomRegistry, routeThreadRef)) return;
+      const reason = getStartedThreadModelChangeBlockReason({
+        providers: providerStatuses,
+        hasStartedSession: activeThread.session !== null,
+        currentModelSelection: activeThread.modelSelection,
+        currentProviderInstanceId: activeThread.session?.providerInstanceId,
+        nextModelSelection: selection,
+      });
+      if (reason) {
+        toastManager.add({ type: "warning", title: reason.title, description: reason.description });
+        return;
+      }
+      if (!isServerThread) {
+        setComposerDraftModelSelection(composerDraftTarget, selection, { explicit: true });
+        setStickyComposerModelSelection(selection);
+        return;
+      }
+      void saveThreadModelSelection({
+        registry: appAtomRegistry,
+        threadRef: routeThreadRef,
+        selection,
+        stateAtom: environmentThreads.stateAtom(
+          routeThreadRef.environmentId,
+          routeThreadRef.threadId,
+        ),
+        dispatch: async () => {
+          const result = await updateThreadMetadata({
+            environmentId: routeThreadRef.environmentId,
+            input: { threadId: routeThreadRef.threadId, modelSelection: selection },
+          });
+          if (result._tag === "Failure") throw squashAtomCommandFailure(result);
+          return result.value;
+        },
+      })
+        .then(() => setStickyComposerModelSelection(selection))
+        .catch((error: unknown) => {
+          toastManager.add({
+            type: "error",
+            title: "Could not save model selection",
+            description:
+              error instanceof Error ? error.message : "Your draft is unchanged. Please try again.",
+          });
+        });
+    },
+    [
+      activeThread,
+      composerDraftTarget,
+      isServerThread,
+      providerStatuses,
+      routeThreadRef,
+      setComposerDraftModelSelection,
+      setStickyComposerModelSelection,
+      updateThreadMetadata,
+    ],
+  );
+
   const getModelDisabledReason = useCallback(
     (instanceId: ProviderInstanceId, model: string): string | null => {
       if (!activeThread) {
@@ -7666,10 +7735,14 @@ export default function ChatView(props: ChatViewProps) {
         scheduleComposerFocus();
         return;
       }
-      const nextModelSelection: ModelSelection = {
+      // fork: full replacement on the server, so carry the options a draft used to keep.
+      const nextModelSelection = resolveModelSelectionForPick({
+        current: pickerModelSelection,
         instanceId,
         model: resolvedModel,
-      };
+        stickyOptions:
+          useComposerDraftStore.getState().stickyModelSelectionByProvider[instanceId]?.options,
+      });
       const modelChangeBlockReason = getStartedThreadModelChangeBlockReason({
         providers: providerStatuses,
         hasStartedSession: activeThread.session !== null,
@@ -7686,20 +7759,15 @@ export default function ChatView(props: ChatViewProps) {
         scheduleComposerFocus();
         return;
       }
-      setComposerDraftModelSelection(
-        scopeThreadRef(activeThread.environmentId, activeThread.id),
-        nextModelSelection,
-        { explicit: true },
-      );
-      setStickyComposerModelSelection(nextModelSelection);
+      onModelSelectionChange(nextModelSelection);
       scheduleComposerFocus();
     },
     [
       activeThread,
       lockedProvider,
       scheduleComposerFocus,
-      setComposerDraftModelSelection,
-      setStickyComposerModelSelection,
+      onModelSelectionChange,
+      pickerModelSelection,
       providerStatuses,
       settings,
     ],
@@ -8445,7 +8513,9 @@ export default function ChatView(props: ChatViewProps) {
                             lockedProvider={lockedProvider}
                             providerStatuses={providerStatuses as ServerProvider[]}
                             activeProjectDefaultModelSelection={activeProjectDefaultModelSelection}
-                            activeThreadModelSelection={activeThread?.modelSelection}
+                            activeThreadModelSelection={pickerModelSelection}
+                            isModelSaving={isModelSaving}
+                            onModelSelectionChange={onModelSelectionChange}
                             activeContextWindow={activeContextWindow}
                             compactThreadUnavailable={compactThreadUnavailable}
                             compactDisabled={compactDisabled}

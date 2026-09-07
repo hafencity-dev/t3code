@@ -25,19 +25,12 @@
  */
 import type { EnvironmentId, WorkingCopyFile, WorkingCopyLogEntry } from "@t3tools/contracts";
 import type { HistoryFilter } from "@t3tools/client-runtime/state/working-copy-logic";
-import {
-  commitMessageGenerationApply,
-  historyAuthorFacets,
-} from "@t3tools/client-runtime/state/working-copy-logic";
+import { historyAuthorFacets } from "@t3tools/client-runtime/state/working-copy-logic";
 import { useAtomValue } from "@effect/atom-react";
 import { GitBranch, FolderGit2, Search, X } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
-import {
-  confirmReplaceCommitDraft,
-  confirmResetHard,
-  confirmRevertMerge,
-} from "~/lib/sourceControl/safetyLadder";
+import { confirmResetHard, confirmRevertMerge } from "~/lib/sourceControl/safetyLadder";
 import {
   busyPathsFromKeys,
   changesListActionPaths,
@@ -82,11 +75,18 @@ import { workingCopyEnvironment } from "~/state/workingCopy";
 import {
   DEFAULT_SOURCE_CONTROL_PREFS,
   selectSourceControlPrefs,
+  sourceControlDraftKey,
   useSourceControlStore,
 } from "~/sourceControlStore";
 
 import { ChangesList } from "./ChangesList";
 import { CommitComposer } from "./CommitComposer";
+// fork: environment-isolated drafts and explicit legacy recovery.
+import {
+  commitSourceControlDraft,
+  generateSourceControlDraft,
+  recoverSourceControlDraft,
+} from "./commitDraftOperations";
 import { HistoryList } from "./HistoryList";
 import { SourceControlConfirmDialog } from "./SourceControlConfirmDialog";
 import { SourceControlHeader, type SourceControlSyncKind } from "./SourceControlHeader";
@@ -149,14 +149,28 @@ export function SourceControlPanel(props: SourceControlPanelProps) {
   const toggleCollapsedGroup = useSourceControlStore((state) => state.toggleCollapsedGroup);
   const toggleCollapsedFolder = useSourceControlStore((state) => state.toggleCollapsedFolder);
   const setCollapsedFolders = useSourceControlStore((state) => state.setCollapsedFolders);
+  const draftKey = scope === null ? null : sourceControlDraftKey(scope.environmentId, scope.cwd);
+  const activeDraftKey = useRef(draftKey);
+  useLayoutEffect(() => {
+    activeDraftKey.current = draftKey;
+    return () => {
+      activeDraftKey.current = null;
+    };
+  }, [draftKey]);
   const commitDraft = useSourceControlStore((state) =>
-    props.cwd === null ? "" : (state.commitDraftByCwd[props.cwd] ?? ""),
+    draftKey === null ? "" : (state.commitDraftByScope[draftKey] ?? ""),
+  );
+  const legacyDraft = useSourceControlStore((state) =>
+    scope === null ? "" : (state.legacyCommitDraftByCwd[scope.cwd] ?? ""),
   );
   const setCommitDraft = useSourceControlStore((state) => state.setCommitDraft);
-  const clearCommitDraft = useSourceControlStore((state) => state.clearCommitDraft);
 
   const confirm = useSourceControlConfirm();
-  const actions = useWorkingCopyActions(scope, confirm.confirm);
+  const serverConfig = useAtomValue(serverEnvironment.configValueAtom(props.environmentId));
+  // fork: old servers cannot safely mutate stash identities.
+  const stashIdentitySupported =
+    serverConfig?.environment.capabilities.workingCopyStashIdentity === true;
+  const actions = useWorkingCopyActions(scope, confirm.confirm, stashIdentitySupported);
   const status = useWorkingCopyStatus(scope, {
     visible: props.visible,
     busy: actions.busy.size > 0,
@@ -211,7 +225,6 @@ export function SourceControlPanel(props: SourceControlPanelProps) {
   // fork: f4 AI commit message — read from THIS environment's config, not the
   // primary server's: a remote environment runs generation on its own host with
   // its own settings and its own providers.
-  const serverConfig = useAtomValue(serverEnvironment.configValueAtom(props.environmentId));
   const textGenerationConfigured = useMemo(
     () => isTextGenerationConfigured(serverConfig),
     [serverConfig],
@@ -354,14 +367,14 @@ export function SourceControlPanel(props: SourceControlPanelProps) {
 
   const handleCommit = useCallback(
     async (options: { stageAllFirst: boolean }) => {
-      const committed = await actions.commit(commitDraft, options);
-      if (committed && props.cwd !== null) {
-        clearCommitDraft(props.cwd);
-        setAmend(false);
-      }
+      if (draftKey === null) return false;
+      const committed = await commitSourceControlDraft(draftKey, (message) =>
+        actions.commit(message, options),
+      );
+      if (committed && activeDraftKey.current === draftKey) setAmend(false);
       return committed;
     },
-    [actions, clearCommitDraft, commitDraft, props.cwd],
+    [actions, draftKey],
   );
 
   const handleReset = useCallback(
@@ -399,22 +412,13 @@ export function SourceControlPanel(props: SourceControlPanelProps) {
    *   - non-empty and untouched → one confirm before replacing.
    */
   const handleGenerateMessage = useCallback(() => {
-    if (props.cwd === null) return;
-    const cwd = props.cwd;
-    const draftAtPress = commitDraft;
-    void (async () => {
-      const generated = await actions.generateCommitMessage({ amend });
-      if (generated === null) return;
-      const draftNow = useSourceControlStore.getState().commitDraftByCwd[cwd] ?? "";
-      const decision = commitMessageGenerationApply({ draftAtPress, draftNow });
-      if (decision === "discard") return;
-      if (decision === "confirm") {
-        const outcome = await confirm.confirm(confirmReplaceCommitDraft({ generated }));
-        if (outcome !== "confirmed") return;
-      }
-      setCommitDraft(cwd, generated);
-    })();
-  }, [actions, amend, commitDraft, confirm, props.cwd, setCommitDraft]);
+    if (draftKey === null) return;
+    void generateSourceControlDraft(
+      draftKey,
+      () => actions.generateCommitMessage({ amend }),
+      confirm.confirm,
+    );
+  }, [actions, amend, confirm.confirm, draftKey]);
 
   const [stashDialogOpen, setStashDialogOpen] = useState(false);
   const [pendingComposerLabel, setPendingComposerLabel] = useState<string | null>(null);
@@ -569,7 +573,9 @@ export function SourceControlPanel(props: SourceControlPanelProps) {
   const commitComposer = onChanges ? (
     <CommitComposer
       message={commitDraft}
-      onMessageChange={(message) => setCommitDraft(props.cwd ?? "", message)}
+      onMessageChange={(message) => {
+        if (draftKey !== null) setCommitDraft(draftKey, message);
+      }}
       amend={amend}
       onAmendChange={setAmend}
       lastCommitMessage={lastCommitQuery.data?.message ?? null}
@@ -592,10 +598,9 @@ export function SourceControlPanel(props: SourceControlPanelProps) {
       }
       onAmend={() => {
         void runComposerOperation("Amending…", async () => {
-          const ok = await actions.amend(commitDraft);
-          if (!ok || props.cwd === null) return;
-          clearCommitDraft(props.cwd);
-          setAmend(false);
+          if (draftKey === null) return;
+          const ok = await commitSourceControlDraft(draftKey, actions.amend);
+          if (ok && activeDraftKey.current === draftKey) setAmend(false);
         });
       }}
       onGenerateMessage={handleGenerateMessage}
@@ -689,6 +694,26 @@ export function SourceControlPanel(props: SourceControlPanelProps) {
         aria-busy={status.isRefreshing}
       >
         {commitComposer}
+        {/* fork: never auto-assign an ambiguous pre-v4 draft to this environment. */}
+        {onChanges && legacyDraft.length > 0 ? (
+          <div className="flex-none border-border/60 border-b px-3 py-1.5">
+            <Button
+              size="xs"
+              variant="ghost"
+              disabled={commitDraft.length > 0 || actionsBusy}
+              title={
+                commitDraft.length > 0
+                  ? "Clear the current draft before recovering the old one."
+                  : undefined
+              }
+              onClick={() => {
+                if (scope !== null) void recoverSourceControlDraft(scope, confirm.confirm);
+              }}
+            >
+              Recover old commit draft…
+            </Button>
+          </div>
+        ) : null}
 
         {/* ── C ── one filter row, full width, shared by both tabs ────────── */}
         {showFilterRow ? (
@@ -940,23 +965,17 @@ export function SourceControlPanel(props: SourceControlPanelProps) {
               // re-read, then fell through an `if` with no else. Disable it
               // while the list has not arrived instead.
               listReady={stashQuery.data !== null}
+              identitySupported={stashIdentitySupported}
               isBusy={actions.isBusy}
               dirty={dirtyCount > 0}
               onStash={() => {
                 setPrefs(props.scopeKey, { stashesOpen: false });
                 setStashDialogOpen(true);
               }}
-              onPopLatest={() => {
-                const latest = stashQuery.data?.find((entry) => !entry.isDiscardBackup);
-                if (!latest) {
-                  sourceControlInfoToast("There is no stash to pop.");
-                  return;
-                }
-                void actions.stashPop(latest.ref);
-              }}
-              onApply={(ref) => void actions.stashApply(ref)}
-              onDrop={(ref, label) => void actions.stashDrop(ref, label)}
-              onRestoreBackup={(ref) => void actions.restoreBackup(ref)}
+              onPop={(entry) => void actions.stashPop(entry)}
+              onApply={(entry) => void actions.stashApply(entry)}
+              onDrop={(entry) => void actions.stashDrop(entry)}
+              onRestoreBackup={(entry) => void actions.restoreBackup(entry)}
             />
           </DialogPanel>
         </DialogPopup>

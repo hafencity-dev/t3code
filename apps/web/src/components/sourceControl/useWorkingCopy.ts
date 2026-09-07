@@ -4,12 +4,13 @@
  * Liveness contract (there is no `subscribeWorkingCopy` — see
  * `build-log-f4-server.md` deviation 1):
  *
- *   1. every mutation refreshes the status atom via the command's `onSettled`,
- *   2. the existing per-thread `subscribeVcsStatus` push is watched, and any
- *      change to it triggers one re-read (this is what makes an agent's commit
- *      in a t3 terminal show up),
- *   3. a slow interval is the floor, and it runs ONLY while the panel is
- *      visible and idle. No timer survives the panel being hidden.
+ *   1. the shared working-copy revision drives every mutable query atom. It is
+ *      bumped by the per-thread `subscribeVcsStatus` push (which carries the
+ *      server's revision after every mutation, agent write or reconnect), by a
+ *      mutation's old-server fallback, and by manual/focus refreshes,
+ *   2. a slow interval is the floor for external git on servers without
+ *      revisions, and it runs ONLY while the panel is visible and idle. No
+ *      timer survives the panel being hidden.
  *
  * fork: f4 source-control panel
  */
@@ -27,6 +28,7 @@ import {
 import {
   type EnvironmentId,
   type WorkingCopyOperation,
+  type WorkingCopyStashEntry,
   type WorkingCopyStatusResult,
 } from "@t3tools/contracts";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -53,9 +55,17 @@ import {
   isCwdDeniedError,
   isNothingStagedError,
   STAGE_ALL_PATHS,
-  vcsStatusPushSignature,
+  stashBusyId,
   withBusyKey,
+  workingCopyBusyKey,
 } from "./sourceControlPanel.logic";
+
+// fork: remote Git — why a stash button did nothing, in the user's words.
+const STASH_UNSUPPORTED_TITLE = "Not supported by this server";
+const STASH_UNSUPPORTED_SERVER =
+  "This T3 Code server cannot verify which stash it is changing. Update the server to apply, pop, drop or restore stashes from here.";
+const STASH_UNSUPPORTED_ENTRY =
+  "This repository's stash storage cannot be verified safely. Use git directly for this entry.";
 import type { ConfirmOutcome } from "./useSourceControlConfirm";
 
 export interface SourceControlScope {
@@ -106,11 +116,17 @@ export function sourceControlInfoToast(title: string): void {
   toastManager.add(stackedThreadToast({ type: "info", title, timeout: 5_000 }));
 }
 
-function undoToast(title: string, undoLabel: string, onUndo: () => void): void {
+function undoToast(
+  title: string,
+  undoLabel: string,
+  onUndo: () => void,
+  description?: string,
+): void {
   toastManager.add(
     stackedThreadToast({
       type: "success",
       title,
+      ...(description !== undefined ? { description } : {}),
       timeout: 10_000,
       actionProps: { children: undoLabel, onClick: onUndo },
     }),
@@ -141,25 +157,33 @@ export function useWorkingCopyStatus(
           input: { cwd: scope.cwd },
         }),
   );
-  // The existing per-thread VCS status subscription is the push channel. Its
-  // value changes whenever the server broadcasts a local update, which every
-  // upstream vcs mutation and every `workingCopy.*` mutation already triggers.
-  const vcsStatusQuery = useEnvironmentQuery(
+  // The existing per-thread VCS status subscription is the push channel: while
+  // it is mounted, every server-side repository change (including a
+  // stage/unstage that leaves the summary unchanged) bumps the shared
+  // working-copy revision that the status, diff, stash, backup and history
+  // atoms depend on. Nothing here reads its value.
+  useEnvironmentQuery(
     scope === null
       ? null
       : vcsEnvironment.status({ environmentId: scope.environmentId, input: { cwd: scope.cwd } }),
   );
-  /**
-   * fork: f4 F-30 — compare the PAYLOAD, not the `AsyncResult` identity.
-   *
-   * `vcsEnvironment.status` is a subscription atom, so `useAtomValue` yields a
-   * fresh object per stream frame. Keying the re-read off identity turned a
-   * chatty status stream into one `workingCopy.status` RPC per frame.
-   */
-  const vcsStatusSignature = useMemo(
-    () => vcsStatusPushSignature(vcsStatusQuery.data),
-    [vcsStatusQuery.data],
-  );
+  // The explicit Refresh invalidates every active view; coming back to the
+  // tab re-reads the worktree-owned views and leaves the environment-wide
+  // refs cache to server pushes.
+  const refreshRepository = useAtomCommand(workingCopyEnvironment.refresh, {
+    reportFailure: false,
+  });
+  const refreshAll = useCallback(() => {
+    if (scope === null) return;
+    void refreshRepository({ environmentId: scope.environmentId, input: { cwd: scope.cwd } });
+  }, [refreshRepository, scope]);
+  const refreshWorktree = useCallback(() => {
+    if (scope === null) return;
+    void refreshRepository({
+      environmentId: scope.environmentId,
+      input: { cwd: scope.cwd, domains: ["worktree", "stashes"] },
+    });
+  }, [refreshRepository, scope]);
 
   const scopeKey = scope === null ? null : JSON.stringify([scope.environmentId, scope.cwd]);
   const [lastGood, setLastGood] = useState<{
@@ -202,11 +226,9 @@ export function useWorkingCopyStatus(
     query.refresh();
   }, [query.isPending, query.refresh, scopeKey]);
 
-  const pushSeenRef = useRef<string | null>(null);
   useEffect(() => {
     setFailureStreak(0);
     setDismissed(false);
-    pushSeenRef.current = null;
     queuedRefreshRef.current = false;
   }, [scopeKey]);
 
@@ -216,17 +238,25 @@ export function useWorkingCopyStatus(
     if (query.error === null) setDismissed(false);
   }, [query.error, query.isPending]);
 
-  // Re-read once per MEANINGFUL push, not once per stream frame.
+  // Coming back to the tab re-reads every active view once. `focus` and
+  // `visibilitychange` fire together, so one short window collapses the pair.
+  const lastRestoreRef = useRef(0);
   useEffect(() => {
-    if (scope === null) return;
-    if (pushSeenRef.current === null) {
-      pushSeenRef.current = vcsStatusSignature;
-      return;
-    }
-    if (pushSeenRef.current === vcsStatusSignature) return;
-    pushSeenRef.current = vcsStatusSignature;
-    requestRefresh();
-  }, [requestRefresh, scope, vcsStatusSignature]);
+    if (scope === null || !options.visible || typeof window === "undefined") return;
+    const restore = () => {
+      if (document.hidden) return;
+      const now = Date.now();
+      if (now - lastRestoreRef.current < RESTORE_REFRESH_WINDOW_MS) return;
+      lastRestoreRef.current = now;
+      refreshWorktree();
+    };
+    window.addEventListener("focus", restore);
+    document.addEventListener("visibilitychange", restore);
+    return () => {
+      window.removeEventListener("focus", restore);
+      document.removeEventListener("visibilitychange", restore);
+    };
+  }, [options.visible, refreshWorktree, scope]);
 
   /**
    * fork: f4 F-29 — the poll interval is NOT re-created on every busy
@@ -277,9 +307,12 @@ export function useWorkingCopyStatus(
     }),
     errorMessage: query.error,
     dismissErrorBanner,
-    refresh: requestRefresh,
+    refresh: refreshAll,
   };
 }
+
+/** Focus and visibility restore fire back to back; treat them as one. */
+const RESTORE_REFRESH_WINDOW_MS = 1_000;
 
 // ─── Actions ────────────────────────────────────────────────────────────────
 
@@ -298,10 +331,15 @@ export interface WorkingCopyActions {
   readonly resolveConflict: (path: string, side?: "ours" | "theirs") => Promise<void>;
   readonly abortOperation: (operation: WorkingCopyOperation) => Promise<void>;
   readonly stashPush: (message: string, includeUntracked: boolean) => Promise<void>;
-  readonly stashApply: (ref: string) => Promise<void>;
-  readonly stashPop: (ref: string) => Promise<void>;
-  readonly stashDrop: (ref: string, label: string) => Promise<void>;
-  readonly restoreBackup: (ref: string) => Promise<void>;
+  /**
+   * fork: remote Git — every stash mutation names the entry as displayed:
+   * position, commit and reflog identity travel together and the server
+   * refuses the request once any of them no longer match.
+   */
+  readonly stashApply: (entry: WorkingCopyStashEntry) => Promise<void>;
+  readonly stashPop: (entry: WorkingCopyStashEntry) => Promise<void>;
+  readonly stashDrop: (entry: WorkingCopyStashEntry) => Promise<void>;
+  readonly restoreBackup: (entry: WorkingCopyStashEntry) => Promise<void>;
   readonly cherryPick: (hash: string) => Promise<void>;
   readonly revertCommit: (hash: string, mainline?: number) => Promise<void>;
   readonly checkoutCommit: (hash: string) => Promise<void>;
@@ -325,6 +363,8 @@ export const GENERATE_COMMIT_MESSAGE_BUSY_KEY = actionBusyKey("generate-commit-m
 export function useWorkingCopyActions(
   scope: SourceControlScope | null,
   confirmWith: ConfirmFn,
+  /** fork: remote Git — the server advertises `workingCopyStashIdentity`. */
+  stashIdentitySupported: boolean,
 ): WorkingCopyActions {
   const [busy, setBusy] = useState<ReadonlySet<string>>(() => new Set<string>());
 
@@ -438,6 +478,32 @@ export function useWorkingCopyActions(
     const { environmentId, cwd } = scope;
     const target = <I>(input: I) => ({ environmentId, input: { cwd, ...input } });
 
+    /**
+     * The wire identity of a listed entry, or `null` (already toasted) when
+     * this server cannot validate it. An identity-less request is never sent:
+     * an old server would resolve `stash@{n}` positionally and may hit the
+     * wrong entry after a renumbering.
+     */
+    const stashTarget = (entry: {
+      readonly ref: string;
+      readonly commit?: string | undefined;
+      readonly identity?: string | undefined;
+    }) => {
+      if (!stashIdentitySupported) {
+        errorToast(STASH_UNSUPPORTED_TITLE, STASH_UNSUPPORTED_SERVER);
+        return null;
+      }
+      if (entry.commit === undefined || entry.identity === undefined) {
+        errorToast(STASH_UNSUPPORTED_TITLE, STASH_UNSUPPORTED_ENTRY);
+        return null;
+      }
+      return target({
+        ref: entry.ref,
+        expectedCommit: entry.commit,
+        expectedIdentity: entry.identity,
+      });
+    };
+
     const doUndoLastCommit = async (): Promise<boolean> => {
       const result = await run(actionBusyKey("undo-commit"), "Could not undo the commit", () =>
         undoCommit(target({})),
@@ -502,16 +568,55 @@ export function useWorkingCopyActions(
         }
         const backupRef = result.backupRef;
         if (backupRef === undefined) {
+          if (result.warning !== undefined) {
+            toastManager.add(
+              stackedThreadToast({
+                type: "warning",
+                title: discardToastText(paths),
+                description: result.warning,
+                timeout: 0,
+              }),
+            );
+            return;
+          }
           // `stash push` exited 0 with nothing to save: the rows were already
           // clean. Saying "Discarded" here would be a lying state.
           toastManager.add(stackedThreadToast({ type: "success", title: "Nothing to discard" }));
           return;
         }
-        undoToast(discardToastText(paths), "Undo", () => {
-          void run(actionBusyKey("restore-backup", backupRef), "Could not restore the backup", () =>
-            restoreDiscardBackup(target({ ref: backupRef })),
+        const backupIdentity = result.backupIdentity;
+        if (backupIdentity === undefined || !stashIdentitySupported) {
+          // The backup exists but cannot be named safely; Undo would have to
+          // guess which entry to pop. Point at the list instead.
+          toastManager.add(
+            stackedThreadToast({
+              type: "success",
+              title: discardToastText(paths),
+              description:
+                `A backup was saved under Stashes & backups. ${result.warning ?? ""}`.trim(),
+            }),
           );
-        });
+          return;
+        }
+        undoToast(
+          discardToastText(paths),
+          "Undo",
+          () => {
+            void run(
+              actionBusyKey("restore-backup", backupIdentity),
+              "Could not restore the backup",
+              () =>
+                restoreDiscardBackup(
+                  target({
+                    ref: backupRef,
+                    expectedCommit: backupRef,
+                    expectedIdentity: backupIdentity,
+                  }),
+                ),
+            );
+          },
+          result.warning,
+        );
       },
 
       /**
@@ -577,30 +682,48 @@ export function useWorkingCopyActions(
         );
       },
 
-      stashApply: async (ref) => {
-        await run(actionBusyKey("stash-apply", ref), "Could not apply the stash", () =>
-          stashApplyCommand(target({ ref })),
+      stashApply: async (entry) => {
+        const request = stashTarget(entry);
+        if (request === null) return;
+        await run(
+          workingCopyBusyKey.stashApply(stashBusyId(entry)),
+          "Could not apply the stash",
+          () => stashApplyCommand(request),
         );
       },
 
-      stashPop: async (ref) => {
-        await run(actionBusyKey("stash-pop", ref), "Could not pop the stash", () =>
-          stashPopCommand(target({ ref })),
+      stashPop: async (entry) => {
+        const request = stashTarget(entry);
+        if (request === null) return;
+        await run(workingCopyBusyKey.stashPop(stashBusyId(entry)), "Could not pop the stash", () =>
+          stashPopCommand(request),
         );
       },
 
       /** The one stash action with no undo — hence the only stash confirm. */
-      stashDrop: async (ref, label) => {
-        const outcome = await confirmWith(confirmStashDrop({ ref, message: label }));
+      stashDrop: async (entry) => {
+        const request = stashTarget(entry);
+        if (request === null) return;
+        // The confirmation names the entry captured before the dialog opened;
+        // the server compares that capture, not whatever is at `ref` by then.
+        const outcome = await confirmWith(
+          confirmStashDrop({ ref: entry.ref, message: entry.label }),
+        );
         if (outcome !== "confirmed") return;
-        await run(actionBusyKey("stash-drop", ref), "Could not drop the stash", () =>
-          stashDropCommand(target({ ref })),
+        await run(
+          workingCopyBusyKey.stashDrop(stashBusyId(entry)),
+          "Could not drop the stash",
+          () => stashDropCommand(request),
         );
       },
 
-      restoreBackup: async (ref) => {
-        await run(actionBusyKey("restore-backup", ref), "Could not restore the backup", () =>
-          restoreDiscardBackup(target({ ref })),
+      restoreBackup: async (entry) => {
+        const request = stashTarget(entry);
+        if (request === null) return;
+        await run(
+          workingCopyBusyKey.restoreBackup(stashBusyId(entry)),
+          "Could not restore the backup",
+          () => restoreDiscardBackup(request),
         );
       },
 
@@ -711,6 +834,7 @@ export function useWorkingCopyActions(
     stagePaths,
     stashApplyCommand,
     stashDropCommand,
+    stashIdentitySupported,
     stashPopCommand,
     stashPushCommand,
     tagCommand,

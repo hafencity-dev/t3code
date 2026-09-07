@@ -313,6 +313,17 @@ export const BUSY_KEY_SEPARATOR = "\0";
  * otherwise drop its press from drifting apart. Every entry here has at least
  * one call site — that was the whole failure of the previous round.
  */
+/**
+ * fork: remote Git — busy state follows the entry, not its position. A
+ * renumbering mid-flight must not move the spinner onto a different stash.
+ */
+export function stashBusyId(entry: {
+  readonly ref: string;
+  readonly identity?: string | undefined;
+}): string {
+  return entry.identity ?? entry.ref;
+}
+
 export const workingCopyBusyKey = {
   commit: () => actionBusyKey("commit"),
   undoCommit: () => actionBusyKey("undo-commit"),

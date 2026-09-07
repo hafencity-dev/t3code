@@ -20,8 +20,6 @@
  *
  * fork: f4 hunk staging
  */
-import { useAtomValue } from "@effect/atom-react";
-import { workingCopyRevisionAtom } from "@t3tools/client-runtime/state/working-copy";
 import type { EnvironmentId } from "@t3tools/contracts";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
@@ -122,7 +120,8 @@ export function useDiffHunkStaging(target: {
     [resolved],
   );
   const confirm = useSourceControlConfirm();
-  const actions = useWorkingCopyActions(scope, confirm.confirm);
+  // Hunk staging only ever sends `applyPatch`; stash identity is irrelevant here.
+  const actions = useWorkingCopyActions(scope, confirm.confirm, false);
 
   const diffQuery = useEnvironmentQuery(
     resolved === null
@@ -147,7 +146,6 @@ export function useDiffHunkStaging(target: {
             },
           }),
   );
-  const { refresh } = diffQuery;
 
   const [pending, setPending] = useState<{
     readonly index: number;
@@ -156,33 +154,10 @@ export function useDiffHunkStaging(target: {
     readonly confirming: boolean;
   } | null>(null);
 
-  /**
-   * fork: f4 invalidation Gap A — the per-file diff is read straight from an
-   * atom here, so staging done ANYWHERE else (a row's ⊕ in the changes list, a
-   * terminal, an agent) left this surface rendering the old patch, with hunk
-   * clusters that would now fail to apply. The revision atom exists for exactly
-   * this; it is bumped by every `workingCopy.*` mutation's `onSettled`.
-   */
-  const revision = useAtomValue(
-    resolved === null
-      ? EMPTY_WORKING_COPY_REVISION_ATOM
-      : workingCopyRevisionAtom({ environmentId: resolved.environmentId, cwd: resolved.cwd }),
-  );
-  const seenRevisionRef = useRef<number | null>(null);
-
-  useEffect(() => {
-    if (resolved === null) {
-      seenRevisionRef.current = null;
-      return;
-    }
-    if (seenRevisionRef.current === null) {
-      seenRevisionRef.current = revision;
-      return;
-    }
-    if (seenRevisionRef.current === revision) return;
-    seenRevisionRef.current = revision;
-    refresh();
-  }, [refresh, resolved, revision]);
+  // fork: f4 invalidation Gap A — the working-copy diff atom depends on the
+  // shared repository revision, so staging done ANYWHERE else (a row's ⊕ in
+  // the changes list, another client, a terminal, an agent) re-reads the patch
+  // before hunk clusters that would now fail to apply can be offered.
 
   const patch = diffQuery.data?.patch;
   // A truncated patch can end mid-hunk, and `buildHunkPatch` recomputes the
@@ -243,19 +218,16 @@ export function useDiffHunkStaging(target: {
             if (outcome !== "confirmed") return;
             setPending({ index: cluster.index, action, confirming: false });
           }
+          // `applyPatch` settles with a repository revision bump on success
+          // and failure alike, which re-reads this diff atom.
           const applied = await actions.applyPatch(cluster.patch, hunkApplyFlags(action));
           if (applied) actedRef.current = true;
-          // `applyPatch` invalidates status and bumps the working-copy revision,
-          // but the per-file diff atom is read straight here, so it re-reads
-          // explicitly. Refreshing on failure too keeps a rejected patch from
-          // leaving a stale view behind.
-          refresh();
         } finally {
           setPending(null);
         }
       })();
     },
-    [actions, confirm, filePath, pending, refresh],
+    [actions, confirm, filePath, pending],
   );
 
   const clustersByIndex = useMemo(() => {
@@ -310,15 +282,6 @@ export function useDiffHunkStaging(target: {
     confirmDialog,
   };
 }
-
-/**
- * A stable placeholder so the revision hook can be called unconditionally.
- * Never read for a real repository.
- */
-const EMPTY_WORKING_COPY_REVISION_ATOM = workingCopyRevisionAtom({
-  environmentId: "__none__" as never,
-  cwd: "",
-});
 
 function fileName(path: string): string {
   const index = path.lastIndexOf("/");

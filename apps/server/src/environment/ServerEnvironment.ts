@@ -231,6 +231,8 @@ export const make = Effect.gen(function* () {
       systemPromptInjection: true, // fork: f2 system prompt injection
       claudeCodexRouting: true, // fork: f5 Claude Code → Codex routing
       claudeCodexFastMode: true, // fork: f5
+      workingCopyRevision: true, // fork: remote Git
+      workingCopyStashIdentity: true, // fork: remote Git
       threadPullRequestLinking: true,
       environmentIcon: true,
       ...(serverSelfUpdate === null ? {} : { serverSelfUpdate }),

@@ -51,6 +51,8 @@ type TraitsRenderInput = {
   modelOptions: ReadonlyArray<ProviderOptionSelection> | undefined;
   prompt: string;
   onPromptChange: (prompt: string) => void;
+  onModelOptionsChange?: (options: ReadonlyArray<ProviderOptionSelection> | undefined) => void;
+  disabled?: boolean;
   planModeEnabled: boolean;
   size?: ComposerControlSize;
   hidden?: boolean;
@@ -156,8 +158,10 @@ function renderTraitsControl(
       provider={provider}
       {...(instanceId ? { instanceId } : {})}
       models={models}
-      {...(threadRef ? { threadRef } : {})}
-      {...(draftId ? { draftId } : {})}
+      {...(input.onModelOptionsChange
+        ? { onModelOptionsChange: input.onModelOptionsChange }
+        : { ...(threadRef ? { threadRef } : {}), ...(draftId ? { draftId } : {}) })}
+      disabled={input.disabled ?? false}
       model={model}
       modelOptions={modelOptions}
       prompt={prompt}

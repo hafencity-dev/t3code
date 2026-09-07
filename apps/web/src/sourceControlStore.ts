@@ -9,10 +9,9 @@
  *
  *   view/collapse/history preferences are keyed per repository scope,
  *
- *   the **commit draft is keyed by `cwd`**, because a draft is about a
- *   repository. Keying it per thread would silently lose the draft on every
- *   thread switch inside one worktree, and — much worse — a project-agnostic
- *   key could commit repository A's message into repository B.
+ *   the **commit draft is keyed by environment + cwd**, because a draft is
+ *   about a worktree, not a thread. Equal paths on different servers must not
+ *   share text. Ambiguous drafts from older versions require explicit recovery.
  *
  * fork: f4 source-control panel
  */
@@ -57,16 +56,21 @@ interface SourceControlStoreState {
   isOpen: boolean;
   /** Keyed by the active environment and repository cwd. */
   prefsByScope: Record<string, SourceControlPrefs>;
-  /** Keyed by `cwd`. See the header comment — this key is load-bearing. */
-  commitDraftByCwd: Record<string, string>;
+  /** fork: commit drafts share the environment/worktree scope, never the thread. */
+  commitDraftByScope: Record<string, string>;
+  /** Ambiguous pre-v4 drafts. Never used as an active draft without confirmation. */
+  legacyCommitDraftByCwd: Record<string, string>;
   setOpen: (open: boolean) => void;
   toggleOpen: () => void;
   setPrefs: (scope: string, patch: Partial<SourceControlPrefs>) => void;
   toggleCollapsedGroup: (scope: string, group: string) => void;
   toggleCollapsedFolder: (scope: string, folderKey: string) => void;
   setCollapsedFolders: (scope: string, folderKeys: ReadonlyArray<string>) => void;
-  setCommitDraft: (cwd: string, message: string) => void;
-  clearCommitDraft: (cwd: string) => void;
+  setCommitDraft: (scope: string, message: string, expected?: string) => void;
+  clearCommitDraft: (scope: string, expected?: string) => void;
+  adoptLegacyCommitDraft: (scope: string, cwd: string, expected: string) => boolean;
+  /** The explicit way out for legacy text nobody wants. Returns whether it was removed. */
+  discardLegacyCommitDraft: (cwd: string, expected: string) => boolean;
 }
 
 function toggleIn(list: ReadonlyArray<string>, value: string): ReadonlyArray<string> {
@@ -83,7 +87,26 @@ function toggleIn(list: ReadonlyArray<string>, value: string): ReadonlyArray<str
 // in, and every thread scope that ever existed, kept for the life of the
 // install.
 
-export const SOURCE_CONTROL_STORE_VERSION = 3;
+export const SOURCE_CONTROL_STORE_VERSION = 4;
+
+/** cwd is the active thread's existing worktree/root context, not a display label. */
+export function sourceControlDraftKey(environmentId: string, cwd: string): string {
+  return JSON.stringify([environmentId, cwd]);
+}
+
+function isDraftScope(key: string): boolean {
+  try {
+    const parts: unknown = JSON.parse(key);
+    return (
+      Array.isArray(parts) &&
+      parts.length === 2 &&
+      parts.every((part) => typeof part === "string" && part.length > 0) &&
+      JSON.stringify(parts) === key
+    );
+  } catch {
+    return false;
+  }
+}
 
 /** Enough scopes for any plausible session; the oldest are dropped first. */
 export const MAX_PERSISTED_PREF_SCOPES = 200;
@@ -162,7 +185,8 @@ export function migrateSourceControlState(
 ): {
   isOpen: boolean;
   prefsByScope: Record<string, SourceControlPrefs>;
-  commitDraftByCwd: Record<string, string>;
+  commitDraftByScope: Record<string, string>;
+  legacyCommitDraftByCwd: Record<string, string>;
 } {
   const record =
     typeof persisted === "object" && persisted !== null
@@ -184,21 +208,32 @@ export function migrateSourceControlState(
         : prefs;
   }
 
-  const draftSource =
-    typeof record.commitDraftByCwd === "object" && record.commitDraftByCwd !== null
-      ? (record.commitDraftByCwd as Record<string, unknown>)
-      : {};
-  const commitDraftByCwd: Record<string, string> = {};
-  for (const key of Object.keys(draftSource).slice(-MAX_PERSISTED_COMMIT_DRAFTS)) {
-    const draft = draftSource[key];
-    if (typeof draft !== "string" || draft.length === 0) continue;
-    commitDraftByCwd[key] =
-      draft.length > MAX_PERSISTED_DRAFT_LENGTH
-        ? draft.slice(0, MAX_PERSISTED_DRAFT_LENGTH)
-        : draft;
-  }
+  return {
+    isOpen: boolOr(record.isOpen, false),
+    prefsByScope,
+    commitDraftByScope: sanitizeDraftMap(record.commitDraftByScope, isDraftScope),
+    // Legacy text never acquires an environment just because a panel opened.
+    legacyCommitDraftByCwd: capMap(
+      {
+        ...sanitizeDraftMap(record.commitDraftByCwd),
+        ...sanitizeDraftMap(record.legacyCommitDraftByCwd),
+      },
+      MAX_PERSISTED_COMMIT_DRAFTS,
+    ),
+  };
+}
 
-  return { isOpen: boolOr(record.isOpen, false), prefsByScope, commitDraftByCwd };
+function sanitizeDraftMap(
+  value: unknown,
+  validKey: (key: string) => boolean = (key) => key.length > 0,
+): Record<string, string> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return {};
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([key, draft]) => validKey(key) && typeof draft === "string" && draft.length > 0)
+      .slice(-MAX_PERSISTED_COMMIT_DRAFTS)
+      .map(([key, draft]) => [key, (draft as string).slice(0, MAX_PERSISTED_DRAFT_LENGTH)]),
+  );
 }
 
 /** Drops the oldest entries once a map passes its cap. */
@@ -217,7 +252,8 @@ export const useSourceControlStore = create<SourceControlStoreState>()(
     (set) => ({
       isOpen: false,
       prefsByScope: {},
-      commitDraftByCwd: {},
+      commitDraftByScope: {},
+      legacyCommitDraftByCwd: {},
       setOpen: (isOpen) => set({ isOpen }),
       toggleOpen: () => set((state) => ({ isOpen: !state.isOpen })),
       setPrefs: (scope, patch) =>
@@ -266,23 +302,63 @@ export const useSourceControlStore = create<SourceControlStoreState>()(
             },
           };
         }),
-      setCommitDraft: (cwd, message) =>
-        set((state) =>
-          state.commitDraftByCwd[cwd] === message
-            ? state
-            : {
-                commitDraftByCwd: capMap(
-                  { ...state.commitDraftByCwd, [cwd]: message },
-                  MAX_PERSISTED_COMMIT_DRAFTS,
-                ),
-              },
-        ),
-      clearCommitDraft: (cwd) =>
+      setCommitDraft: (scope, message, expected) =>
         set((state) => {
-          if (!(cwd in state.commitDraftByCwd)) return state;
-          const { [cwd]: _removed, ...rest } = state.commitDraftByCwd;
-          return { commitDraftByCwd: rest };
+          if (!isDraftScope(scope)) return state;
+          const current = state.commitDraftByScope[scope] ?? "";
+          if (current === message || (expected !== undefined && current !== expected)) return state;
+          const { [scope]: _removed, ...rest } = state.commitDraftByScope;
+          return {
+            commitDraftByScope: capMap(
+              message.length === 0 ? rest : { ...rest, [scope]: message },
+              MAX_PERSISTED_COMMIT_DRAFTS,
+            ),
+          };
         }),
+      clearCommitDraft: (scope, expected) =>
+        set((state) => {
+          if (!Object.hasOwn(state.commitDraftByScope, scope)) return state;
+          if (expected !== undefined && state.commitDraftByScope[scope] !== expected) return state;
+          const { [scope]: _removed, ...rest } = state.commitDraftByScope;
+          return { commitDraftByScope: rest };
+        }),
+      adoptLegacyCommitDraft: (scope, cwd, expected) => {
+        let adopted = false;
+        set((state) => {
+          if (
+            !isDraftScope(scope) ||
+            !Object.hasOwn(state.legacyCommitDraftByCwd, cwd) ||
+            state.legacyCommitDraftByCwd[cwd] !== expected ||
+            expected.length === 0 ||
+            (state.commitDraftByScope[scope] ?? "").length > 0
+          )
+            return state;
+          adopted = true;
+          const { [cwd]: _removed, ...remaining } = state.legacyCommitDraftByCwd;
+          return {
+            commitDraftByScope: capMap(
+              { ...state.commitDraftByScope, [scope]: expected },
+              MAX_PERSISTED_COMMIT_DRAFTS,
+            ),
+            legacyCommitDraftByCwd: remaining,
+          };
+        });
+        return adopted;
+      },
+      discardLegacyCommitDraft: (cwd, expected) => {
+        let discarded = false;
+        set((state) => {
+          if (
+            !Object.hasOwn(state.legacyCommitDraftByCwd, cwd) ||
+            state.legacyCommitDraftByCwd[cwd] !== expected
+          )
+            return state;
+          discarded = true;
+          const { [cwd]: _removed, ...remaining } = state.legacyCommitDraftByCwd;
+          return { legacyCommitDraftByCwd: remaining };
+        });
+        return discarded;
+      },
     }),
     {
       name: SOURCE_CONTROL_STORAGE_KEY,
@@ -292,7 +368,8 @@ export const useSourceControlStore = create<SourceControlStoreState>()(
       partialize: (state) => ({
         isOpen: state.isOpen,
         prefsByScope: state.prefsByScope,
-        commitDraftByCwd: state.commitDraftByCwd,
+        commitDraftByScope: state.commitDraftByScope,
+        legacyCommitDraftByCwd: state.legacyCommitDraftByCwd,
       }),
       // fork: f4 F-31 — validate on the way in, from ANY version. `migrate`
       // runs for a mismatched version and `merge` for every load, so both go

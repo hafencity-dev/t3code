@@ -238,8 +238,11 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
   // Save only completed data/cursor updates. A canceled scope must not cache
   // a cursor whose event has not reached the data yet.
   const remember = Effect.gen(function* () {
-    const current = yield* SubscriptionRef.get(state);
     const sequence = yield* SubscriptionRef.get(lastSequence);
+    yield* SubscriptionRef.update(state, (current) =>
+      current.appliedSequence === sequence ? current : { ...current, appliedSequence: sequence },
+    );
+    const current = yield* SubscriptionRef.get(state);
     committed = {
       state: current,
       sequence,
@@ -360,7 +363,9 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
     page: Option.Option<EnvironmentThreadPageState> | "keep",
   ) {
     const waiting = yield* Ref.get(awaitingCompletion);
+    const appliedSequence = yield* SubscriptionRef.get(lastSequence);
     yield* SubscriptionRef.update(state, (current) => ({
+      appliedSequence,
       data: Option.some(thread),
       // Buffered values from the failed attempt can still arrive after its error.
       status: Option.isSome(current.error)
@@ -890,3 +895,4 @@ export * from "./threadDetail.ts";
 export * from "./threadReducer.ts";
 export * from "./threadShell.ts";
 export * from "./threadState.ts";
+export * from "./pendingModelSelection.ts"; // fork: shared model-save coordination

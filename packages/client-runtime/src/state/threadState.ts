@@ -18,6 +18,8 @@ export interface EnvironmentThreadPageState {
 }
 
 export interface EnvironmentThreadState {
+  /** fork: receipt watermark, published only after applying the read model. */
+  readonly appliedSequence?: number;
   readonly data: Option.Option<OrchestrationThread>;
   readonly status: EnvironmentThreadStatus;
   readonly error: Option.Option<string>;

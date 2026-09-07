@@ -17,25 +17,34 @@
  *
  * fork: f4 source-control panel
  */
-import { type EnvironmentId, WS_METHODS } from "@t3tools/contracts";
+import { type EnvironmentId, type VcsInvalidationDomain, WS_METHODS } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
-import { Atom, type AtomRegistry } from "effect/unstable/reactivity";
+import type { Atom } from "effect/unstable/reactivity";
 
 import {
   createAtomCommandScheduler,
   createEnvironmentRpcCommand,
+  createEnvironmentCommand,
   createEnvironmentRpcQueryAtomFamily,
   type AtomCommandConcurrency,
 } from "./runtime.ts";
-import { invalidateCachedVcsRefs } from "./vcsRefInvalidation.ts";
+import {
+  ALL_REPOSITORY_DOMAINS,
+  invalidateRepository,
+  repositoryObservationAtom,
+  serverPushesRevisions,
+  workingCopyRefreshTrigger,
+  type RepositoryCapabilityLookup,
+} from "./repositoryInvalidation.ts";
 import { EnvironmentCacheStore } from "../platform/persistence.ts";
 import type { EnvironmentRegistry } from "../connection/registry.ts";
-import type { EnvironmentUnaryRpcTag } from "../rpc/client.ts";
+import { request, type EnvironmentRpcInput, type EnvironmentUnaryRpcTag } from "../rpc/client.ts";
 
-export interface WorkingCopyTarget {
-  readonly environmentId: EnvironmentId;
-  readonly cwd: string;
-}
+export {
+  bumpWorkingCopyRevision,
+  workingCopyRevisionAtom,
+  type WorkingCopyTarget,
+} from "./repositoryInvalidation.ts";
 
 /**
  * One mutation at a time per repository, mirroring the server's per-cwd
@@ -62,37 +71,11 @@ export const workingCopyCommandConcurrency: AtomCommandConcurrency<{
   key: ({ environmentId, input }) => JSON.stringify([environmentId, input.cwd]),
 };
 
-/**
- * Bumped after every mutation and on every `subscribeVcsStatus` local push.
- * Consumers that own their own paging (history, diffs) read this rather than a
- * query atom, so a re-read is a plain dependency change instead of a subscription.
- */
-const revisionByTarget = Atom.family((key: string) =>
-  Atom.make(0).pipe(
-    Atom.keepAlive,
-    Atom.withLabel(`environment-data:working-copy:revision:${key}`),
-  ),
-);
-
-function revisionKey(target: WorkingCopyTarget): string {
-  return JSON.stringify([target.environmentId, target.cwd]);
-}
-
-export function workingCopyRevisionAtom(target: WorkingCopyTarget) {
-  return revisionByTarget(revisionKey(target));
-}
-
-export function bumpWorkingCopyRevision(
-  registry: AtomRegistry.AtomRegistry,
-  target: WorkingCopyTarget,
-): void {
-  registry.update(workingCopyRevisionAtom(target), (revision) => revision + 1);
-}
-
 export function createWorkingCopyEnvironmentAtoms<R, E>(
   // `EnvironmentCacheStore` is required by `invalidateCachedVcsRefs` (Gap B);
   // the same runtime already backs `createVcsEnvironmentAtoms`.
   runtime: Atom.AtomRuntime<EnvironmentRegistry | EnvironmentCacheStore | R, E>,
+  options: { readonly capabilities?: RepositoryCapabilityLookup } = {},
 ) {
   // Status is deliberately short-lived in cache but never auto-refreshed: the
   // panel drives every re-read (push, post-mutation, visible-only poll). A
@@ -102,30 +85,35 @@ export function createWorkingCopyEnvironmentAtoms<R, E>(
     tag: WS_METHODS.workingCopyStatus,
     staleTimeMs: 1_000,
     idleTtlMs: 60_000,
+    refreshTrigger: workingCopyRefreshTrigger,
   });
   const stashList = createEnvironmentRpcQueryAtomFamily(runtime, {
     label: "environment-data:working-copy:stash-list",
     tag: WS_METHODS.workingCopyStashList,
     staleTimeMs: 5_000,
     idleTtlMs: 60_000,
+    refreshTrigger: workingCopyRefreshTrigger,
   });
   const discardBackups = createEnvironmentRpcQueryAtomFamily(runtime, {
     label: "environment-data:working-copy:discard-backups",
     tag: WS_METHODS.workingCopyListDiscardBackups,
     staleTimeMs: 5_000,
     idleTtlMs: 60_000,
+    refreshTrigger: workingCopyRefreshTrigger,
   });
   const lastCommitMessage = createEnvironmentRpcQueryAtomFamily(runtime, {
     label: "environment-data:working-copy:last-commit-message",
     tag: WS_METHODS.workingCopyLastCommitMessage,
     staleTimeMs: 5_000,
     idleTtlMs: 60_000,
+    refreshTrigger: workingCopyRefreshTrigger,
   });
   const log = createEnvironmentRpcQueryAtomFamily(runtime, {
     label: "environment-data:working-copy:log",
     tag: WS_METHODS.workingCopyLog,
     staleTimeMs: 1_000,
     idleTtlMs: 60_000,
+    refreshTrigger: workingCopyRefreshTrigger,
   });
   const commitDetail = createEnvironmentRpcQueryAtomFamily(runtime, {
     label: "environment-data:working-copy:commit-detail",
@@ -139,6 +127,7 @@ export function createWorkingCopyEnvironmentAtoms<R, E>(
     tag: WS_METHODS.workingCopyDiff,
     staleTimeMs: 1_000,
     idleTtlMs: 60_000,
+    refreshTrigger: workingCopyRefreshTrigger,
   });
   const commitFileDiff = createEnvironmentRpcQueryAtomFamily(runtime, {
     label: "environment-data:working-copy:commit-file-diff",
@@ -151,35 +140,17 @@ export function createWorkingCopyEnvironmentAtoms<R, E>(
     tag: WS_METHODS.workingCopyFileAtRef,
     staleTimeMs: 1_000,
     idleTtlMs: 60_000,
+    refreshTrigger: workingCopyRefreshTrigger,
   });
 
-  /**
-   * Post-mutation refresh. The server has no working-copy subscription, so this
-   * is the client's half of the liveness contract: refresh the reactive atoms
-   * and bump the revision the paged views watch.
-   */
-  const invalidate = (
-    target: { readonly environmentId: EnvironmentId; readonly input: { readonly cwd: string } },
-    registry: AtomRegistry.AtomRegistry,
-  ) =>
-    Effect.sync(() => {
-      const scope: WorkingCopyTarget = {
-        environmentId: target.environmentId,
-        cwd: target.input.cwd,
-      };
-      const key = { environmentId: scope.environmentId, input: { cwd: scope.cwd } };
-      registry.refresh(status(key));
-      registry.refresh(lastCommitMessage(key));
-      // fork: f4 — the stash list and the backup list are POSITIONAL data:
-      // every push/pop/drop renumbers `stash@{n}`. Leaving them stale meant a
-      // dropped row stayed on screen and the next Drop press resolved to a
-      // different stash than the confirm dialog named. Cheap to refresh — one
-      // git invocation each, and they are only mounted while the section is
-      // expanded (`idleTtlMs` unmounts them otherwise).
-      registry.refresh(stashList(key));
-      registry.refresh(discardBackups(key));
-      bumpWorkingCopyRevision(registry, scope);
-    });
+  const refresh = createEnvironmentCommand(runtime, {
+    label: "environment-data:working-copy:refresh",
+    execute: (
+      input: { readonly cwd: string; readonly domains?: ReadonlyArray<VcsInvalidationDomain> },
+      registry,
+      environmentId,
+    ) => invalidateRepository(registry, { environmentId, cwd: input.cwd }, input.domains),
+  });
 
   // Every `workingCopy.*` input carries `cwd` (the containment guard requires
   // it), but that is a fact about the 28 tags rather than something the generic
@@ -200,30 +171,48 @@ export function createWorkingCopyEnvironmentAtoms<R, E>(
   const mutation = <TTag extends EnvironmentUnaryRpcTag>(
     label: string,
     tag: TTag,
-    options?: { readonly movesRefs?: boolean },
+    mutationOptions?: { readonly movesRefs?: boolean },
   ) =>
-    createEnvironmentRpcCommand(runtime, {
+    createEnvironmentCommand(runtime, {
       label,
-      tag,
       scheduler: workingCopyCommandScheduler,
       concurrency: {
         mode: "serial",
-        key: ({ environmentId, input }) => JSON.stringify([environmentId, cwdOf(input)]),
+        key: ({
+          environmentId,
+          input,
+        }: {
+          readonly environmentId: EnvironmentId;
+          readonly input: EnvironmentRpcInput<TTag>;
+        }) => JSON.stringify([environmentId, cwdOf(input)]),
       },
-      onSettled: (target, registry) => {
-        const scoped = {
-          environmentId: target.environmentId,
-          input: { cwd: cwdOf(target.input) },
-        };
-        return options?.movesRefs === true
-          ? Effect.andThen(invalidate(scoped, registry), () =>
-              invalidateCachedVcsRefs(registry, {
-                environmentId: scoped.environmentId,
-                cwd: scoped.input.cwd,
+      execute: (input: EnvironmentRpcInput<TTag>, registry, environmentId) =>
+        Effect.gen(function* () {
+          const scope = { environmentId, cwd: cwdOf(input) };
+          const observedBefore = registry.get(repositoryObservationAtom(scope));
+          return yield* request(tag, input).pipe(
+            Effect.ensuring(
+              Effect.suspend(() => {
+                // A revision-aware server pushes for every settled mutation, so
+                // the client never re-reads on its own. The fallback stays for
+                // old servers, unless one of their frames already carried a
+                // revision for this exact target while the RPC was in flight.
+                if (serverPushesRevisions(options.capabilities, registry, environmentId)) {
+                  return Effect.void;
+                }
+                const observedAfter = registry.get(repositoryObservationAtom(scope));
+                if (observedAfter !== observedBefore && observedAfter?.token !== undefined) {
+                  return Effect.void;
+                }
+                return invalidateRepository(
+                  registry,
+                  scope,
+                  mutationOptions?.movesRefs ? ALL_REPOSITORY_DOMAINS : ["worktree", "stashes"],
+                );
               }),
-            )
-          : invalidate(scoped, registry);
-      },
+            ),
+          );
+        }),
     });
 
   /**
@@ -244,6 +233,7 @@ export function createWorkingCopyEnvironmentAtoms<R, E>(
   });
 
   return {
+    refresh,
     status,
     stashList,
     discardBackups,

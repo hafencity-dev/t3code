@@ -248,13 +248,38 @@ export const VcsStatusResult = Schema.Struct({
 });
 export type VcsStatusResult = typeof VcsStatusResult.Type;
 
+// fork: one server lifetime plus a worktree-local monotonic counter. Summary
+// equality is not repository equality (in particular for stage/unstage).
+export const WorkingCopyRevision = Schema.Struct({
+  epoch: TrimmedNonEmptyStringSchema,
+  counter: NonNegativeInt,
+});
+export type WorkingCopyRevision = typeof WorkingCopyRevision.Type;
+export const VcsInvalidationDomain = Schema.Literals(["worktree", "refs", "stashes"]);
+export type VcsInvalidationDomain = typeof VcsInvalidationDomain.Type;
+// A shared-domain frame fanned out to a sibling worktree names the mutating
+// worktree's revision, so a client subscribed to several worktrees of one
+// repository clears its environment-wide refs cache once per change.
+export const RepositoryInvalidationOrigin = Schema.Struct({
+  cwd: TrimmedNonEmptyStringSchema,
+  counter: NonNegativeInt,
+});
+export type RepositoryInvalidationOrigin = typeof RepositoryInvalidationOrigin.Type;
+const repositoryChangeShape = {
+  workingCopyRevision: Schema.optional(WorkingCopyRevision),
+  invalidatedDomains: Schema.optional(Schema.Array(VcsInvalidationDomain)),
+  invalidationOrigin: Schema.optional(RepositoryInvalidationOrigin),
+};
+
 export const VcsStatusStreamEvent = Schema.Union([
   Schema.TaggedStruct("snapshot", {
     local: VcsStatusLocalResult,
     remote: Schema.NullOr(VcsStatusRemoteResult),
+    ...repositoryChangeShape,
   }),
   Schema.TaggedStruct("localUpdated", {
     local: VcsStatusLocalResult,
+    ...repositoryChangeShape,
   }),
   Schema.TaggedStruct("remoteUpdated", {
     remote: Schema.NullOr(VcsStatusRemoteResult),

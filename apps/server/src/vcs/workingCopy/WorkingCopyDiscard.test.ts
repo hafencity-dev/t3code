@@ -10,6 +10,7 @@ import {
   supportsPathspecStash,
 } from "./WorkingCopyDiscard.ts";
 import { readStashList } from "./WorkingCopyStash.ts";
+import type { WorkingCopyDiscardResult, WorkingCopyStashEntry } from "@t3tools/contracts";
 import { readWorkingCopyStatus } from "./WorkingCopyStatus.ts";
 import { stagePaths } from "./WorkingCopyStaging.ts";
 import { commitStaged } from "./WorkingCopyCommit.ts";
@@ -20,6 +21,24 @@ import {
   WorkingCopyTestLayer,
   writeFile,
 } from "./testing/workingCopyTestRepo.ts";
+
+/** What the undo toast holds: the immutable handle the server returned. */
+function undoTarget(result: WorkingCopyDiscardResult) {
+  return {
+    ref: result.backupRef ?? "",
+    expectedCommit: result.backupRef ?? "",
+    expectedIdentity: result.backupIdentity ?? "",
+  };
+}
+
+/** What the "Recent backups" list holds. */
+function listedTarget(entry: WorkingCopyStashEntry) {
+  return {
+    ref: entry.ref,
+    expectedCommit: entry.commit ?? "",
+    expectedIdentity: entry.identity ?? "",
+  };
+}
 
 describe("supportsPathspecStash", () => {
   it("requires git >= 2.13, the release that added `stash push -- <paths>`", () => {
@@ -70,6 +89,8 @@ it.layer(WorkingCopyTestLayer)("discardPaths", (it) => {
       // second discard renumbering the stack under the undo toast.
       assert.strictEqual(result.backupRef, stashes[0]?.commit);
       assert.match(result.backupRef ?? "", /^[0-9a-f]{40}$/);
+      assert.strictEqual(result.backupIdentity, stashes[0]?.identity);
+      assert.isUndefined(result.warning);
     }),
   );
 
@@ -84,7 +105,7 @@ it.layer(WorkingCopyTestLayer)("discardPaths", (it) => {
       const result = yield* discardPaths(repo.git, { paths: ["a.ts"] });
       assert.strictEqual(yield* readFile(repo.cwd, "a.ts"), "committed\n");
 
-      yield* restoreDiscardBackup(repo.git, result.backupRef ?? "stash@{0}");
+      yield* restoreDiscardBackup(repo.git, undoTarget(result));
 
       assert.strictEqual(yield* readFile(repo.cwd, "a.ts"), "precious edit\n");
       // `pop` removed the backup, so undo cannot be replayed twice.
@@ -105,7 +126,7 @@ it.layer(WorkingCopyTestLayer)("discardPaths", (it) => {
       assert.strictEqual(result.recoverable, true);
       assert.strictEqual(yield* readFile(repo.cwd, "fresh.ts"), null);
 
-      yield* restoreDiscardBackup(repo.git, result.backupRef ?? "stash@{0}");
+      yield* restoreDiscardBackup(repo.git, undoTarget(result));
       assert.strictEqual(yield* readFile(repo.cwd, "fresh.ts"), "brand new\n");
     }),
   );
@@ -159,7 +180,7 @@ it.layer(WorkingCopyTestLayer)("discardPaths", (it) => {
 
       // `a.ts`'s backup is now `stash@{1}`. Undoing by the handle taken at
       // discard time must restore `a.ts`, never `b.ts`.
-      yield* restoreDiscardBackup(repo.git, first.backupRef ?? "");
+      yield* restoreDiscardBackup(repo.git, undoTarget(first));
 
       assert.strictEqual(yield* readFile(repo.cwd, "a.ts"), "precious a\n");
       assert.strictEqual(yield* readFile(repo.cwd, "b.ts"), "committed b\n");
@@ -178,9 +199,83 @@ it.layer(WorkingCopyTestLayer)("discardPaths", (it) => {
       const result = yield* discardPaths(repo.git, { paths: ["a.ts"] });
       yield* git(repo.cwd, ["stash", "drop", "stash@{0}"]);
 
-      const error = yield* restoreDiscardBackup(repo.git, result.backupRef ?? "").pipe(Effect.flip);
+      const error = yield* restoreDiscardBackup(repo.git, undoTarget(result)).pipe(Effect.flip);
 
-      assert.strictEqual(error._tag, "WorkingCopyInvalidRevisionError");
+      assert.strictEqual(error._tag, "WorkingCopyStashIdentityError");
+      assert.strictEqual(yield* readFile(repo.cwd, "a.ts"), "committed\n");
+    }),
+  );
+
+  // fork: remote Git — the backup is found by its operation marker, never by
+  // assuming it is `stash@{0}`; an agent's stash between the push and the
+  // read-back must not become the undo target.
+  it.effect("captures its own backup when another stash lands right after the push", () =>
+    Effect.gen(function* () {
+      const repo = yield* makeTestRepository();
+      yield* writeFile(repo.cwd, "a.ts", "committed a\n");
+      yield* writeFile(repo.cwd, "b.ts", "committed b\n");
+      yield* stagePaths(repo.git, ["a.ts", "b.ts"]);
+      yield* commitStaged(repo.git, "base");
+      yield* writeFile(repo.cwd, "a.ts", "precious a\n");
+      yield* writeFile(repo.cwd, "b.ts", "agent b\n");
+
+      const result = yield* discardPaths(repo.git, { paths: ["a.ts"] });
+      // Barrier: the toast is on screen, an agent stashes b.ts on top.
+      yield* git(repo.cwd, ["stash", "push", "-m", "agent work", "--", "b.ts"]);
+
+      yield* restoreDiscardBackup(repo.git, undoTarget(result));
+
+      assert.strictEqual(yield* readFile(repo.cwd, "a.ts"), "precious a\n");
+      assert.strictEqual(yield* readFile(repo.cwd, "b.ts"), "committed b\n");
+      const all = yield* readStashList(repo.git);
+      assert.deepStrictEqual(
+        all.map((entry) => entry.label),
+        ["agent work"],
+      );
+    }),
+  );
+
+  it.effect("restore refuses a stash that is not one of the panel's backups", () =>
+    Effect.gen(function* () {
+      const repo = yield* makeTestRepository();
+      yield* writeFile(repo.cwd, "a.ts", "committed\n");
+      yield* stagePaths(repo.git, ["a.ts"]);
+      yield* commitStaged(repo.git, "base");
+      yield* writeFile(repo.cwd, "a.ts", "user work\n");
+      yield* git(repo.cwd, ["stash", "push", "-m", "mine"]);
+      const mine = (yield* readStashList(repo.git))[0]!;
+
+      const error = yield* restoreDiscardBackup(repo.git, listedTarget(mine)).pipe(Effect.flip);
+
+      assert.strictEqual(error._tag, "WorkingCopyStashIdentityError");
+      assert.include(error.message, "not a discard backup");
+      assert.strictEqual(yield* readFile(repo.cwd, "a.ts"), "committed\n");
+      assert.strictEqual((yield* readStashList(repo.git)).length, 1);
+    }),
+  );
+
+  it.effect("restore from the backups list applies that entry after a renumbering", () =>
+    Effect.gen(function* () {
+      const repo = yield* makeTestRepository();
+      yield* writeFile(repo.cwd, "a.ts", "committed\n");
+      yield* stagePaths(repo.git, ["a.ts"]);
+      yield* commitStaged(repo.git, "base");
+      yield* writeFile(repo.cwd, "a.ts", "first\n");
+      yield* discardPaths(repo.git, { paths: ["a.ts"] });
+      const shown = (yield* listDiscardBackups(repo.git))[0]!;
+      yield* writeFile(repo.cwd, "a.ts", "second\n");
+      yield* discardPaths(repo.git, { paths: ["a.ts"] });
+
+      // The list the user clicked said stash@{0}; it is stash@{1} now.
+      const stale = yield* restoreDiscardBackup(repo.git, listedTarget(shown)).pipe(Effect.flip);
+      assert.strictEqual(stale._tag, "WorkingCopyStashIdentityError");
+      const current = (yield* listDiscardBackups(repo.git)).find(
+        (entry) => entry.identity === shown.identity,
+      )!;
+      yield* restoreDiscardBackup(repo.git, listedTarget(current));
+
+      assert.strictEqual(yield* readFile(repo.cwd, "a.ts"), "first\n");
+      assert.strictEqual((yield* listDiscardBackups(repo.git)).length, 1);
     }),
   );
 
@@ -243,6 +338,11 @@ it.layer(WorkingCopyTestLayer)("discardPaths", (it) => {
 
       const backups = yield* listDiscardBackups(repo.git);
       assert.strictEqual(backups.length, 10);
+      // The newest survive; the oldest two rounds were pruned.
+      assert.deepStrictEqual(
+        backups.map((entry) => entry.label.replace(/ \[t3-operation:[^\]]+\]$/, "")),
+        Array.from({ length: 10 }, (_, i) => `t3-backup: round ${11 - i}`),
+      );
 
       const all = yield* readStashList(repo.git);
       const mine = all.filter((entry) => !entry.isDiscardBackup);

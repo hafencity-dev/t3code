@@ -249,6 +249,7 @@ function DisclosureRow(props: {
 
 /** Single option inside a submenu panel. */
 function ChoiceRow(props: {
+  readonly disabled?: boolean;
   readonly label: string;
   readonly description?: string;
   readonly selected: boolean;
@@ -259,7 +260,8 @@ function ChoiceRow(props: {
     <Pressable
       accessibilityLabel={props.description ? `${props.label}. ${props.description}` : props.label}
       accessibilityRole="radio"
-      accessibilityState={{ checked: props.selected }}
+      disabled={props.disabled}
+      accessibilityState={{ checked: props.selected, disabled: props.disabled ?? false }}
       onPress={props.onPress}
       className={cn(
         "min-h-14 flex-row items-center gap-3 bg-card px-4 py-3 active:bg-subtle",
@@ -286,6 +288,7 @@ function ChoiceRow(props: {
 }
 
 function SwitchRow(props: {
+  readonly disabled?: boolean;
   readonly label: string;
   readonly value: boolean;
   readonly onValueChange: (value: boolean) => void;
@@ -300,6 +303,7 @@ function SwitchRow(props: {
     >
       <Text className="text-sm font-t3-medium text-foreground">{props.label}</Text>
       <ThemedSwitch
+        disabled={props.disabled}
         accessibilityLabel={props.label}
         onValueChange={props.onValueChange}
         value={props.value}
@@ -313,6 +317,7 @@ type ThreadSettingsSubmenuPage =
   | { readonly kind: "runtime" };
 
 type ThreadSettingsSessionProps = {
+  readonly modelSaving?: boolean;
   readonly environmentId: EnvironmentId | null;
   readonly providerInstanceId?: ProviderInstanceId;
   readonly providerGroups: ReadonlyArray<ProviderGroup>;
@@ -366,6 +371,7 @@ export function useExistingThreadSettingsRoutePresentation() {
 }
 
 type ThreadSettingsSessionValue = {
+  readonly modelSaving: boolean;
   readonly environmentId: EnvironmentId | null;
   readonly providerInstanceId?: ProviderInstanceId;
   readonly providerGroups: ReadonlyArray<ProviderGroup>;
@@ -436,6 +442,15 @@ function ThreadSettingsSessionProvider(
     [props.providerGroups],
   );
   const commitPendingModel = useCallback(() => {
+    if (props.modelSaving) {
+      // fork: a save in flight blocks a new pick, never closing the sheet.
+      if (pendingModel)
+        Alert.alert(
+          "Saving model selection",
+          "Wait for the current change to finish, then try again.",
+        );
+      return pendingModel === null;
+    }
     if (pendingModel) {
       if (!canCommitPendingModel(pendingModel, props.providerGroups)) {
         Alert.alert(
@@ -448,10 +463,11 @@ function ThreadSettingsSessionProvider(
       props.onSelectModel(pendingModel);
     }
     return true;
-  }, [pendingModel, props.onSelectModel, props.providerGroups]);
+  }, [pendingModel, props.onSelectModel, props.providerGroups, props.modelSaving]);
 
   const applyOptionChange = useCallback(
     (id: string, value: string | boolean) => {
+      if (props.modelSaving) return;
       const next = applyProviderOptionSelection(displayedDescriptors, { id, value });
       if (!next) {
         return;
@@ -465,7 +481,7 @@ function ThreadSettingsSessionProvider(
         props.onUpdateOptionSelections(next);
       }
     },
-    [displayedDescriptors, pendingModel, props.onUpdateOptionSelections],
+    [displayedDescriptors, pendingModel, props.onUpdateOptionSelections, props.modelSaving],
   );
 
   const toggleProvider = useCallback((providerKey: string) => {
@@ -495,6 +511,7 @@ function ThreadSettingsSessionProvider(
   const value = useMemo<ThreadSettingsSessionValue>(
     () => ({
       environmentId: props.environmentId,
+      modelSaving: props.modelSaving ?? false,
       providerInstanceId: props.providerInstanceId,
       providerGroups: props.providerGroups,
       runtimeMode: props.runtimeMode,
@@ -525,6 +542,7 @@ function ThreadSettingsSessionProvider(
       isApplied,
       isDisplayed,
       props.environmentId,
+      props.modelSaving,
       props.providerInstanceId,
       pendingModel,
       pressModel,
@@ -744,6 +762,7 @@ function ThreadSettingsOptionsItem(props: {
               layout={THREAD_SETTINGS_OPTIONS_LAYOUT_TRANSITION}
             >
               <SwitchRow
+                disabled={session.modelSaving}
                 label={descriptor.label}
                 value={descriptor.currentValue ?? false}
                 onValueChange={(value) => session.applyOptionChange(descriptor.id, value)}
@@ -952,6 +971,7 @@ function ThreadSettingsChoiceContent(props: {
       <View className="overflow-hidden rounded-2xl bg-card">
         {submenuContent.rows.map((row, index) => (
           <ChoiceRow
+            disabled={props.submenu.kind === "descriptor" && session.modelSaving}
             key={row.id}
             description={row.description}
             isLast={index === submenuContent.rows.length - 1}

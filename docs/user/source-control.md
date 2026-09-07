@@ -33,6 +33,12 @@ gh auth login
   diff.
 - Discarding one file, a folder or change group, or all changes always asks for confirmation first.
   When Git supports backups, the success message also offers Undo.
+- Stash apply, pop, and drop, and restoring a discard backup, verify the exact stash entry shown
+  before changing anything. If the stash list moved meanwhile, from another device or a terminal,
+  the action is refused and asks you to refresh rather than touching a different entry. Repository
+  changes made from another device or the terminal refresh the open panel views automatically.
+- After upgrading, a commit message drafted before drafts became per-server appears under the commit
+  box as **Recover old commit draft…**, where you choose to use it here or discard it.
 
 ### GitLab
 

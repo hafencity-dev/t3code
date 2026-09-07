@@ -144,15 +144,14 @@ export type WorkingCopyCommitDetail = typeof WorkingCopyCommitDetail.Type;
 
 export const WorkingCopyStashEntry = Schema.Struct({
   index: NonNegativeInt,
-  /** `stash@{n}` — the only handle apply/pop/drop accept. */
+  /** Positional display handle; mutations also require the immutable identity. */
   ref: TrimmedNonEmptyString,
-  /**
-   * fork: f4 — the stash commit's object name. `stash@{n}` is POSITIONAL and
-   * every push/drop renumbers the stack, so a handle held across time (the
-   * discard undo toast lives for 10s) must be this, not `ref`.
-   * `restoreDiscardBackup` accepts either and re-resolves the index from this.
-   */
+  /** fork: immutable stash commit; optional when connected to older servers. */
   commit: Schema.optional(TrimmedNonEmptyString),
+  /** fork: identifies the reflog entry, including when two entries share an OID. */
+  identity: Schema.optional(TrimmedNonEmptyString),
+  /** fork: an interrupted removal left a journal; mutations are refused until it is resolved. */
+  recoveryJournalPath: Schema.optional(TrimmedNonEmptyString),
   label: Schema.String,
   branch: Schema.NullOr(TrimmedNonEmptyString),
   createdAt: IsoDateTime,
@@ -168,6 +167,9 @@ export type WorkingCopyStashEntry = typeof WorkingCopyStashEntry.Type;
 export const WorkingCopyDiscardResult = Schema.Struct({
   recoverable: Schema.Boolean,
   backupRef: Schema.optional(TrimmedNonEmptyString),
+  backupIdentity: Schema.optional(TrimmedNonEmptyString),
+  /** A backup was taken but follow-up bookkeeping could not finish. */
+  warning: Schema.optional(Schema.String),
   discardedPaths: Schema.Array(TrimmedNonEmptyString),
   /**
    * fork: f4 — the preflight answer. `true` means **nothing was touched**: the
@@ -308,6 +310,9 @@ export type WorkingCopyDiscardPathsInput = typeof WorkingCopyDiscardPathsInput.T
 export const WorkingCopyStashRefInput = Schema.Struct({
   cwd: WorkingCopyCwd,
   ref: TrimmedNonEmptyString,
+  // fork: required so legacy positional-only requests fail before mutation.
+  expectedCommit: Schema.String.check(Schema.isPattern(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/)),
+  expectedIdentity: Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/)),
 });
 export type WorkingCopyStashRefInput = typeof WorkingCopyStashRefInput.Type;
 
@@ -506,8 +511,18 @@ export class WorkingCopyNothingStagedError extends Schema.TaggedErrorClass<Worki
  * Reuses the existing `VcsError` taxonomy — `VcsProcess` produces it for free —
  * and adds only the three failures the panel introduces.
  */
+export class WorkingCopyStashIdentityError extends Schema.TaggedErrorClass<WorkingCopyStashIdentityError>()(
+  "WorkingCopyStashIdentityError",
+  { operation: Schema.String, detail: Schema.String, applied: Schema.Boolean },
+) {
+  override get message(): string {
+    return this.detail;
+  }
+}
+
 export const WorkingCopyError = Schema.Union([
   VcsError,
+  WorkingCopyStashIdentityError,
   WorkingCopyCwdDeniedError,
   WorkingCopyInvalidRevisionError,
   WorkingCopyIndexLockedError,

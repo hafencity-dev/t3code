@@ -40,6 +40,7 @@ import {
   ENVIRONMENT_RECONNECT_WARNING_GRACE_MS,
   getAntigravitySendBlockReason,
   getStartedThreadModelChangeBlockReason,
+  resolveModelSelectionForPick,
   hasEnvironmentReconnectWarningGraceElapsed,
   hasServerAcknowledgedLocalDispatch,
   shouldRefocusComposerOnWindowFocus,
@@ -1902,5 +1903,47 @@ describe("shouldRefocusComposerOnWindowFocus", () => {
   it("leaves focus inside a dialog or popup alone", () => {
     expect(shouldRefocusComposerOnWindowFocus(element("BUTTON", { within: "dialog" }))).toBe(false);
     expect(shouldRefocusComposerOnWindowFocus(element("BUTTON", { within: "-popup" }))).toBe(false);
+  });
+});
+
+// fork: picks replace the full server selection and must not drop saved options.
+describe("resolveModelSelectionForPick", () => {
+  const codex = ProviderInstanceId.make("codex");
+  const claude = ProviderInstanceId.make("claudeAgent");
+  const current = {
+    instanceId: codex,
+    model: "gpt-5.4",
+    options: [
+      { id: "effort", value: "high" },
+      { id: "web-search", value: false },
+    ],
+  } as const;
+
+  it("keeps the saved options when the same model is picked again", () => {
+    expect(resolveModelSelectionForPick({ current, instanceId: codex, model: "gpt-5.4" })).toEqual(
+      current,
+    );
+  });
+
+  it("keeps the saved options when changing models within the instance", () => {
+    expect(resolveModelSelectionForPick({ current, instanceId: codex, model: "gpt-5.5" })).toEqual({
+      ...current,
+      model: "gpt-5.5",
+    });
+  });
+
+  it("uses the target instance's sticky options when switching instances", () => {
+    expect(
+      resolveModelSelectionForPick({
+        current,
+        instanceId: claude,
+        model: "opus",
+        stickyOptions: [{ id: "effort", value: "max" }],
+      }),
+    ).toEqual({ instanceId: claude, model: "opus", options: [{ id: "effort", value: "max" }] });
+    expect(resolveModelSelectionForPick({ current, instanceId: claude, model: "opus" })).toEqual({
+      instanceId: claude,
+      model: "opus",
+    });
   });
 });

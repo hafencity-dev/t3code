@@ -914,3 +914,53 @@ describe("resolvePlanAgentHealPatch", () => {
     ).toEqual({ sourceControlWriterModelSelection: healed });
   });
 });
+
+// fork: existing server threads ignore stale local model overrides.
+describe("deriveEffectiveComposerModelState for server threads", () => {
+  const codex = ProviderInstanceId.make("codex");
+  const claude = ProviderInstanceId.make("claudeAgent");
+  const providers = [
+    provider({ instanceId: "codex", models: ["ModelA", "ModelB"] }),
+    provider({ instanceId: "claudeAgent", models: ["opus"] }),
+  ];
+  const staleDraft = {
+    activeProvider: claude,
+    modelSelectionByProvider: {
+      [codex]: createModelSelection(codex, "ModelA", [{ id: "effort", value: "high" }]),
+      [claude]: createModelSelection(claude, "opus"),
+    },
+  };
+
+  it("follows the server selection and drops removed options instead of restoring local ones", () => {
+    const serverSelection = createModelSelection(codex, "ModelB");
+    const state = deriveEffectiveComposerModelState({
+      serverThread: true,
+      draft: staleDraft,
+      providers,
+      selectedProvider: ProviderDriverKind.make("codex"),
+      selectedInstanceId: codex,
+      threadModelSelection: serverSelection,
+      projectModelSelection: createModelSelection(codex, "ModelA", [
+        { id: "effort", value: "low" },
+      ]),
+      settings: DEFAULT_UNIFIED_SETTINGS,
+    });
+    expect(state.selectedModel).toBe("ModelB");
+    expect(state.modelOptions).toEqual({});
+  });
+
+  it("keeps local draft overrides for threads that do not exist on the server yet", () => {
+    const state = deriveEffectiveComposerModelState({
+      serverThread: false,
+      draft: staleDraft,
+      providers,
+      selectedProvider: ProviderDriverKind.make("codex"),
+      selectedInstanceId: codex,
+      threadModelSelection: null,
+      projectModelSelection: null,
+      settings: DEFAULT_UNIFIED_SETTINGS,
+    });
+    expect(state.selectedModel).toBe("ModelA");
+    expect(state.modelOptions?.[codex]).toEqual([{ id: "effort", value: "high" }]);
+  });
+});

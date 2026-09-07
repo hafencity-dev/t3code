@@ -1461,3 +1461,36 @@ describe("applyThreadDetailEvent", () => {
     });
   });
 });
+
+// fork: model metadata is owned by create/metadata events only.
+describe("thread.turn-start-requested model ownership", () => {
+  it("keeps the shared model selection when a queued turn executes its own snapshot", () => {
+    const shared = { instanceId: ProviderInstanceId.make("codex"), model: "ModelB" } as const;
+    const result = applyThreadDetailEvent(
+      { ...baseThread, modelSelection: shared, runtimeMode: "approval-required" },
+      {
+        ...baseEventFields,
+        sequence: 9,
+        occurredAt: "2026-04-01T06:00:00.000Z",
+        aggregateKind: "thread",
+        aggregateId: baseThread.id,
+        type: "thread.turn-start-requested",
+        payload: {
+          threadId: baseThread.id,
+          messageId: MessageId.make("queued-a"),
+          modelSelection: baseThread.modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "plan",
+          createdAt: "2026-04-01T06:00:00.000Z",
+        },
+      },
+    );
+    expect(result.kind).toBe("updated");
+    if (result.kind === "updated") {
+      expect(result.thread.modelSelection).toEqual(shared);
+      expect(result.thread.runtimeMode).toBe("full-access");
+      expect(result.thread.interactionMode).toBe("plan");
+      expect(result.thread.updatedAt).toBe("2026-04-01T06:00:00.000Z");
+    }
+  });
+});

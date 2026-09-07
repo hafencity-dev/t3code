@@ -1,4 +1,9 @@
 import { useAtomValue } from "@effect/atom-react";
+// fork: pending model saves block only picker/send, never text editing or steering.
+import {
+  pendingModelSelectionAtom,
+  getStartedThreadModelChangeBlockReason,
+} from "@t3tools/client-runtime/state/threads";
 import type {
   EnvironmentId,
   MessageId,
@@ -347,7 +352,17 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
     serverConfig: props.serverConfig,
     states: uploadStates,
   });
-  const sendBlockedReason = props.sendBlockedReason ?? attachmentBlockReason;
+  const pendingModelSelection = useAtomValue(
+    pendingModelSelectionAtom({
+      environmentId: props.environmentId,
+      threadId: props.selectedThread.id,
+    }),
+  );
+  const modelSaving = pendingModelSelection !== null;
+  const sendBlockedReason =
+    (modelSaving ? "Saving model selection…" : null) ??
+    props.sendBlockedReason ??
+    attachmentBlockReason;
   const canSend =
     hasContent && !voiceInput.blocksSubmission && sendBlockedReason === null && !modelUnavailable;
 
@@ -452,9 +467,44 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
   const providerGroups = useMemo(() => groupByProvider(modelOptions), [modelOptions]);
   // An existing thread is bound to its harness: sessions can't move between
   // provider instances, so the picker only offers the thread's own group.
+  // Keyed on the few fields the block reason reads so streaming events do not recompute it.
+  const hasStartedSession = props.selectedThread.session !== null;
+  const sessionProviderInstanceId = props.selectedThread.session?.providerInstanceId;
+  const threadInstanceId = props.selectedThread.modelSelection.instanceId;
+  const threadModel = props.selectedThread.modelSelection.model;
+  const providers = props.serverConfig?.providers;
   const threadProviderGroups = useMemo(
-    () => providerGroups.filter((group) => group.providerKey === currentModelSelection.instanceId),
-    [providerGroups, currentModelSelection.instanceId],
+    () =>
+      providerGroups
+        .filter(
+          (group) => !hasStartedSession || group.providerKey === currentModelSelection.instanceId,
+        )
+        .map((group) => ({
+          ...group,
+          models: group.models.map((option) => ({
+            ...option,
+            isUnavailable:
+              option.isUnavailable ||
+              modelSaving ||
+              getStartedThreadModelChangeBlockReason({
+                providers: providers ?? [],
+                hasStartedSession,
+                currentModelSelection: { instanceId: threadInstanceId, model: threadModel },
+                currentProviderInstanceId: sessionProviderInstanceId,
+                nextModelSelection: option.selection,
+              }) !== null,
+          })),
+        })),
+    [
+      providerGroups,
+      currentModelSelection.instanceId,
+      modelSaving,
+      hasStartedSession,
+      sessionProviderInstanceId,
+      threadInstanceId,
+      threadModel,
+      providers,
+    ],
   );
   const currentModelOption =
     modelOptions.find(
@@ -474,6 +524,7 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
   const settingsRouteSession = useMemo<ExistingThreadSettingsRouteSession>(
     () => ({
       ownerId: settingsOwnerId,
+      modelSaving,
       environmentId: props.environmentId,
       providerInstanceId: currentModelSelection.instanceId,
       providerGroups: threadProviderGroups,
@@ -491,6 +542,7 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
       props.onUpdateModelSelection,
       props.onUpdateRuntimeMode,
       providerOptionDescriptors,
+      modelSaving,
       settingsOwnerId,
       threadProviderGroups,
     ],

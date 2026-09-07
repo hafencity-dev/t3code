@@ -270,6 +270,7 @@ export function shouldRenderTraitsControls(input: {
 }
 
 export interface TraitsMenuContentProps {
+  disabled?: boolean;
   provider: ProviderDriverKind;
   instanceId?: ProviderInstanceId;
   models: ReadonlyArray<ServerProviderModel>;
@@ -293,6 +294,7 @@ export const TraitsMenuContent = memo(function TraitsMenuContentImpl({
   onPromptChange,
   modelOptions,
   allowPromptInjectedEffort = true,
+  disabled = false,
   planModeEnabled,
   ...persistence
 }: TraitsMenuContentProps & TraitsPersistence) {
@@ -417,7 +419,10 @@ export const TraitsMenuContent = memo(function TraitsMenuContentImpl({
                     // Base UI keeps radio menus open by default. Close on pick so
                     // the traits menu behaves like the model picker.
                     closeOnClick
-                    disabled={ultrathinkInBodyText && descriptor.id === primarySelectDescriptor?.id}
+                    disabled={
+                      disabled ||
+                      (ultrathinkInBodyText && descriptor.id === primarySelectDescriptor?.id)
+                    }
                   >
                     <span className="flex w-full min-w-0 flex-col">
                       <span className="flex w-full min-w-0 items-center justify-between gap-3">
@@ -463,7 +468,13 @@ export const TraitsMenuContent = memo(function TraitsMenuContentImpl({
                 }}
               >
                 {(["on", "off"] as const).map((value) => (
-                  <MenuRadioItem key={value} value={value} hideIndicator closeOnClick>
+                  <MenuRadioItem
+                    key={value}
+                    value={value}
+                    hideIndicator
+                    closeOnClick
+                    disabled={disabled}
+                  >
                     <span className="flex w-full min-w-0 items-center justify-between gap-3">
                       <span>{value === "on" ? "On" : "Off"}</span>
                     </span>
@@ -545,6 +556,7 @@ export const TraitsPicker = memo(function TraitsPicker({
   onPromptChange,
   modelOptions,
   allowPromptInjectedEffort = true,
+  disabled = false,
   planModeEnabled,
   triggerVariant,
   triggerClassName,
@@ -610,7 +622,7 @@ export const TraitsPicker = memo(function TraitsPicker({
 
   return (
     <Menu
-      open={isMenuOpen}
+      open={isMenuOpen && !disabled}
       onOpenChange={(open) => {
         setIsMenuOpen(open);
       }}
@@ -618,6 +630,7 @@ export const TraitsPicker = memo(function TraitsPicker({
       <MenuTrigger
         render={
           <ComposerControl
+            disabled={disabled}
             variant={triggerVariant ?? "ghost"}
             size={size}
             className={cn(
@@ -649,6 +662,7 @@ export const TraitsPicker = memo(function TraitsPicker({
       </MenuTrigger>
       <MenuPopup align="start" {...(isComposerOwned ? composerFloatingLayerProps : {})}>
         <TraitsMenuContent
+          disabled={disabled}
           provider={provider}
           {...(instanceId ? { instanceId } : {})}
           models={models}

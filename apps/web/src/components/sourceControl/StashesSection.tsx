@@ -30,7 +30,7 @@ import {
 import { Skeleton } from "~/components/ui/skeleton";
 import { cn } from "~/lib/utils";
 
-import { workingCopyBusyKey } from "./sourceControlPanel.logic";
+import { stashBusyId, workingCopyBusyKey } from "./sourceControlPanel.logic";
 
 export interface StashesPanelProps {
   readonly stashes: ReadonlyArray<WorkingCopyStashEntry>;
@@ -38,21 +38,40 @@ export interface StashesPanelProps {
   readonly isLoading: boolean;
   /** The stash list has resolved at least once — Pop is inert before that. */
   readonly listReady: boolean;
-  /** fork: f4 F-06 — per-ref in-flight state, so a re-press cannot vanish. */
+  /**
+   * fork: remote Git — the server validates the entry's commit and reflog
+   * identity before mutating. Without it, every mutation stays disabled: a
+   * positional `stash@{n}` sent to an old server can hit the wrong entry.
+   */
+  readonly identitySupported: boolean;
+  /** fork: f4 F-06 — per-entry in-flight state, so a re-press cannot vanish. */
   readonly isBusy: (key: string) => boolean;
   readonly dirty: boolean;
   readonly onStash: () => void;
-  readonly onPopLatest: () => void;
-  readonly onApply: (ref: string) => void;
-  readonly onDrop: (ref: string, label: string) => void;
-  readonly onRestoreBackup: (ref: string) => void;
+  /** Pops the entry as listed — the latest plain stash at render time. */
+  readonly onPop: (entry: WorkingCopyStashEntry) => void;
+  readonly onApply: (entry: WorkingCopyStashEntry) => void;
+  readonly onDrop: (entry: WorkingCopyStashEntry) => void;
+  readonly onRestoreBackup: (entry: WorkingCopyStashEntry) => void;
+}
+
+/** Old servers list entries without `identity`; those cannot be mutated safely. */
+function isMutable(props: StashesPanelProps, entry: WorkingCopyStashEntry): boolean {
+  return props.identitySupported && entry.commit !== undefined && entry.identity !== undefined;
 }
 
 export function StashesPanel(props: StashesPanelProps) {
   const plainStashes = props.stashes.filter((entry) => !entry.isDiscardBackup);
-  const latestRef = plainStashes[0]?.ref;
-  const popBusy = latestRef !== undefined && props.isBusy(workingCopyBusyKey.stashPop(latestRef));
+  const latest = plainStashes[0];
+  const popBusy =
+    latest !== undefined && props.isBusy(workingCopyBusyKey.stashPop(stashBusyId(latest)));
   const empty = !props.isLoading && plainStashes.length === 0 && props.backups.length === 0;
+  const hasEntries = plainStashes.length > 0 || props.backups.length > 0;
+  const unsupported =
+    hasEntries && [...plainStashes, ...props.backups].some((entry) => !isMutable(props, entry));
+  const recoveryJournalPath = [...plainStashes, ...props.backups].find(
+    (entry) => entry.recoveryJournalPath !== undefined,
+  )?.recoveryJournalPath;
 
   return (
     <section className="flex min-h-0 flex-col" aria-label="Stashes">
@@ -72,13 +91,32 @@ export function StashesPanel(props: StashesPanelProps) {
           <Button
             size="xs"
             variant="outline"
-            disabled={!props.listReady || plainStashes.length === 0 || popBusy}
-            onClick={props.onPopLatest}
+            disabled={
+              !props.listReady || latest === undefined || popBusy || !isMutable(props, latest)
+            }
+            onClick={() => {
+              if (latest !== undefined) props.onPop(latest);
+            }}
           >
             {popBusy ? "Popping…" : "Pop"}
           </Button>
         </span>
       </div>
+      {recoveryJournalPath !== undefined ? (
+        <p className="flex-none pb-2 text-destructive text-xs" role="alert">
+          A stash removal was interrupted. Stash changes are refused until you resolve it: the
+          journal at <code className="break-all">{recoveryJournalPath}</code> holds the original
+          reflog, ref, packed stash and the removed commit. Repair with git, then delete or move the
+          journal.
+        </p>
+      ) : null}
+      {unsupported ? (
+        <p className="flex-none pb-2 text-warning-foreground text-xs" role="note">
+          {props.identitySupported
+            ? "Some entries cannot be changed from here: this repository's stash storage cannot be verified safely. Use git directly."
+            : "Not supported by this server: it cannot verify which stash it changes. Update the server to apply, pop, drop or restore from here."}
+        </p>
+      ) : null}
 
       <div className="-mx-3 min-h-0 flex-1 overflow-auto">
         {props.isLoading ? (
@@ -90,20 +128,22 @@ export function StashesPanel(props: StashesPanelProps) {
         ) : null}
         {plainStashes.map((stash) => (
           <StashRow
-            key={stash.ref}
+            key={stashBusyId(stash)}
             label={stash.label}
             createdAt={stash.createdAt}
             actions={
               <>
                 <RowButton
-                  busy={props.isBusy(workingCopyBusyKey.stashApply(stash.ref))}
-                  onClick={() => props.onApply(stash.ref)}
+                  busy={props.isBusy(workingCopyBusyKey.stashApply(stashBusyId(stash)))}
+                  disabled={!isMutable(props, stash)}
+                  onClick={() => props.onApply(stash)}
                 >
                   Apply
                 </RowButton>
                 <RowButton
-                  busy={props.isBusy(workingCopyBusyKey.stashDrop(stash.ref))}
-                  onClick={() => props.onDrop(stash.ref, stash.label)}
+                  busy={props.isBusy(workingCopyBusyKey.stashDrop(stashBusyId(stash)))}
+                  disabled={!isMutable(props, stash)}
+                  onClick={() => props.onDrop(stash)}
                   danger
                 >
                   Drop
@@ -119,13 +159,14 @@ export function StashesPanel(props: StashesPanelProps) {
             </p>
             {props.backups.map((backup) => (
               <StashRow
-                key={backup.ref}
+                key={stashBusyId(backup)}
                 label={backup.label}
                 createdAt={backup.createdAt}
                 actions={
                   <RowButton
-                    busy={props.isBusy(workingCopyBusyKey.restoreBackup(backup.ref))}
-                    onClick={() => props.onRestoreBackup(backup.ref)}
+                    busy={props.isBusy(workingCopyBusyKey.restoreBackup(stashBusyId(backup)))}
+                    disabled={!isMutable(props, backup)}
+                    onClick={() => props.onRestoreBackup(backup)}
                   >
                     Restore
                   </RowButton>
@@ -176,6 +217,7 @@ function StashRow(props: { label: string; createdAt: string; actions: React.Reac
 function RowButton(props: {
   onClick: () => void;
   busy?: boolean;
+  disabled?: boolean;
   danger?: boolean;
   children: React.ReactNode;
 }) {
@@ -183,7 +225,7 @@ function RowButton(props: {
     <Button
       size="xs"
       variant={props.danger === true ? "destructive-outline" : "outline"}
-      disabled={props.busy === true}
+      disabled={props.busy === true || props.disabled === true}
       aria-busy={props.busy === true}
       onClick={props.onClick}
     >

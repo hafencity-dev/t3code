@@ -21,14 +21,16 @@ import type { EnvironmentRegistry } from "../connection/registry.ts";
 import { EnvironmentSupervisor } from "../connection/supervisor.ts";
 import { safeErrorLogAttributes } from "../errors/safeLog.ts";
 import { EnvironmentCacheStore } from "../platform/persistence.ts";
-import { request, subscribe, type EnvironmentRpcInput } from "../rpc/client.ts";
+import { request, subscribeDynamicWithSession, type EnvironmentRpcInput } from "../rpc/client.ts";
+import {
+  invalidateRepository,
+  observeRepositoryChange,
+  serverPushesRevisions,
+  type RepositoryCapabilityLookup,
+} from "./repositoryInvalidation.ts";
 import { followStreamInEnvironment } from "./runtime.ts";
 import { vcsCommandConcurrency, vcsCommandScheduler } from "./vcsCommandScheduler.ts";
-import {
-  invalidateCachedVcsRefs,
-  vcsRefsCacheStateAtom,
-  withVcsRefsPersistenceLock,
-} from "./vcsRefInvalidation.ts";
+import { vcsRefsCacheStateAtom, withVcsRefsPersistenceLock } from "./vcsRefInvalidation.ts";
 
 const OFFLINE_BRANCH_LIST_LIMIT = 100;
 const VCS_REFS_IDLE_TTL_MS = 30_000;
@@ -279,20 +281,47 @@ function cachedVcsRefsChanges(
 
 export function createVcsEnvironmentAtoms<R, E>(
   runtime: Atom.AtomRuntime<EnvironmentRegistry | EnvironmentCacheStore | R, E>,
+  // fork: repository invalidation — servers that push revisions make the
+  // post-command invalidation below redundant.
+  options: { readonly capabilities?: RepositoryCapabilityLookup } = {},
 ) {
   const statusSubscription = (label: string, idleTtlMs?: number) =>
     createEnvironmentSubscriptionAtomFamily(runtime, {
       label,
       ...(idleTtlMs === undefined ? {} : { idleTtlMs }),
       subscribe: (input: EnvironmentRpcInput<typeof WS_METHODS.subscribeVcsStatus>) =>
-        subscribe(WS_METHODS.subscribeVcsStatus, input).pipe(
-          Stream.mapAccum(
-            () => null as VcsStatusQueryResult | null,
-            (current, event) => {
-              const next = applyVcsStatusQueryEvent(current, event);
-              return [next, [next]] as const;
-            },
-          ),
+        Stream.unwrap(
+          Effect.gen(function* () {
+            const registry = yield* AtomRegistry.AtomRegistry;
+            const supervisor = yield* EnvironmentSupervisor;
+            const target = { environmentId: supervisor.target.environmentId, cwd: input.cwd };
+            return subscribeDynamicWithSession(WS_METHODS.subscribeVcsStatus, () =>
+              Effect.succeed(input),
+            ).pipe(
+              Stream.mapEffect(
+                Effect.fn("VcsStatus.observeRepositoryChange")(function* ([session, event]) {
+                  const liveSession = yield* SubscriptionRef.get(supervisor.session);
+                  if (Option.isNone(liveSession) || liveSession.value !== session)
+                    return Option.none<VcsStatusStreamEvent>();
+                  const change = observeRepositoryChange(registry, target, session, event);
+                  if (change !== null) {
+                    yield* invalidateRepository(registry, target, change.domains, change.refsKey);
+                  }
+                  return Option.some(event);
+                }),
+              ),
+              Stream.filterMap((event) =>
+                Option.match(event, { onNone: () => Result.failVoid, onSome: Result.succeed }),
+              ),
+              Stream.mapAccum(
+                () => null as VcsStatusQueryResult | null,
+                (current, event) => {
+                  const next = applyVcsStatusQueryEvent(current, event);
+                  return [next, [next]] as const;
+                },
+              ),
+            );
+          }),
         ),
     });
   /**
@@ -325,10 +354,12 @@ export function createVcsEnvironmentAtoms<R, E>(
     target: { readonly environmentId: EnvironmentId; readonly input: { readonly cwd: string } },
     registry: AtomRegistry.AtomRegistry,
   ) =>
-    invalidateCachedVcsRefs(registry, {
-      environmentId: target.environmentId,
-      cwd: target.input.cwd,
-    });
+    serverPushesRevisions(options.capabilities, registry, target.environmentId)
+      ? Effect.void
+      : invalidateRepository(registry, {
+          environmentId: target.environmentId,
+          cwd: target.input.cwd,
+        });
 
   return {
     listRefs,

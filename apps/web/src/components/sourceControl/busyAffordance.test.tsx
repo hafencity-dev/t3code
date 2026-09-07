@@ -26,7 +26,7 @@ import { ChangeRow } from "./ChangeRow";
 import { changesRowDomId } from "./ChangesList";
 import { SourceControlStatusBand } from "./SourceControlStatusBand";
 import { StashesPanel } from "./StashesSection";
-import { workingCopyBusyKey } from "./sourceControlPanel.logic";
+import { stashBusyId, workingCopyBusyKey } from "./sourceControlPanel.logic";
 
 const noop = () => undefined;
 
@@ -34,6 +34,8 @@ function stash(index: number, ref: string): WorkingCopyStashEntry {
   return {
     index,
     ref,
+    commit: `${index}`.repeat(40),
+    identity: `${index}`.repeat(64),
     label: `stash ${ref}`,
     branch: "main",
     createdAt: "2026-08-01T00:00:00.000Z",
@@ -53,10 +55,11 @@ function renderStashes(over: Partial<Parameters<typeof StashesPanel>[0]> = {}) {
       backups={[]}
       isLoading={false}
       listReady
+      identitySupported
       isBusy={() => false}
       dirty
       onStash={noop}
-      onPopLatest={noop}
+      onPop={noop}
       onApply={noop}
       onDrop={noop}
       onRestoreBackup={noop}
@@ -74,7 +77,7 @@ describe("StashesPanel busy affordance (F-06/F-09)", () => {
 
   it("disables Pop — and only Pop — while the latest stash is popping", () => {
     const markup = renderStashes({
-      isBusy: (key) => key === workingCopyBusyKey.stashPop("stash@{0}"),
+      isBusy: (key) => key === workingCopyBusyKey.stashPop(stashBusyId(stash(0, "stash@{0}"))),
     });
     expect(markup).toContain("Popping…");
     expect(disabledCount(markup)).toBe(1);
@@ -82,7 +85,7 @@ describe("StashesPanel busy affordance (F-06/F-09)", () => {
 
   it("disables Apply for exactly the row whose ref is in flight", () => {
     const markup = renderStashes({
-      isBusy: (key) => key === workingCopyBusyKey.stashApply("stash@{1}"),
+      isBusy: (key) => key === workingCopyBusyKey.stashApply(stashBusyId(stash(1, "stash@{1}"))),
     });
     // One disabled Apply, and the other row's Apply/Drop stay live.
     expect(disabledCount(markup)).toBe(1);
@@ -90,7 +93,7 @@ describe("StashesPanel busy affordance (F-06/F-09)", () => {
 
   it("disables Drop for exactly the row whose ref is in flight", () => {
     const markup = renderStashes({
-      isBusy: (key) => key === workingCopyBusyKey.stashDrop("stash@{0}"),
+      isBusy: (key) => key === workingCopyBusyKey.stashDrop(stashBusyId(stash(0, "stash@{0}"))),
     });
     expect(disabledCount(markup)).toBe(1);
   });
@@ -108,6 +111,21 @@ describe("StashesPanel busy affordance (F-06/F-09)", () => {
     // the same possibly-null list — so it was enabled exactly when it was stale.
     const markup = renderStashes({ listReady: false });
     expect(disabledCount(markup)).toBeGreaterThan(0);
+  });
+
+  // fork: remote Git — an old server resolves `stash@{n}` positionally, so no
+  // mutation may leave the client; the reason is on screen, not in a console.
+  it("disables every stash mutation and says why when the server lacks identity support", () => {
+    const markup = renderStashes({ identitySupported: false });
+    expect(disabledCount(markup)).toBe(5);
+    expect(markup).toContain("Not supported by this server");
+  });
+
+  it("disables only the entries an identity-capable server could not identify", () => {
+    const { commit: _commit, identity: _identity, ...legacy } = stash(1, "stash@{1}");
+    const markup = renderStashes({ stashes: [stash(0, "stash@{0}"), legacy] });
+    expect(disabledCount(markup)).toBe(2);
+    expect(markup).toContain("cannot be verified safely");
   });
 
   it("shows the timestamp AND the actions, never one instead of the other", () => {

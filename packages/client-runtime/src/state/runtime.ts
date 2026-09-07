@@ -507,11 +507,15 @@ export function createEnvironmentQueryAtomFamily<R, ER, Input, A, E>(
   const family = Atom.family((key: string) => {
     const target = parseEnvironmentRpcKey<Input>(key);
     const idleTtlMs = options.idleTtlMs ?? 5 * 60_000;
+    const refreshTrigger = options.refreshTrigger?.(target);
     const queryAtom = runtime
       .atom<
         A,
         E | ConnectionAttemptError | EnvironmentNotRegisteredError | EnvironmentRpcUnavailableError
       >((get) => {
+        // fork: depend on the generation inside the request atom, so invalidation
+        // cancels obsolete effects (including results arriving after remount).
+        if (refreshTrigger !== undefined) get(refreshTrigger);
         const connection = Option.getOrNull(
           AsyncResult.value(get(connectionAtom(target.environmentId))),
         );
@@ -554,19 +558,23 @@ export function createEnvironmentQueryAtomFamily<R, ER, Input, A, E>(
       options.refreshIntervalMs === undefined
         ? queryAtom
         : queryAtom.pipe(Atom.withRefresh(options.refreshIntervalMs));
-    const refreshTrigger = options.refreshTrigger?.(target);
-    return (
-      refreshTrigger === undefined
-        ? intervalQuery
-        : intervalQuery.pipe(Atom.makeRefreshOnSignal(refreshTrigger))
-    ).pipe(Atom.setIdleTTL(idleTtlMs), Atom.withLabel(`${options.label}:${key}`));
+    return intervalQuery.pipe(
+      Atom.setIdleTTL(idleTtlMs),
+      Atom.withLabel(`${options.label}:${key}`),
+    );
   });
   return (target) => family(environmentRpcKey(target));
 }
 
 export function createEnvironmentSubscriptionAtomFamily<R, ER, Input, A, E>(
   runtime: Atom.AtomRuntime<EnvironmentRegistry | R, ER>,
-  options: EnvironmentSubscriptionAtomOptions<Input, A, E, EnvironmentSupervisor | R>,
+  // fork: the runtime provides `AtomRegistry`, so subscriptions may observe it.
+  options: EnvironmentSubscriptionAtomOptions<
+    Input,
+    A,
+    E,
+    EnvironmentSupervisor | AtomRegistry.AtomRegistry | R
+  >,
 ) {
   const family = Atom.family((key: string) => {
     const target = parseEnvironmentRpcKey<Input>(key);

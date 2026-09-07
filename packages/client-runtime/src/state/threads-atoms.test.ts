@@ -6,6 +6,7 @@ import {
   ProjectId,
   ProviderInstanceId,
   ThreadId,
+  TurnId,
   type OrchestrationThread,
   type OrchestrationThreadDetailSnapshot,
   type OrchestrationThreadStreamItem,
@@ -40,6 +41,7 @@ import { EnvironmentCacheStore } from "../platform/persistence.ts";
 import type { WsRpcProtocolClient } from "../rpc/protocol.ts";
 import type { RpcSession } from "../rpc/session.ts";
 import { createEnvironmentThreadDetailAtoms } from "./threadDetail.ts";
+import { pendingModelSelectionAtom, saveThreadModelSelection } from "./pendingModelSelection.ts";
 import { THREAD_SNAPSHOT_IDLE_TTL_MS } from "./threadRetention.ts";
 import type { ThreadSnapshotWindow } from "./threadSnapshotHttp.ts";
 import {
@@ -825,5 +827,168 @@ describe("createEnvironmentThreadStateAtoms", () => {
       yield* Deferred.await(next.closed);
       yield* Deferred.await(retried.closed);
     }),
+  );
+});
+
+// fork: model metadata is server-owned; two clients share one live stream here.
+describe("saveThreadModelSelection over the live thread stream", () => {
+  const MODEL_B = { instanceId: ProviderInstanceId.make("codex"), model: "ModelB" } as const;
+  const RUNNING_THREAD: OrchestrationThread = {
+    ...THREAD,
+    latestTurn: {
+      turnId: TurnId.make("turn-a"),
+      state: "running",
+      requestedAt: THREAD.createdAt,
+      startedAt: THREAD.createdAt,
+      completedAt: null,
+      assistantMessageId: null,
+    },
+    session: {
+      threadId: THREAD_ID,
+      status: "running",
+      providerName: "codex",
+      runtimeMode: "full-access",
+      activeTurnId: TurnId.make("turn-a"),
+      lastError: null,
+      updatedAt: THREAD.createdAt,
+    },
+  };
+
+  it.effect(
+    "confirms a remote pick by receipt, keeps the running turn, and survives queued turns and reconnects",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* makeHarness({ snapshot: { snapshotSequence: 7, thread: RUNNING_THREAD } });
+        const rawStateAtom = h.rawAtoms.stateAtom(TARGET.environmentId, THREAD_ID);
+        const unmountHost = h.registry.mount(h.stateAtom);
+        const host = yield* Queue.take(h.subscriptions);
+        const remoteRegistry = yield* h.makeRegistry;
+        const unmountRemote = remoteRegistry.mount(h.stateAtom);
+        const remote = yield* Queue.take(h.subscriptions);
+        yield* Queue.offer(host.events, { kind: "synchronized" });
+        yield* Queue.offer(remote.events, { kind: "synchronized" });
+        yield* observeState(h.registry, h.stateAtom, (state) => state.status === "live");
+        yield* observeState(remoteRegistry, h.stateAtom, (state) => state.status === "live");
+        expect(h.counts().active).toBe(2);
+
+        let resolveReceipt!: (sequence: number) => void;
+        const receipt = new Promise<number>((resolve) => {
+          resolveReceipt = resolve;
+        });
+        const dispatches: Array<typeof MODEL_B> = [];
+        const save = saveThreadModelSelection({
+          registry: remoteRegistry,
+          threadRef: h.ref,
+          selection: MODEL_B,
+          stateAtom: rawStateAtom,
+          dispatch: () => {
+            dispatches.push(MODEL_B);
+            return receipt.then((sequence) => ({ sequence }));
+          },
+        });
+        expect(remoteRegistry.get(pendingModelSelectionAtom(h.ref))).toEqual(MODEL_B);
+        expect(h.registry.get(pendingModelSelectionAtom(h.ref))).toBeNull();
+        expect(dispatches).toEqual([MODEL_B]);
+
+        const metaUpdated = {
+          kind: "event",
+          event: {
+            eventId: EventId.make("meta-b"),
+            commandId: null,
+            causationEventId: null,
+            correlationId: null,
+            metadata: {},
+            sequence: 8,
+            occurredAt: THREAD.createdAt,
+            aggregateKind: "thread",
+            aggregateId: THREAD_ID,
+            type: "thread.meta-updated",
+            payload: { threadId: THREAD_ID, modelSelection: MODEL_B, updatedAt: THREAD.createdAt },
+          },
+        } as const;
+        yield* Queue.offer(host.events, metaUpdated);
+        yield* Queue.offer(remote.events, metaUpdated);
+        const hostApplied = yield* observeState(
+          h.registry,
+          h.stateAtom,
+          (state) => state.appliedSequence === 8,
+        );
+        const remoteApplied = yield* observeState(
+          remoteRegistry,
+          h.stateAtom,
+          (state) => state.appliedSequence === 8,
+        );
+        // Both clients see B; the running turn keeps its provider session.
+        expect(Option.getOrThrow(hostApplied.data).modelSelection).toEqual(MODEL_B);
+        expect(Option.getOrThrow(remoteApplied.data).modelSelection).toEqual(MODEL_B);
+        expect(Option.getOrThrow(hostApplied.data).session).toEqual(RUNNING_THREAD.session);
+        expect(Option.getOrThrow(hostApplied.data).latestTurn).toEqual(RUNNING_THREAD.latestTurn);
+        // Applied before the receipt: the remote stays locked until it lands.
+        expect(remoteRegistry.get(pendingModelSelectionAtom(h.ref))).toEqual(MODEL_B);
+
+        resolveReceipt(8);
+        yield* Effect.promise(() => save);
+        expect(remoteRegistry.get(pendingModelSelectionAtom(h.ref))).toBeNull();
+
+        // A queued message executes its own snapshot A without touching B.
+        const queuedTurn = {
+          kind: "event",
+          event: {
+            eventId: EventId.make("turn-a-queued"),
+            commandId: null,
+            causationEventId: null,
+            correlationId: null,
+            metadata: {},
+            sequence: 9,
+            occurredAt: THREAD.createdAt,
+            aggregateKind: "thread",
+            aggregateId: THREAD_ID,
+            type: "thread.turn-start-requested",
+            payload: {
+              threadId: THREAD_ID,
+              messageId: MessageId.make("queued-a"),
+              modelSelection: THREAD.modelSelection,
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              createdAt: THREAD.createdAt,
+            },
+          },
+        } as const;
+        yield* Queue.offer(host.events, queuedTurn);
+        yield* Queue.offer(remote.events, queuedTurn);
+        const afterQueued = yield* observeState(
+          h.registry,
+          h.stateAtom,
+          (state) => state.appliedSequence === 9,
+        );
+        expect(Option.getOrThrow(afterQueued.data).modelSelection).toEqual(MODEL_B);
+        const remoteAfterQueued = yield* observeState(
+          remoteRegistry,
+          h.stateAtom,
+          (state) => state.appliedSequence === 9,
+        );
+        expect(Option.getOrThrow(remoteAfterQueued.data).modelSelection).toEqual(MODEL_B);
+
+        // A reconnect snapshot carries the server's B, not the stale local A.
+        yield* Queue.offer(host.events, {
+          kind: "snapshot",
+          snapshot: {
+            snapshotSequence: 10,
+            thread: { ...RUNNING_THREAD, modelSelection: MODEL_B },
+          },
+        });
+        const afterReconnect = yield* observeState(
+          h.registry,
+          h.stateAtom,
+          (state) => state.appliedSequence === 10,
+        );
+        expect(Option.getOrThrow(afterReconnect.data).modelSelection).toEqual(MODEL_B);
+        expect(h.registry.get(pendingModelSelectionAtom(h.ref))).toBeNull();
+
+        unmountHost();
+        unmountRemote();
+        yield* Deferred.await(host.closed);
+        yield* Deferred.await(remote.closed);
+      }),
   );
 });

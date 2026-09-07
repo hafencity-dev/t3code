@@ -1305,6 +1305,8 @@ export interface ChatComposerProps {
     cursorAdjacentToMention: boolean,
   ) => void;
 
+  isModelSaving: boolean;
+  onModelSelectionChange: (selection: ModelSelection) => void;
   onProviderModelSelect: (instanceId: ProviderInstanceId, model: string) => void;
   onOpenProviderSetup: (instanceId: ProviderInstanceId) => void;
   getModelDisabledReason: (instanceId: ProviderInstanceId, model: string) => string | null;
@@ -1337,7 +1339,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     activeThreadEnvironmentId: _activeThreadEnvironmentId,
     activeThread,
     promptHistoryMessages,
-    isServerThread: _isServerThread,
+    isServerThread,
     isLocalDraftThread: _isLocalDraftThread,
     compact,
     forceExpandedOnMobile,
@@ -1401,6 +1403,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     onPreviousActivePendingUserInputQuestion,
     onChangeActivePendingUserInputCustomAnswer,
     onProviderModelSelect,
+    isModelSaving,
+    onModelSelectionChange,
     onOpenProviderSetup,
     getModelDisabledReason,
     toggleInteractionMode,
@@ -1593,7 +1597,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       ),
     [providerStatuses, settings],
   );
-  const selectedProviderByThreadId = composerDraft.activeProvider ?? null;
+  const selectedProviderByThreadId = isServerThread ? null : (composerDraft.activeProvider ?? null);
   const {
     selectedProviderEntry,
     requestedDriverKind,
@@ -1605,8 +1609,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         entries: providerInstanceEntries,
         candidateInstanceIds: [
           selectedProviderByThreadId,
-          activeThread?.session?.providerInstanceId,
           activeThreadModelSelection?.instanceId,
+          activeThread?.session?.providerInstanceId,
           activeProjectDefaultModelSelection?.instanceId,
         ],
         lockedProvider,
@@ -1640,6 +1644,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     selectedProviderEntry?.driverKind ?? requestedDriverKind;
 
   const { modelOptions: composerModelOptions, selectedModel } = useEffectiveComposerModelState({
+    serverThread: isServerThread,
     threadRef: composerDraftTarget,
     providers: providerStatuses,
     selectedProvider,
@@ -1653,6 +1658,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     selectedModel,
   );
   const sendDisabledReason =
+    (isModelSaving ? "Saving model selection…" : null) ??
     externalSendDisabledReason ??
     (activePendingProgress ? null : (attachmentBlockReason ?? providerSendBlockReason));
   const isSendDisabled = sendDisabledReason !== null;
@@ -2125,7 +2131,17 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
 
   // fork: f5 GPT fast — target this thread/draft's environment and selected instance.
   const claudeCodexFastMode = useClaudeCodexFastMode(environmentId, selectedProviderEntry);
+  const onModelOptionsChange = (options: ModelSelection["options"]) => {
+    if (!isModelSaving)
+      onModelSelectionChange({
+        instanceId: selectedInstanceId,
+        model: selectedModel,
+        ...(options ? { options } : {}),
+      });
+  };
   const providerTraitsMenuContent = renderProviderTraitsMenuContent({
+    ...(isServerThread ? { onModelOptionsChange } : {}),
+    disabled: isModelSaving,
     provider: selectedProvider,
     instanceId: selectedInstanceId,
     ...(routeKind === "server" ? { threadRef: routeThreadRef } : {}),
@@ -2147,6 +2163,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     providerTraitsMenuContent
   );
   const providerTraitsPickerInput = {
+    ...(isServerThread ? { onModelOptionsChange } : {}),
+    disabled: isModelSaving,
     provider: selectedProvider,
     instanceId: selectedInstanceId,
     ...(routeKind === "server" ? { threadRef: routeThreadRef } : {}),
@@ -4006,6 +4024,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         />
       ) : null}
       <ProviderModelPicker
+        disabled={isModelSaving}
         isComposerOwned
         compact={composerControlsCompact}
         activeInstanceId={selectedInstanceId}

@@ -1151,6 +1151,7 @@ function legacyToModelSelectionByProvider(
 }
 
 export function deriveEffectiveComposerModelState(input: {
+  serverThread?: boolean | undefined;
   draft:
     | Pick<ComposerThreadDraftState, "modelSelectionByProvider" | "activeProvider">
     | null
@@ -1169,6 +1170,8 @@ export function deriveEffectiveComposerModelState(input: {
   projectModelSelection: ModelSelection | null | undefined;
   settings: UnifiedSettings;
 }): EffectiveComposerModelState {
+  // fork: stale local model settings never override existing server threads.
+  const draft = input.serverThread ? undefined : input.draft;
   const baseModelCandidate =
     input.threadModelSelection?.model ?? input.projectModelSelection?.model ?? null;
   const preserveThreadModel =
@@ -1200,14 +1203,14 @@ export function deriveEffectiveComposerModelState(input: {
   // `ProviderDriverKind` literal is a valid `ProviderInstanceId` slug, so the
   // cast to the branded type is safe.
   const instanceSelection = input.selectedInstanceId
-    ? input.draft?.modelSelectionByProvider?.[input.selectedInstanceId]
+    ? draft?.modelSelectionByProvider?.[input.selectedInstanceId]
     : undefined;
   const legacySelection =
     input.selectedProvider === "antigravity" &&
     input.selectedInstanceId &&
     input.selectedInstanceId !== defaultInstanceIdForDriver(input.selectedProvider)
       ? undefined
-      : input.draft?.modelSelectionByProvider?.[ProviderInstanceId.make(input.selectedProvider)];
+      : draft?.modelSelectionByProvider?.[ProviderInstanceId.make(input.selectedProvider)];
   const activeSelection = instanceSelection ?? legacySelection;
   const activeSelectionInstanceId = instanceSelection
     ? (input.selectedInstanceId ?? ProviderInstanceId.make(input.selectedProvider))
@@ -1229,9 +1232,10 @@ export function deriveEffectiveComposerModelState(input: {
       ))
     : baseModel;
   const modelOptions =
-    modelSelectionByProviderToOptions(input.draft?.modelSelectionByProvider) ??
-    providerSelectionsFromModelSelection(input.threadModelSelection) ??
-    providerSelectionsFromModelSelection(input.projectModelSelection) ??
+    modelSelectionByProviderToOptions(draft?.modelSelectionByProvider) ??
+    (input.threadModelSelection
+      ? (providerSelectionsFromModelSelection(input.threadModelSelection) ?? {})
+      : providerSelectionsFromModelSelection(input.projectModelSelection)) ??
     null;
 
   return {
@@ -4124,6 +4128,7 @@ function useComposerDraftModelState(threadRef: ComposerThreadTarget): ComposerDr
 }
 
 export function useEffectiveComposerModelState(input: {
+  serverThread?: boolean;
   threadRef?: ComposerThreadTarget;
   draftId?: DraftId;
   providers: ReadonlyArray<ServerProvider>;
@@ -4143,6 +4148,7 @@ export function useEffectiveComposerModelState(input: {
   return useMemo(
     () =>
       deriveEffectiveComposerModelState({
+        serverThread: input.serverThread,
         draft,
         providers: input.providers,
         selectedProvider: input.selectedProvider,
@@ -4153,6 +4159,7 @@ export function useEffectiveComposerModelState(input: {
       }),
     [
       draft,
+      input.serverThread,
       input.providers,
       input.settings,
       input.projectModelSelection,

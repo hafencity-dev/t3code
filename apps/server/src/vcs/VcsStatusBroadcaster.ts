@@ -1,3 +1,4 @@
+import * as NodeCrypto from "node:crypto";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
@@ -7,6 +8,8 @@ import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as PubSub from "effect/PubSub";
+import * as PartitionedSemaphore from "effect/PartitionedSemaphore";
+import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Scope from "effect/Scope";
@@ -15,6 +18,7 @@ import * as Stream from "effect/Stream";
 import * as SynchronizedRef from "effect/SynchronizedRef";
 import type {
   GitManagerServiceError,
+  VcsInvalidationDomain,
   VcsStatusInput,
   VcsStatusLocalResult,
   VcsStatusRemoteResult,
@@ -28,6 +32,10 @@ import * as BackgroundPolicy from "../background/BackgroundPolicy.ts";
 import * as GitWorkflowService from "../git/GitWorkflowService.ts";
 import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import {
+  resolveRepositoryInvalidationScope,
+  type RepositoryInvalidationScope,
+} from "./repositoryInvalidationScope.ts";
 
 const DEFAULT_VCS_STATUS_REFRESH_INTERVAL = Duration.seconds(30);
 const VCS_STATUS_REFRESH_FAILURE_BASE_DELAY = Duration.seconds(30);
@@ -191,7 +199,12 @@ export class VcsStatusBroadcaster extends Context.Service<
     ) => Effect.Effect<VcsStatusResult, GitManagerServiceError>;
     readonly refreshLocalStatus: (
       cwd: string,
+      mutationDomains?: ReadonlyArray<VcsInvalidationDomain>,
     ) => Effect.Effect<VcsStatusLocalResult, GitManagerServiceError>;
+    readonly notifyMutation: (
+      cwd: string,
+      domains?: ReadonlyArray<VcsInvalidationDomain>,
+    ) => Effect.Effect<void>;
     readonly refreshStatus: (cwd: string) => Effect.Effect<VcsStatusResult, GitManagerServiceError>;
     /**
      * Refresh a loaded cwd after a turn if background policy allows it.
@@ -230,10 +243,8 @@ function remoteStatusScopeFingerprint(local: VcsStatusLocalResult | null): strin
 }
 
 const normalizeCwd = (cwd: string) =>
-  Effect.service(FileSystem.FileSystem).pipe(
-    Effect.flatMap((fs) => fs.realPath(cwd)),
-    Effect.orElseSucceed(() => cwd),
-  );
+  resolveRepositoryInvalidationScope(cwd).pipe(Effect.map((scope) => scope.root));
+const ALL_REPOSITORY_DOMAINS = ["worktree", "refs", "stashes"] as const;
 
 export const make = Effect.gen(function* () {
   const autoPullPolicy = yield* VcsAutoPullPolicy;
@@ -248,6 +259,14 @@ export const make = Effect.gen(function* () {
     Scope.close(scope, Exit.void),
   );
   const cacheRef = yield* Ref.make(new Map<string, CachedVcsStatus>());
+  // fork: revisions are independent of the aggregate status fingerprint.
+  const epoch = NodeCrypto.randomUUID();
+  const counters = new Map<string, number>();
+  const revision = (cwd: string) => ({ epoch, counter: counters.get(cwd) ?? 0 });
+  const advanceRevision = (cwd: string) => {
+    counters.set(cwd, (counters.get(cwd) ?? 0) + 1);
+    return revision(cwd);
+  };
   // One permit per cwd for remote reads that write the cache. Without it a
   // periodic poll that started before `gh pr create` can finish after the
   // turn-end refresh and overwrite the fresh PR with its stale `pr: null`.
@@ -269,7 +288,11 @@ export const make = Effect.gen(function* () {
   });
 
   const updateCachedLocalStatus = Effect.fn("VcsStatusBroadcaster.updateCachedLocalStatus")(
-    function* (cwd: string, local: VcsStatusLocalResult, options?: { publish?: boolean }) {
+    function* (
+      cwd: string,
+      local: VcsStatusLocalResult,
+      options?: { publish?: boolean; mutationDomains?: ReadonlyArray<VcsInvalidationDomain> },
+    ) {
       const nextLocal = {
         fingerprint: fingerprintStatusPart(local),
         value: local,
@@ -293,12 +316,14 @@ export const make = Effect.gen(function* () {
         ] as const;
       });
 
-      if (options?.publish && update.localChanged) {
+      if (options?.publish && (update.localChanged || options.mutationDomains !== undefined)) {
         yield* PubSub.publish(changesPubSub, {
           cwd,
           event: {
             _tag: "localUpdated",
             local,
+            workingCopyRevision: advanceRevision(cwd),
+            invalidatedDomains: options.mutationDomains ?? ALL_REPOSITORY_DOMAINS,
           },
         });
       }
@@ -373,10 +398,17 @@ export const make = Effect.gen(function* () {
 
   const updateCachedStatus = Effect.fn("VcsStatusBroadcaster.updateCachedStatus")(function* (
     cwd: string,
-    local: VcsStatusLocalResult,
+    readLocal: VcsStatusLocalResult,
     remote: VcsStatusRemoteResult | null,
-    options?: { publish?: boolean },
+    options?: { publish?: boolean; expectedCounter?: number },
   ) {
+    // fork: a read that raced a mutation must not republish the older worktree
+    // under a newer revision; the mutation's own frame already carries it.
+    const raced =
+      options?.expectedCounter !== undefined && revision(cwd).counter !== options.expectedCounter;
+    const local = raced
+      ? ((yield* Ref.get(cacheRef)).get(cwd)?.local?.value ?? readLocal)
+      : readLocal;
     const nextLocal = {
       fingerprint: fingerprintStatusPart(local),
       value: local,
@@ -385,7 +417,7 @@ export const make = Effect.gen(function* () {
       fingerprint: fingerprintStatusPart(remote),
       value: remote,
     } satisfies CachedValue<VcsStatusRemoteResult | null>;
-    const shouldPublish = yield* Ref.modify(cacheRef, (cache) => {
+    const update = yield* Ref.modify(cacheRef, (cache) => {
       const previous = cache.get(cwd) ?? { local: null, remote: null };
       const nextCache = new Map(cache);
       nextCache.set(cwd, {
@@ -393,20 +425,26 @@ export const make = Effect.gen(function* () {
         remote: nextRemote,
       });
       return [
-        previous.local?.fingerprint !== nextLocal.fingerprint ||
-          previous.remote?.fingerprint !== nextRemote.fingerprint,
+        {
+          localChanged: previous.local?.fingerprint !== nextLocal.fingerprint,
+          remoteChanged: previous.remote?.fingerprint !== nextRemote.fingerprint,
+        },
         nextCache,
       ] as const;
     });
 
-    if (options?.publish && shouldPublish) {
+    if (options?.publish && (update.localChanged || update.remoteChanged)) {
       yield* PubSub.publish(changesPubSub, {
         cwd,
-        event: {
-          _tag: "snapshot",
-          local,
-          remote,
-        },
+        event: update.localChanged
+          ? {
+              _tag: "snapshot",
+              local,
+              remote,
+              workingCopyRevision: advanceRevision(cwd),
+              invalidatedDomains: ALL_REPOSITORY_DOMAINS,
+            }
+          : { _tag: "remoteUpdated", remote },
       });
     }
 
@@ -430,7 +468,13 @@ export const make = Effect.gen(function* () {
     return yield* loadLocalStatus(cwd);
   });
 
-  const withFileSystem = Effect.provideService(FileSystem.FileSystem, fs);
+  // fork: the invalidation scope resolver also needs `Path`.
+  const path = yield* Path.Path;
+  const withFileSystem = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+    effect.pipe(
+      Effect.provideService(FileSystem.FileSystem, fs),
+      Effect.provideService(Path.Path, path),
+    );
 
   const getStatus: VcsStatusBroadcaster["Service"]["getStatus"] = Effect.fn(
     "VcsStatusBroadcaster.getStatus",
@@ -456,18 +500,96 @@ export const make = Effect.gen(function* () {
     );
   });
 
+  const localWriteLock = PartitionedSemaphore.makeUnsafe<string>({ permits: 1 });
   const refreshLocalStatusCore = Effect.fn("VcsStatusBroadcaster.refreshLocalStatusCore")(
-    function* (cwd: string) {
-      yield* workflow.invalidateLocalStatus(cwd);
-      const local = yield* workflow.localStatus({ cwd });
-      return yield* updateCachedLocalStatus(cwd, local, { publish: true });
+    function* (cwd: string, mutationDomains?: ReadonlyArray<VcsInvalidationDomain>) {
+      return yield* localWriteLock.withPermit(cwd)(
+        Effect.gen(function* () {
+          const local = yield* Effect.gen(function* () {
+            yield* workflow.invalidateLocalStatus(cwd);
+            return yield* workflow.localStatus({ cwd });
+          }).pipe(
+            Effect.catch((error) =>
+              Effect.gen(function* () {
+                // A failed local read must not hide a completed partial mutation.
+                const cached = yield* getCachedStatus(cwd);
+                if (mutationDomains !== undefined && cached?.local) return cached.local.value;
+                if (mutationDomains !== undefined) advanceRevision(cwd);
+                return yield* Effect.fail(error);
+              }),
+            ),
+          );
+          return yield* updateCachedLocalStatus(cwd, local, {
+            publish: true,
+            ...(mutationDomains === undefined ? {} : { mutationDomains }),
+          });
+        }),
+      );
     },
   );
 
+  /**
+   * Siblings sharing the git dir learn about refs/stashes without a worktree
+   * read: their cached local status is republished under a new revision. A
+   * subscribed sibling always has one loaded; one without is simply skipped.
+   */
+  const publishSharedInvalidation = Effect.fn("VcsStatusBroadcaster.publishSharedInvalidation")(
+    function* (
+      cwd: string,
+      domains: ReadonlyArray<VcsInvalidationDomain>,
+      origin: { readonly cwd: string; readonly counter: number },
+    ) {
+      yield* localWriteLock.withPermit(cwd)(
+        Effect.gen(function* () {
+          const cached = (yield* Ref.get(cacheRef)).get(cwd)?.local ?? null;
+          if (cached === null) return;
+          yield* PubSub.publish(changesPubSub, {
+            cwd,
+            event: {
+              _tag: "localUpdated",
+              local: cached.value,
+              workingCopyRevision: advanceRevision(cwd),
+              invalidatedDomains: domains,
+              invalidationOrigin: origin,
+            },
+          });
+        }),
+      );
+    },
+  );
+
+  const notifyMutation: VcsStatusBroadcaster["Service"]["notifyMutation"] = Effect.fn(
+    "VcsStatusBroadcaster.notifyMutation",
+  )(function* (rawCwd, domains = ALL_REPOSITORY_DOMAINS) {
+    const source = yield* withFileSystem(resolveRepositoryInvalidationScope(rawCwd));
+    yield* refreshLocalStatusCore(source.root, domains).pipe(Effect.ignoreCause({ log: true }));
+    const sharedDomains = domains.filter((domain) => domain !== "worktree");
+    if (sharedDomains.length === 0 || source.commonDir === null) return;
+    // Only existing authorized subscriptions receive sibling notifications.
+    const siblings: Array<string> = [];
+    for (const cwd of (yield* SynchronizedRef.get(pollersRef)).keys()) {
+      if (cwd === source.root) continue;
+      const sibling: RepositoryInvalidationScope = yield* withFileSystem(
+        resolveRepositoryInvalidationScope(cwd),
+      );
+      if (sibling.commonDir === source.commonDir) siblings.push(cwd);
+    }
+    const origin = { cwd: source.root, counter: revision(source.root).counter };
+    yield* Effect.forEach(
+      siblings,
+      (cwd) => publishSharedInvalidation(cwd, sharedDomains, origin),
+      { concurrency: "unbounded", discard: true },
+    );
+  });
+
   const refreshLocalStatus: VcsStatusBroadcaster["Service"]["refreshLocalStatus"] = Effect.fn(
     "VcsStatusBroadcaster.refreshLocalStatus",
-  )(function* (rawCwd) {
+  )(function* (rawCwd, mutationDomains) {
     const cwd = yield* withFileSystem(normalizeCwd(rawCwd));
+    if (mutationDomains !== undefined) {
+      yield* notifyMutation(rawCwd, mutationDomains);
+      return yield* getOrLoadLocalStatus(cwd);
+    }
     return yield* refreshLocalStatusCore(cwd);
   });
 
@@ -494,13 +616,17 @@ export const make = Effect.gen(function* () {
       const local = yield* workflow.localStatus({ cwd });
       if (!local.isRepo || !local.isDefaultRef || local.hasWorkingTreeChanges) return null;
 
-      yield* workflow.pullCurrentBranch(cwd);
+      yield* workflow.pullCurrentBranch(cwd).pipe(Effect.ensuring(notifyMutation(cwd)));
       yield* workflow.invalidateStatus(cwd);
+      const expectedCounter = revision(cwd).counter;
       const [refreshedLocal, refreshedRemote] = yield* Effect.all(
         [workflow.localStatus({ cwd }), workflow.remoteStatus({ cwd }, { refreshUpstream: false })],
         { concurrency: "unbounded" },
       );
-      yield* updateCachedStatus(cwd, refreshedLocal, refreshedRemote, { publish: true });
+      yield* updateCachedStatus(cwd, refreshedLocal, refreshedRemote, {
+        publish: true,
+        expectedCounter,
+      });
       return { local: refreshedLocal, remote: refreshedRemote };
     }).pipe(
       Effect.catch(() =>
@@ -546,13 +672,14 @@ export const make = Effect.gen(function* () {
       cwd,
       Effect.gen(function* () {
         yield* workflow.invalidateStatus(cwd);
+        const expectedCounter = revision(cwd).counter;
         const [local, remote] = yield* Effect.all(
           [workflow.localStatus({ cwd }), workflow.remoteStatus({ cwd })],
           { concurrency: "unbounded" },
         );
         const pulled = yield* maybeAutoPull(cwd, remote, [rawCwd]);
         if (pulled !== null) return mergeGitStatusParts(pulled.local, pulled.remote);
-        return yield* updateCachedStatus(cwd, local, remote, { publish: true });
+        return yield* updateCachedStatus(cwd, local, remote, { publish: true, expectedCounter });
       }),
     );
   });
@@ -788,6 +915,8 @@ export const make = Effect.gen(function* () {
             _tag: "snapshot" as const,
             local: initialLocal,
             remote: initialRemote,
+            workingCopyRevision: revision(cwd),
+            invalidatedDomains: ALL_REPOSITORY_DOMAINS,
           }),
           Stream.fromSubscription(subscription).pipe(
             Stream.filter((event) => event.cwd === cwd),
@@ -799,6 +928,7 @@ export const make = Effect.gen(function* () {
 
   return VcsStatusBroadcaster.of({
     getStatus,
+    notifyMutation,
     refreshLocalStatus,
     refreshStatus,
     refreshPullRequestStatus,

@@ -363,6 +363,7 @@ export const makeOrchestrationIntegrationHarness = (
       Layer.provideMerge(
         Layer.succeed(VcsStatusBroadcaster, {
           getStatus: () => Effect.die("getStatus should not be called in this test"),
+          notifyMutation: () => Effect.void, // fork: repository invalidation
           refreshLocalStatus: () =>
             Effect.succeed({
               isRepo: true,

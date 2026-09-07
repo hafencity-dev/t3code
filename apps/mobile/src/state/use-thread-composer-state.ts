@@ -16,6 +16,10 @@ import {
 import { safeErrorLogAttributes } from "@t3tools/client-runtime/errors";
 import {
   parseCodexFeedbackCommand,
+  pendingModelSelectionAtom,
+  isModelSelectionSaving,
+  saveThreadModelSelection,
+  getStartedThreadModelChangeBlockReason,
   submitCodexFeedback,
   type CodexFeedbackSubmission,
 } from "@t3tools/client-runtime/state/threads";
@@ -56,7 +60,8 @@ import { useSelectedThreadDetail } from "../state/use-thread-detail";
 import { useThreadSelection } from "../state/use-thread-selection";
 import { enqueueThreadOutboxMessage } from "./thread-outbox";
 import { dispatchingQueuedMessageIdAtom, useThreadOutboxMessages } from "./use-thread-outbox";
-import { threadEnvironment } from "./threads";
+import { threadEnvironment, environmentThreads } from "./threads";
+import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import { useAtomCommand } from "./use-atom-command";
 import {
   composerAttachmentUploadBlockReason,
@@ -200,12 +205,29 @@ export function useThreadComposerState() {
     }
   }, [acknowledgedMessages, selectedThreadMessages]);
 
+  const selectedThreadEnvironmentId = selectedThreadShell?.environmentId ?? null;
+  const selectedThreadId = selectedThreadShell?.id ?? null;
+  const selectedThreadRef = useMemo(
+    () =>
+      selectedThreadEnvironmentId && selectedThreadId
+        ? { environmentId: selectedThreadEnvironmentId, threadId: selectedThreadId }
+        : null,
+    [selectedThreadEnvironmentId, selectedThreadId],
+  );
+  const pendingModelSelection = useAtomValue(pendingModelSelectionAtom(selectedThreadRef));
+  const updateThreadMetadata = useAtomCommand(threadEnvironment.updateMetadata, {
+    reportFailure: false,
+  });
   const selectedDraft = selectedThreadKey ? composerDrafts[selectedThreadKey] : null;
   const draftMessage = selectedDraft?.text ?? "";
   const draftAttachments = selectedDraft?.attachments ?? [];
   const selectedThreadQueueCount = selectedThreadQueuedMessages.length;
   const selectedThread = selectedThreadDetail ?? selectedThreadShell;
-  const modelSelection = selectedDraft?.modelSelection ?? selectedThread?.modelSelection ?? null;
+  const modelSelection =
+    pendingModelSelection ??
+    (selectedThreadCreation ? selectedDraft?.modelSelection : null) ??
+    selectedThread?.modelSelection ??
+    null;
   const runtimeMode = selectedDraft?.runtimeMode ?? selectedThread?.runtimeMode ?? null;
   const selectedProvider = selectedEnvironmentRuntime?.serverConfig?.providers.find(
     (provider) => provider.instanceId === modelSelection?.instanceId,
@@ -326,7 +348,14 @@ export function useThreadComposerState() {
       return null;
     }
 
-    const modelSelection = draft.modelSelection ?? thread.modelSelection;
+    if (
+      isModelSelectionSaving(appAtomRegistry, {
+        environmentId: selectedThreadShell.environmentId,
+        threadId: thread.id,
+      })
+    )
+      return null;
+    const modelSelection = thread.modelSelection;
     const serverConfig = selectedEnvironmentRuntime?.serverConfig;
     if (
       selectedEnvironmentRuntime?.connectionState === "connected" &&
@@ -574,14 +603,63 @@ export function useThreadComposerState() {
       const provider = selectedEnvironmentRuntime?.serverConfig?.providers.find(
         (candidate) => candidate.instanceId === value.instanceId,
       );
-      updateComposerDraftSettings(selectedThreadKey, {
-        modelSelection: value,
-        ...(provider?.showInteractionModeToggle === false
-          ? { interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE }
-          : {}),
+      if (
+        !selectedThreadRef ||
+        !selectedThread ||
+        isModelSelectionSaving(appAtomRegistry, selectedThreadRef)
+      )
+        return;
+      const reason = getStartedThreadModelChangeBlockReason({
+        providers: selectedEnvironmentRuntime?.serverConfig?.providers ?? [],
+        hasStartedSession: selectedThread.session !== null,
+        currentModelSelection: selectedThread.modelSelection,
+        currentProviderInstanceId: selectedThread.session?.providerInstanceId,
+        nextModelSelection: value,
       });
+      if (reason) {
+        Alert.alert(reason.title, reason.description);
+        return;
+      }
+      if (selectedThreadCreation) {
+        updateComposerDraftSettings(selectedThreadKey, { modelSelection: value });
+      } else {
+        void saveThreadModelSelection({
+          registry: appAtomRegistry,
+          threadRef: selectedThreadRef,
+          selection: value,
+          stateAtom: environmentThreads.stateAtom(
+            selectedThreadRef.environmentId,
+            selectedThreadRef.threadId,
+          ),
+          dispatch: async () => {
+            const result = await updateThreadMetadata({
+              environmentId: selectedThreadRef.environmentId,
+              input: { threadId: selectedThreadRef.threadId, modelSelection: value },
+            });
+            if (result._tag === "Failure") throw squashAtomCommandFailure(result);
+            return result.value;
+          },
+        }).catch((error: unknown) =>
+          Alert.alert(
+            "Could not save model selection",
+            error instanceof Error ? error.message : "Your draft is unchanged. Please try again.",
+          ),
+        );
+      }
+      if (provider?.showInteractionModeToggle === false) {
+        updateComposerDraftSettings(selectedThreadKey, {
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        });
+      }
     },
-    [selectedEnvironmentRuntime?.serverConfig, selectedThreadKey],
+    [
+      selectedEnvironmentRuntime?.serverConfig,
+      selectedThreadKey,
+      selectedThread,
+      selectedThreadRef,
+      selectedThreadCreation,
+      updateThreadMetadata,
+    ],
   );
 
   const onUpdateRuntimeMode = useCallback(
@@ -599,9 +677,6 @@ export function useThreadComposerState() {
       if (!selectedThreadKey) {
         return;
       }
-      const modelSelection =
-        getComposerDraftSnapshot(selectedThreadKey).modelSelection ??
-        selectedThread?.modelSelection;
       const provider = selectedEnvironmentRuntime?.serverConfig?.providers.find(
         (candidate) => candidate.instanceId === modelSelection?.instanceId,
       );
@@ -609,7 +684,7 @@ export function useThreadComposerState() {
         interactionMode: resolveProviderInteractionMode(provider, value),
       });
     },
-    [selectedEnvironmentRuntime?.serverConfig, selectedThread?.modelSelection, selectedThreadKey],
+    [selectedEnvironmentRuntime?.serverConfig, modelSelection, selectedThreadKey],
   );
 
   return {
