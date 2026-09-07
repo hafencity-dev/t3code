@@ -12,6 +12,7 @@ import {
   decideRelease,
   decideReleaseAcrossChannels,
   expectedArtifactNames,
+  expectedLinuxArtifactNames,
   manifestStagingPercentage,
   parseReleaseConfig,
   prepareReleaseArtifacts,
@@ -37,6 +38,8 @@ const validConfig = {
   r2Prefix: "releases/desktop",
   manifestName: "latest-mac.yml",
   betaManifestName: "beta-mac.yml",
+  linuxManifestName: "latest-linux-arm64.yml",
+  linuxBetaManifestName: "beta-linux-arm64.yml",
   updaterCacheDirName: "2code-updater",
   protocolSchemes: ["twentyfirst-agents"],
   stagingPercentage: 25,
@@ -56,10 +59,15 @@ describe("2code release core", () => {
       "2code-1.0.108-arm64-mac.zip",
       "2code-1.0.108-arm64.dmg",
     ]);
+    assert.deepStrictEqual(expectedLinuxArtifactNames(config), ["2code-1.0.108-arm64.AppImage"]);
 
     assert.throws(
       () => parseReleaseConfig({ ...validConfig, appId: "com.t3tools.t3code" }),
       /must be 'dev\.hafencity\.dev\.agents'/,
+    );
+    assert.throws(
+      () => parseReleaseConfig({ ...validConfig, linuxManifestName: "latest-linux.yml" }),
+      /must be 'latest-linux-arm64\.yml'/,
     );
     assert.throws(
       () => parseReleaseConfig({ ...validConfig, version: "1.0.106" }),
@@ -216,10 +224,25 @@ releaseDate: '2026-08-08T12:00:00.000Z'
     try {
       const config = parseReleaseConfig(validConfig);
       const [zipName, dmgName] = expectedArtifactNames(config);
+      const [appImageName] = expectedLinuxArtifactNames(config);
       await NodeFSP.writeFile(NodePath.join(directory, zipName), "zip-content");
       await NodeFSP.writeFile(NodePath.join(directory, dmgName), "dmg-content");
       await NodeFSP.writeFile(NodePath.join(directory, `${zipName}.blockmap`), "zip-map");
       await NodeFSP.writeFile(NodePath.join(directory, `${dmgName}.blockmap`), "dmg-map");
+      await NodeFSP.writeFile(NodePath.join(directory, appImageName), "appimage-content");
+      await NodeFSP.writeFile(
+        NodePath.join(directory, "latest-linux-arm64.yml"),
+        `version: 1.0.108
+files:
+  - url: ${appImageName}
+    sha512: old
+    size: 1
+    blockMapSize: 4321
+path: ${appImageName}
+sha512: old
+releaseDate: '2026-08-08T12:00:00.000Z'
+`,
+      );
       await NodeFSP.writeFile(
         NodePath.join(directory, "latest-mac.yml"),
         `version: 1.0.108
@@ -241,12 +264,23 @@ releaseDate: '2026-08-08T12:00:00.000Z'
         artifactDirectory: directory,
         sourceCommit: "0123456789abcdef0123456789abcdef01234567",
       });
-      assert.equal(plan.payloads.length, 4);
+      // Four macOS payloads plus the AppImage, which embeds its blockmap instead of shipping one.
+      assert.equal(plan.payloads.length, 5);
       assert.ok(plan.payloads.every((payload) => payload.remotePath.startsWith("objects/")));
       assert.equal(
         plan.payloads.find((payload) => payload.localName === zipName)?.sha512,
         sha512("zip-content"),
       );
+      const appImagePayload = plan.payloads.find((payload) => payload.localName === appImageName);
+      assert.equal(appImagePayload?.sha512, sha512("appimage-content"));
+      assert.equal(appImagePayload?.contentType, "application/vnd.appimage");
+      const preparedLinux = await NodeFSP.readFile(
+        NodePath.join(directory, "latest-linux-arm64.yml"),
+        "utf8",
+      );
+      assert.equal(sha512(preparedLinux), plan.linuxManifestSha512);
+      assert.match(preparedLinux, /url: objects\/[a-f0-9]{128}\/2code-1\.0\.108-arm64\.AppImage/);
+      assert.match(preparedLinux, /blockMapSize: 4321/);
       await verifyPreparedArtifacts({ config, artifactDirectory: directory });
 
       await NodeFSP.writeFile(NodePath.join(directory, zipName), "tampered");

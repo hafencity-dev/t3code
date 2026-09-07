@@ -5,6 +5,8 @@ import {
   immutableManifestPath,
   publicObjectUrl,
   releaseObjectKey,
+  releaseTargets,
+  rollbackChannelSegment,
   rollbackObjectPath,
 } from "./r2-publish.ts";
 
@@ -25,6 +27,8 @@ const config = parseReleaseConfig({
   r2Prefix: "releases/desktop",
   manifestName: "latest-mac.yml",
   betaManifestName: "beta-mac.yml",
+  linuxManifestName: "latest-linux-arm64.yml",
+  linuxBetaManifestName: "beta-linux-arm64.yml",
   updaterCacheDirName: "2code-updater",
   protocolSchemes: ["twentyfirst-agents"],
   stagingPercentage: 100,
@@ -53,5 +57,19 @@ describe("2code R2 publishing", () => {
     });
     assert.match(candidate, /^manifests\/1\.0\.108\/[a-f0-9]{128}\.yml$/);
     assert.match(rollback, /^rollbacks\/1\.0\.108\/from-1\.0\.107-[a-f0-9]{128}\.yml$/);
+  });
+
+  it("moves Linux pointers before the macOS stable pointer and keeps the legacy rollback namespace", () => {
+    const [linux, mac] = releaseTargets(config);
+    assert.equal(linux.key, "linux");
+    assert.equal(mac.key, "mac");
+    assert.equal(linux.manifestName, "latest-linux-arm64.yml");
+    assert.equal(linux.betaManifestName, "beta-linux-arm64.yml");
+    assert.equal(linux.blockmapSidecar, false);
+    assert.equal(mac.blockmapSidecar, true);
+    assert.equal(rollbackChannelSegment(mac, "latest"), "latest");
+    assert.equal(rollbackChannelSegment(mac, "beta"), "beta");
+    assert.equal(rollbackChannelSegment(linux, "latest"), "linux-latest");
+    assert.equal(rollbackChannelSegment(linux, "beta"), "linux-beta");
   });
 });

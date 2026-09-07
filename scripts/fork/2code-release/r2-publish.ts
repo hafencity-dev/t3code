@@ -7,11 +7,14 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeChildProcess from "node:child_process";
 
-import { serializeUpdateManifest } from "../../lib/update-manifest.ts";
+import { serializeUpdateManifest, type UpdateManifest } from "../../lib/update-manifest.ts";
 
 import {
   compareStableVersions,
+  contentTypeFor,
   digestFile,
+  LINUX_PLATFORM_LABEL,
+  MAC_PLATFORM_LABEL,
   manifestStagingPercentage,
   readManifest,
   readReleaseConfig,
@@ -20,6 +23,7 @@ import {
   sha512Hex,
   verifyPreparedArtifacts,
   type TwoCodeReleaseConfig,
+  type TwoCodeReleasePlan,
 } from "./release-core.ts";
 
 interface CommandResult {
@@ -63,6 +67,48 @@ export function rollbackObjectPath(input: {
 
 export function immutableManifestPath(version: string, manifest: string): string {
   return `manifests/${version}/${sha512Hex(manifest)}.yml`;
+}
+
+export type ReleaseChannel = "latest" | "beta";
+
+export interface ReleaseTarget {
+  readonly key: "mac" | "linux";
+  readonly platformLabel: string;
+  readonly manifestName: string;
+  readonly betaManifestName: string;
+  /** The payload every channel manifest must keep; other entries are optional installers. */
+  readonly updaterExtension: ".zip" | ".AppImage";
+  /** Whether updater payloads ship a sidecar `.blockmap`; AppImages embed theirs. */
+  readonly blockmapSidecar: boolean;
+}
+
+/** Ordered so every mutation ends with the macOS stable pointer, as before Linux existed. */
+export function releaseTargets(
+  config: TwoCodeReleaseConfig,
+): readonly [ReleaseTarget, ReleaseTarget] {
+  return [
+    {
+      key: "linux",
+      platformLabel: LINUX_PLATFORM_LABEL,
+      manifestName: config.linuxManifestName,
+      betaManifestName: config.linuxBetaManifestName,
+      updaterExtension: ".AppImage",
+      blockmapSidecar: false,
+    },
+    {
+      key: "mac",
+      platformLabel: MAC_PLATFORM_LABEL,
+      manifestName: config.manifestName,
+      betaManifestName: config.betaManifestName,
+      updaterExtension: ".zip",
+      blockmapSidecar: true,
+    },
+  ];
+}
+
+/** macOS keeps its historical `rollbacks/<version>/<channel>/` namespace; Linux gets its own. */
+export function rollbackChannelSegment(target: ReleaseTarget, channel: ReleaseChannel): string {
+  return target.key === "mac" ? channel : `${target.key}-${channel}`;
 }
 
 function parseArguments(argv: readonly string[]): CliArguments {
@@ -349,8 +395,70 @@ async function fetchChannelManifest(
   return { raw: await NodeFSP.readFile(path, "utf8"), path };
 }
 
+async function fetchChannelManifestIfPresent(
+  config: TwoCodeReleaseConfig,
+  manifestName: string,
+  temporaryDirectory: string,
+): Promise<{ raw: string; path: string } | undefined> {
+  const path = NodePath.join(temporaryDirectory, `live-${manifestName}`);
+  const present = await downloadPublicObjectIfPresent({
+    config,
+    relativePath: manifestName,
+    destination: path,
+  });
+  if (!present) return undefined;
+  return { raw: await NodeFSP.readFile(path, "utf8"), path };
+}
+
+interface LiveChannel {
+  readonly name: ReleaseChannel;
+  readonly raw: string;
+  readonly path: string;
+  readonly manifest: UpdateManifest;
+}
+
+async function fetchLiveChannels(input: {
+  readonly config: TwoCodeReleaseConfig;
+  readonly target: ReleaseTarget;
+  readonly temporaryDirectory: string;
+  readonly allowMissing: boolean;
+}): Promise<readonly LiveChannel[]> {
+  const channels: LiveChannel[] = [];
+  const names = [
+    ["latest", input.target.manifestName],
+    ["beta", input.target.betaManifestName],
+  ] as const;
+  for (const [name, manifestName] of names) {
+    const live = input.allowMissing
+      ? await fetchChannelManifestIfPresent(input.config, manifestName, input.temporaryDirectory)
+      : await fetchChannelManifest(input.config, manifestName, input.temporaryDirectory);
+    if (!live) {
+      console.log(
+        `Live ${input.target.key} ${name} manifest ${manifestName} is not published yet.`,
+      );
+      continue;
+    }
+    channels.push({
+      name,
+      ...live,
+      manifest: readManifest(live.raw, live.path, input.target.platformLabel),
+    });
+  }
+  return channels;
+}
+
+function planManifest(
+  plan: TwoCodeReleasePlan,
+  target: ReleaseTarget,
+): { readonly name: string; readonly sha512: string } {
+  return target.key === "mac"
+    ? { name: plan.manifestName, sha512: plan.manifestSha512 }
+    : { name: plan.linuxManifestName, sha512: plan.linuxManifestSha512 };
+}
+
 async function activateManifests(input: {
   readonly config: TwoCodeReleaseConfig;
+  readonly target: ReleaseTarget;
   readonly latestPath: string;
   readonly latestRaw: string;
   readonly betaPath: string;
@@ -360,24 +468,24 @@ async function activateManifests(input: {
   // Keep beta compatibility first. The stable pointer is deliberately the final mutation.
   await uploadMutableManifest({
     config: input.config,
-    relativePath: input.config.betaManifestName,
+    relativePath: input.target.betaManifestName,
     localPath: input.betaPath,
   });
   await verifyPublicObject({
     config: input.config,
-    relativePath: input.config.betaManifestName,
+    relativePath: input.target.betaManifestName,
     expectedSha512: sha512Base64(input.betaRaw),
     expectedSize: Buffer.byteLength(input.betaRaw),
     temporaryDirectory: input.temporaryDirectory,
   });
   await uploadMutableManifest({
     config: input.config,
-    relativePath: input.config.manifestName,
+    relativePath: input.target.manifestName,
     localPath: input.latestPath,
   });
   await verifyPublicObject({
     config: input.config,
-    relativePath: input.config.manifestName,
+    relativePath: input.target.manifestName,
     expectedSha512: sha512Base64(input.latestRaw),
     expectedSize: Buffer.byteLength(input.latestRaw),
     temporaryDirectory: input.temporaryDirectory,
@@ -386,21 +494,23 @@ async function activateManifests(input: {
 
 async function prepareSelfContainedRollback(input: {
   readonly config: TwoCodeReleaseConfig;
+  readonly target: ReleaseTarget;
   readonly releaseVersion: string;
-  readonly channel: "latest" | "beta";
+  readonly channel: ReleaseChannel;
   readonly liveRaw: string;
   readonly livePath: string;
   readonly temporaryDirectory: string;
 }): Promise<{ readonly raw: string; readonly path: string }> {
-  const liveManifest = readManifest(input.liveRaw, input.livePath);
+  const label = `${input.target.key} ${input.channel}`;
+  const liveManifest = readManifest(input.liveRaw, input.livePath, input.target.platformLabel);
   const files = [];
-  let hasUpdaterZip = false;
+  let hasUpdaterPayload = false;
   for (const file of liveManifest.files) {
     releaseObjectKey(input.config, file.url);
     const localName = NodePath.basename(file.url);
     const localPath = NodePath.join(
       input.temporaryDirectory,
-      `rollback-payload-${input.channel}-${NodeCrypto.randomUUID()}-${localName}`,
+      `rollback-payload-${input.target.key}-${input.channel}-${NodeCrypto.randomUUID()}-${localName}`,
     );
     const present = await downloadPublicObjectIfPresent({
       config: input.config,
@@ -410,28 +520,24 @@ async function prepareSelfContainedRollback(input: {
     if (!present) {
       if (localName.endsWith(".dmg")) {
         console.log(
-          `Legacy ${input.channel} manifest references missing optional DMG ${file.url}; excluding it from recovery.`,
+          `Legacy ${label} manifest references missing optional DMG ${file.url}; excluding it from recovery.`,
         );
         continue;
       }
       throw new Error(
-        `Cannot archive ${input.channel}: updater payload ${file.url} is not publicly available.`,
+        `Cannot archive ${label}: updater payload ${file.url} is not publicly available.`,
       );
     }
     const digest = await digestFile(localPath);
     if (digest.sha512 !== file.sha512 || digest.size !== file.size) {
-      throw new Error(`Cannot archive ${input.channel}: ${file.url} fails its manifest hash/size.`);
+      throw new Error(`Cannot archive ${label}: ${file.url} fails its manifest hash/size.`);
     }
     const remotePath = `objects/${digest.sha512Hex}/${localName}`;
     await uploadImmutable({
       config: input.config,
       relativePath: remotePath,
       localPath,
-      contentType: localName.endsWith(".zip")
-        ? "application/zip"
-        : localName.endsWith(".dmg")
-          ? "application/x-apple-diskimage"
-          : "application/octet-stream",
+      contentType: contentTypeFor(localName),
       temporaryDirectory: input.temporaryDirectory,
     });
     await verifyPublicObject({
@@ -449,9 +555,13 @@ async function prepareSelfContainedRollback(input: {
       relativePath: sourceBlockmap,
       destination: blockmapPath,
     });
-    if (!blockmapPresent && localName.endsWith(".zip")) {
+    if (
+      !blockmapPresent &&
+      input.target.blockmapSidecar &&
+      localName.endsWith(input.target.updaterExtension)
+    ) {
       throw new Error(
-        `Cannot archive ${input.channel}: updater blockmap ${sourceBlockmap} is unavailable.`,
+        `Cannot archive ${label}: updater blockmap ${sourceBlockmap} is unavailable.`,
       );
     }
     if (blockmapPresent) {
@@ -471,20 +581,27 @@ async function prepareSelfContainedRollback(input: {
         temporaryDirectory: input.temporaryDirectory,
       });
     }
-    hasUpdaterZip ||= localName.endsWith(".zip");
-    files.push({ url: remotePath, sha512: digest.sha512, size: digest.size });
+    hasUpdaterPayload ||= localName.endsWith(input.target.updaterExtension);
+    files.push({
+      url: remotePath,
+      sha512: file.sha512,
+      size: file.size,
+      ...(file.blockMapSize === undefined ? {} : { blockMapSize: file.blockMapSize }),
+    });
   }
-  if (!hasUpdaterZip) {
-    throw new Error(`Cannot archive ${input.channel}: no verified ZIP updater payload remains.`);
+  if (!hasUpdaterPayload) {
+    throw new Error(
+      `Cannot archive ${label}: no verified ${input.target.updaterExtension} updater payload remains.`,
+    );
   }
 
   const raw = serializeUpdateManifest(
     { ...liveManifest, files },
-    { platformLabel: `2code ${input.channel} rollback` },
+    { platformLabel: `${input.target.platformLabel} ${input.channel} rollback` },
   );
   const path = await writeTemporaryManifest(
     input.temporaryDirectory,
-    `rollback-${input.releaseVersion}-${input.channel}.yml`,
+    `rollback-${input.releaseVersion}-${input.target.key}-${input.channel}.yml`,
     raw,
   );
   const immutablePath = immutableManifestPath(liveManifest.version, raw);
@@ -511,29 +628,46 @@ async function publishRelease(
   temporaryDirectory: string,
 ): Promise<void> {
   const plan = await verifyPreparedArtifacts({ config, artifactDirectory });
-  const manifestPath = NodePath.join(artifactDirectory, plan.manifestName);
-  const manifestRaw = await NodeFSP.readFile(manifestPath, "utf8");
-  const liveLatest = await fetchChannelManifest(config, config.manifestName, temporaryDirectory);
-  const liveBeta = await fetchChannelManifest(config, config.betaManifestName, temporaryDirectory);
-  const liveChannels = [
-    { name: "latest", ...liveLatest, manifest: readManifest(liveLatest.raw, liveLatest.path) },
-    { name: "beta", ...liveBeta, manifest: readManifest(liveBeta.raw, liveBeta.path) },
-  ] as const;
-  for (const channel of liveChannels) {
-    const comparison = compareStableVersions(plan.version, channel.manifest.version);
-    if (comparison < 0) {
-      throw new Error(
-        `Refusing to publish ${plan.version} over newer live ${channel.name} version ${channel.manifest.version}.`,
-      );
+  const targets = releaseTargets(config);
+
+  const liveByTarget = new Map<ReleaseTarget["key"], readonly LiveChannel[]>();
+  for (const target of targets) {
+    // The macOS channels are the release state machine and must exist. The Linux
+    // channels follow them and may still be absent before the first Linux release.
+    const channels = await fetchLiveChannels({
+      config,
+      target,
+      temporaryDirectory,
+      allowMissing: target.key === "linux",
+    });
+    const candidate = planManifest(plan, target);
+    for (const channel of channels) {
+      const comparison = compareStableVersions(plan.version, channel.manifest.version);
+      if (comparison < 0) {
+        throw new Error(
+          `Refusing to publish ${plan.version} over newer live ${target.key} ${channel.name} version ${channel.manifest.version}.`,
+        );
+      }
+      if (comparison === 0 && sha512Base64(channel.raw) !== candidate.sha512) {
+        if (target.key === "mac") {
+          throw new Error(
+            `Live ${channel.name} 2code ${plan.version} has a different manifest; refusing same-version replacement.`,
+          );
+        }
+        // Linux pointers move before the macOS pointers, so a Linux channel that already
+        // carries this version while macOS does not is the residue of an interrupted run.
+        // The fresh candidate is an equally verified build of the same version.
+        console.log(
+          `Linux ${channel.name} already carries 2code ${plan.version} from an interrupted run; replacing it with the verified candidate.`,
+        );
+      }
     }
-    if (comparison === 0 && sha512Base64(channel.raw) !== plan.manifestSha512) {
-      throw new Error(
-        `Live ${channel.name} 2code ${plan.version} has a different manifest; refusing same-version replacement.`,
-      );
-    }
+    liveByTarget.set(target.key, channels);
   }
-  if (liveChannels.every((channel) => channel.manifest.version === plan.version)) {
-    if (liveChannels.every((channel) => sha512Base64(channel.raw) === plan.manifestSha512)) {
+
+  const macChannels = liveByTarget.get("mac") ?? [];
+  if (macChannels.every((channel) => channel.manifest.version === plan.version)) {
+    if (macChannels.every((channel) => sha512Base64(channel.raw) === plan.manifestSha512)) {
       console.log(`2code ${plan.version} is already live with the identical manifest.`);
       return;
     }
@@ -560,66 +694,86 @@ async function publishRelease(
     });
   }
 
-  const immutableCandidatePath = immutableManifestPath(plan.version, manifestRaw);
-  await uploadImmutable({
-    config,
-    relativePath: immutableCandidatePath,
-    localPath: manifestPath,
-    contentType: "application/yaml",
-    temporaryDirectory,
-  });
-  await verifyPublicObject({
-    config,
-    relativePath: immutableCandidatePath,
-    expectedSha512: plan.manifestSha512,
-    expectedSize: Buffer.byteLength(manifestRaw),
-    temporaryDirectory,
-  });
-
-  for (const channel of liveChannels) {
-    if (channel.manifest.version === plan.version) continue;
-    const rollback = await prepareSelfContainedRollback({
-      config,
-      releaseVersion: plan.version,
-      channel: channel.name,
-      liveRaw: channel.raw,
-      livePath: channel.path,
-      temporaryDirectory,
-    });
+  const candidates = new Map<
+    ReleaseTarget["key"],
+    { readonly path: string; readonly raw: string }
+  >();
+  for (const target of targets) {
+    const candidate = planManifest(plan, target);
+    const manifestPath = NodePath.join(artifactDirectory, candidate.name);
+    const manifestRaw = await NodeFSP.readFile(manifestPath, "utf8");
+    const immutableCandidatePath = immutableManifestPath(plan.version, manifestRaw);
     await uploadImmutable({
       config,
-      relativePath: `rollbacks/${plan.version}/${channel.name}/${NodePath.basename(
-        rollbackObjectPath({
-          releaseVersion: plan.version,
-          previousVersion: channel.manifest.version,
-          previousManifest: rollback.raw,
-        }),
-      )}`,
-      localPath: rollback.path,
+      relativePath: immutableCandidatePath,
+      localPath: manifestPath,
       contentType: "application/yaml",
       temporaryDirectory,
     });
+    await verifyPublicObject({
+      config,
+      relativePath: immutableCandidatePath,
+      expectedSha512: candidate.sha512,
+      expectedSize: Buffer.byteLength(manifestRaw),
+      temporaryDirectory,
+    });
+    candidates.set(target.key, { path: manifestPath, raw: manifestRaw });
   }
 
-  await activateManifests({
-    config,
-    latestPath: manifestPath,
-    latestRaw: manifestRaw,
-    betaPath: manifestPath,
-    betaRaw: manifestRaw,
-    temporaryDirectory,
-  });
+  for (const target of targets) {
+    for (const channel of liveByTarget.get(target.key) ?? []) {
+      if (channel.manifest.version === plan.version) continue;
+      const rollback = await prepareSelfContainedRollback({
+        config,
+        target,
+        releaseVersion: plan.version,
+        channel: channel.name,
+        liveRaw: channel.raw,
+        livePath: channel.path,
+        temporaryDirectory,
+      });
+      await uploadImmutable({
+        config,
+        relativePath: `rollbacks/${plan.version}/${rollbackChannelSegment(target, channel.name)}/${NodePath.basename(
+          rollbackObjectPath({
+            releaseVersion: plan.version,
+            previousVersion: channel.manifest.version,
+            previousManifest: rollback.raw,
+          }),
+        )}`,
+        localPath: rollback.path,
+        contentType: "application/yaml",
+        temporaryDirectory,
+      });
+    }
+  }
+
+  // Targets are ordered so the macOS stable pointer remains the final mutation.
+  for (const target of targets) {
+    const candidate = candidates.get(target.key);
+    if (!candidate) throw new Error(`Missing prepared ${target.key} candidate manifest.`);
+    await activateManifests({
+      config,
+      target,
+      latestPath: candidate.path,
+      latestRaw: candidate.raw,
+      betaPath: candidate.path,
+      betaRaw: candidate.raw,
+      temporaryDirectory,
+    });
+  }
   console.log(`Published 2code ${plan.version} at ${plan.stagingPercentage}%.`);
 }
 
 async function verifyContentAddressedManifest(input: {
   readonly config: TwoCodeReleaseConfig;
+  readonly target: ReleaseTarget;
   readonly raw: string;
   readonly sourcePath: string;
   readonly expectedVersion: string;
   readonly temporaryDirectory: string;
 }): Promise<void> {
-  const manifest = readManifest(input.raw, input.sourcePath);
+  const manifest = readManifest(input.raw, input.sourcePath, input.target.platformLabel);
   if (manifest.version !== input.expectedVersion) {
     throw new Error(
       `Manifest is ${manifest.version}, not expected version ${input.expectedVersion}.`,
@@ -639,6 +793,7 @@ async function verifyContentAddressedManifest(input: {
       expectedSize: file.size,
       temporaryDirectory: input.temporaryDirectory,
     });
+    if (!input.target.blockmapSidecar) continue;
     const blockmapPath = NodePath.join(
       input.temporaryDirectory,
       `verify-blockmap-${NodeCrypto.randomUUID()}`,
@@ -662,56 +817,77 @@ async function verifyContentAddressedManifest(input: {
   });
 }
 
+/**
+ * Rollback snapshots a channel must carry for a version. macOS always archives the
+ * previous manifest; Linux has none for the release that first introduced its channels.
+ */
+function expectedRollbackCounts(target: ReleaseTarget): readonly number[] {
+  return target.key === "mac" ? [1] : [0, 1];
+}
+
 async function resumeRelease(
   config: TwoCodeReleaseConfig,
   temporaryDirectory: string,
 ): Promise<void> {
-  const liveLatest = await fetchChannelManifest(config, config.manifestName, temporaryDirectory);
-  const liveBeta = await fetchChannelManifest(config, config.betaManifestName, temporaryDirectory);
-  const channels = [
-    { name: "latest", ...liveLatest, manifest: readManifest(liveLatest.raw, liveLatest.path) },
-    { name: "beta", ...liveBeta, manifest: readManifest(liveBeta.raw, liveBeta.path) },
-  ] as const;
-  const candidates = channels.filter((channel) => channel.manifest.version === config.version);
-  if (candidates.length === 0) {
-    throw new Error(`No live channel contains interrupted 2code candidate ${config.version}.`);
-  }
-  const candidate = candidates[0];
-  if (!candidate) throw new Error("Interrupted 2code candidate is missing.");
-  if (candidates.some((channel) => channel.raw !== candidate.raw)) {
-    throw new Error(`Live 2code ${config.version} channels contain different candidate bytes.`);
-  }
-  for (const channel of channels) {
-    if (
-      channel.manifest.version !== config.version &&
-      compareStableVersions(channel.manifest.version, config.version) >= 0
-    ) {
+  const resumed: Array<{ readonly target: ReleaseTarget; readonly candidate: LiveChannel }> = [];
+  for (const target of releaseTargets(config)) {
+    const channels = await fetchLiveChannels({
+      config,
+      target,
+      temporaryDirectory,
+      allowMissing: false,
+    });
+    const candidates = channels.filter((channel) => channel.manifest.version === config.version);
+    if (candidates.length === 0) {
       throw new Error(
-        `Cannot resume ${config.version} over ${channel.name} ${channel.manifest.version}.`,
+        `No live ${target.key} channel contains interrupted 2code candidate ${config.version}.`,
       );
     }
-    const rollbackKeys = await listRollbackKeys(config, config.version, channel.name);
-    if (rollbackKeys.length !== 1) {
+    const candidate = candidates[0];
+    if (!candidate) throw new Error(`Interrupted 2code ${target.key} candidate is missing.`);
+    if (candidates.some((channel) => channel.raw !== candidate.raw)) {
       throw new Error(
-        `Cannot resume ${config.version}: expected one ${channel.name} rollback manifest, found ${rollbackKeys.length}.`,
+        `Live 2code ${config.version} ${target.key} channels contain different candidate bytes.`,
       );
     }
+    for (const channel of channels) {
+      if (
+        channel.manifest.version !== config.version &&
+        compareStableVersions(channel.manifest.version, config.version) >= 0
+      ) {
+        throw new Error(
+          `Cannot resume ${config.version} over ${target.key} ${channel.name} ${channel.manifest.version}.`,
+        );
+      }
+      const segment = rollbackChannelSegment(target, channel.name);
+      const rollbackKeys = await listRollbackKeys(config, config.version, segment);
+      if (!expectedRollbackCounts(target).includes(rollbackKeys.length)) {
+        throw new Error(
+          `Cannot resume ${config.version}: expected one ${segment} rollback manifest, found ${rollbackKeys.length}.`,
+        );
+      }
+    }
+    await verifyContentAddressedManifest({
+      config,
+      target,
+      raw: candidate.raw,
+      sourcePath: candidate.path,
+      expectedVersion: config.version,
+      temporaryDirectory,
+    });
+    resumed.push({ target, candidate });
   }
-  await verifyContentAddressedManifest({
-    config,
-    raw: candidate.raw,
-    sourcePath: candidate.path,
-    expectedVersion: config.version,
-    temporaryDirectory,
-  });
-  await activateManifests({
-    config,
-    latestPath: candidate.path,
-    latestRaw: candidate.raw,
-    betaPath: candidate.path,
-    betaRaw: candidate.raw,
-    temporaryDirectory,
-  });
+  for (const { target, candidate } of resumed) {
+    await activateManifests({
+      config,
+      target,
+      latestPath: candidate.path,
+      latestRaw: candidate.raw,
+      betaPath: candidate.path,
+      betaRaw: candidate.raw,
+      temporaryDirectory,
+    });
+  }
   console.log(`Resumed interrupted 2code ${config.version} channel activation.`);
 }
 
@@ -720,86 +896,92 @@ async function promoteRelease(
   targetPercentage: number,
   temporaryDirectory: string,
 ): Promise<void> {
-  const liveLatest = await fetchChannelManifest(config, config.manifestName, temporaryDirectory);
-  const liveBeta = await fetchChannelManifest(config, config.betaManifestName, temporaryDirectory);
-  const liveChannels = [
-    { name: "latest", ...liveLatest, manifest: readManifest(liveLatest.raw, liveLatest.path) },
-    { name: "beta", ...liveBeta, manifest: readManifest(liveBeta.raw, liveBeta.path) },
-  ] as const;
-  const promoted: Array<{ name: string; path: string; raw: string; current: number }> = [];
-  for (const channel of liveChannels) {
-    if (channel.manifest.version !== config.version) {
-      throw new Error(
-        `Configured version ${config.version} is not live on ${channel.name} (${channel.manifest.version}).`,
+  const summaries: string[] = [];
+  for (const target of releaseTargets(config)) {
+    const liveChannels = await fetchLiveChannels({
+      config,
+      target,
+      temporaryDirectory,
+      allowMissing: false,
+    });
+    const promoted: Array<{ name: ReleaseChannel; path: string; raw: string; current: number }> =
+      [];
+    for (const channel of liveChannels) {
+      if (channel.manifest.version !== config.version) {
+        throw new Error(
+          `Configured version ${config.version} is not live on ${target.key} ${channel.name} (${channel.manifest.version}).`,
+        );
+      }
+      const current = manifestStagingPercentage(channel.manifest);
+      if (targetPercentage < current) {
+        throw new Error(
+          `Promotion target ${targetPercentage}% cannot be below live ${target.key} ${channel.name} rollout ${current}%.`,
+        );
+      }
+      if (targetPercentage === current) {
+        promoted.push({ name: channel.name, path: channel.path, raw: channel.raw, current });
+        continue;
+      }
+      const raw = serializeManifestWithRollout(
+        channel.raw,
+        channel.path,
+        targetPercentage,
+        target.platformLabel,
       );
-    }
-    const current = manifestStagingPercentage(channel.manifest);
-    if (targetPercentage < current) {
-      throw new Error(
-        `Promotion target ${targetPercentage}% cannot be below live ${channel.name} rollout ${current}%.`,
+      const path = await writeTemporaryManifest(
+        temporaryDirectory,
+        `promoted-${target.key}-${channel.name}.yml`,
+        raw,
       );
-    }
-    if (targetPercentage === current) {
-      promoted.push({
-        name: channel.name,
-        path: channel.path,
-        raw: channel.raw,
-        current,
+      await uploadImmutable({
+        config,
+        relativePath: `rollouts/${config.version}/${rollbackChannelSegment(target, channel.name)}/from-${current}-to-${targetPercentage}-${sha512Hex(channel.raw)}.yml`,
+        localPath: channel.path,
+        contentType: "application/yaml",
+        temporaryDirectory,
       });
-      continue;
+      const candidatePath = immutableManifestPath(config.version, raw);
+      await uploadImmutable({
+        config,
+        relativePath: candidatePath,
+        localPath: path,
+        contentType: "application/yaml",
+        temporaryDirectory,
+      });
+      await verifyPublicObject({
+        config,
+        relativePath: candidatePath,
+        expectedSha512: sha512Base64(raw),
+        expectedSize: Buffer.byteLength(raw),
+        temporaryDirectory,
+      });
+      promoted.push({ name: channel.name, path, raw, current });
     }
-    const raw = serializeManifestWithRollout(channel.raw, channel.path, targetPercentage);
-    const path = await writeTemporaryManifest(
-      temporaryDirectory,
-      `promoted-${channel.name}.yml`,
-      raw,
-    );
-    await uploadImmutable({
+    const latest = promoted.find((channel) => channel.name === "latest");
+    const beta = promoted.find((channel) => channel.name === "beta");
+    if (!latest || !beta) {
+      throw new Error(`Both ${target.key} latest and beta promotion manifests are required.`);
+    }
+    await activateManifests({
       config,
-      relativePath: `rollouts/${config.version}/${channel.name}/from-${current}-to-${targetPercentage}-${sha512Hex(channel.raw)}.yml`,
-      localPath: channel.path,
-      contentType: "application/yaml",
+      target,
+      latestPath: latest.path,
+      latestRaw: latest.raw,
+      betaPath: beta.path,
+      betaRaw: beta.raw,
       temporaryDirectory,
     });
-    const candidatePath = immutableManifestPath(config.version, raw);
-    await uploadImmutable({
-      config,
-      relativePath: candidatePath,
-      localPath: path,
-      contentType: "application/yaml",
-      temporaryDirectory,
-    });
-    await verifyPublicObject({
-      config,
-      relativePath: candidatePath,
-      expectedSha512: sha512Base64(raw),
-      expectedSize: Buffer.byteLength(raw),
-      temporaryDirectory,
-    });
-    promoted.push({ name: channel.name, path, raw, current });
+    summaries.push(`${target.key} latest ${latest.current}% and beta ${beta.current}%`);
   }
-  const latest = promoted.find((channel) => channel.name === "latest");
-  const beta = promoted.find((channel) => channel.name === "beta");
-  if (!latest || !beta) throw new Error("Both latest and beta promotion manifests are required.");
-  await activateManifests({
-    config,
-    latestPath: latest.path,
-    latestRaw: latest.raw,
-    betaPath: beta.path,
-    betaRaw: beta.raw,
-    temporaryDirectory,
-  });
-  console.log(
-    `Promoted 2code ${config.version} latest ${latest.current}% and beta ${beta.current}% to ${targetPercentage}%.`,
-  );
+  console.log(`Promoted 2code ${config.version} ${summaries.join(", ")} to ${targetPercentage}%.`);
 }
 
 async function listRollbackKeys(
   config: TwoCodeReleaseConfig,
   version: string,
-  channel: "latest" | "beta",
+  channelSegment: string,
 ): Promise<string[]> {
-  const prefix = releaseObjectKey(config, `rollbacks/${version}/${channel}/`);
+  const prefix = releaseObjectKey(config, `rollbacks/${version}/${channelSegment}/`);
   const result = runCommand(
     "aws",
     awsArgs(config, [
@@ -824,93 +1006,117 @@ async function recoverRelease(
   recoveryVersion: string,
   temporaryDirectory: string,
 ): Promise<void> {
-  const recovered: Array<{
-    channel: "latest" | "beta";
-    path: string;
-    raw: string;
-    version: string;
-  }> = [];
-  for (const channel of ["latest", "beta"] as const) {
-    const manifestName = channel === "latest" ? config.manifestName : config.betaManifestName;
-    const live = await fetchChannelManifest(config, manifestName, temporaryDirectory);
-    const liveManifest = readManifest(live.raw, live.path);
-    const keys = await listRollbackKeys(config, recoveryVersion, channel);
-    if (keys.length !== 1) {
-      throw new Error(
-        `Expected exactly one ${channel} rollback manifest for ${recoveryVersion}, found ${keys.length}.`,
+  const summaries: string[] = [];
+  for (const target of releaseTargets(config)) {
+    const recovered: Array<{
+      channel: ReleaseChannel;
+      path: string;
+      raw: string;
+      version: string;
+    }> = [];
+    let missingSnapshots = 0;
+    for (const channel of ["latest", "beta"] as const) {
+      const manifestName = channel === "latest" ? target.manifestName : target.betaManifestName;
+      const live = await fetchChannelManifest(config, manifestName, temporaryDirectory);
+      const liveManifest = readManifest(live.raw, live.path, target.platformLabel);
+      const segment = rollbackChannelSegment(target, channel);
+      const keys = await listRollbackKeys(config, recoveryVersion, segment);
+      if (!expectedRollbackCounts(target).includes(keys.length)) {
+        throw new Error(
+          `Expected exactly one ${segment} rollback manifest for ${recoveryVersion}, found ${keys.length}.`,
+        );
+      }
+      const rollbackKey = keys[0];
+      if (!rollbackKey) {
+        missingSnapshots += 1;
+        continue;
+      }
+      const prefix = `${config.r2Prefix}/`;
+      if (!rollbackKey.startsWith(prefix))
+        throw new Error("Rollback object is outside the release prefix.");
+      const relativeRollbackPath = rollbackKey.slice(prefix.length);
+      const rollbackPath = NodePath.join(temporaryDirectory, `rollback-${segment}.yml`);
+      runCommand(
+        "aws",
+        awsArgs(config, [
+          "s3",
+          "cp",
+          `s3://${config.r2Bucket}/${rollbackKey}`,
+          rollbackPath,
+          "--no-progress",
+        ]),
       );
-    }
-    const rollbackKey = keys[0];
-    if (!rollbackKey) throw new Error(`${channel} rollback manifest key is missing.`);
-    const prefix = `${config.r2Prefix}/`;
-    if (!rollbackKey.startsWith(prefix))
-      throw new Error("Rollback object is outside the release prefix.");
-    const relativeRollbackPath = rollbackKey.slice(prefix.length);
-    const rollbackPath = NodePath.join(temporaryDirectory, `rollback-${channel}.yml`);
-    runCommand(
-      "aws",
-      awsArgs(config, [
-        "s3",
-        "cp",
-        `s3://${config.r2Bucket}/${rollbackKey}`,
-        rollbackPath,
-        "--no-progress",
-      ]),
-    );
-    const rollbackRaw = await NodeFSP.readFile(rollbackPath, "utf8");
-    const rollbackManifest = readManifest(rollbackRaw, relativeRollbackPath);
-    if (compareStableVersions(rollbackManifest.version, recoveryVersion) >= 0) {
-      throw new Error(`${channel} rollback manifest must predate ${recoveryVersion}.`);
-    }
-    await verifyContentAddressedManifest({
-      config,
-      raw: rollbackRaw,
-      sourcePath: relativeRollbackPath,
-      expectedVersion: rollbackManifest.version,
-      temporaryDirectory,
-    });
-    if (live.raw === rollbackRaw) {
+      const rollbackRaw = await NodeFSP.readFile(rollbackPath, "utf8");
+      const rollbackManifest = readManifest(
+        rollbackRaw,
+        relativeRollbackPath,
+        target.platformLabel,
+      );
+      if (compareStableVersions(rollbackManifest.version, recoveryVersion) >= 0) {
+        throw new Error(`${segment} rollback manifest must predate ${recoveryVersion}.`);
+      }
+      await verifyContentAddressedManifest({
+        config,
+        target,
+        raw: rollbackRaw,
+        sourcePath: relativeRollbackPath,
+        expectedVersion: rollbackManifest.version,
+        temporaryDirectory,
+      });
+      if (live.raw === rollbackRaw) {
+        recovered.push({
+          channel,
+          path: rollbackPath,
+          raw: rollbackRaw,
+          version: rollbackManifest.version,
+        });
+        continue;
+      }
+      if (liveManifest.version !== recoveryVersion) {
+        throw new Error(
+          `Recovery ${recoveryVersion} found unexpected live ${segment} version ${liveManifest.version}.`,
+        );
+      }
+      const runId = process.env.GITHUB_RUN_ID ?? "unknown-run";
+      await uploadImmutable({
+        config,
+        relativePath: `recoveries/${recoveryVersion}/${segment}/${runId}-${sha512Hex(live.raw)}.yml`,
+        localPath: live.path,
+        contentType: "application/yaml",
+        temporaryDirectory,
+      });
       recovered.push({
         channel,
         path: rollbackPath,
         raw: rollbackRaw,
         version: rollbackManifest.version,
       });
+    }
+    if (missingSnapshots === 2) {
+      // The release that introduced the Linux channels has nothing older to restore.
+      console.log(
+        `No ${target.key} rollback manifests exist for ${recoveryVersion}; leaving its channels untouched.`,
+      );
       continue;
     }
-    if (liveManifest.version !== recoveryVersion) {
-      throw new Error(
-        `Recovery ${recoveryVersion} found unexpected live ${channel} version ${liveManifest.version}.`,
-      );
+    const latest = recovered.find((entry) => entry.channel === "latest");
+    const beta = recovered.find((entry) => entry.channel === "beta");
+    if (!latest || !beta) {
+      throw new Error(`Both ${target.key} latest and beta recovery manifests are required.`);
     }
-    const runId = process.env.GITHUB_RUN_ID ?? "unknown-run";
-    await uploadImmutable({
+    await activateManifests({
       config,
-      relativePath: `recoveries/${recoveryVersion}/${channel}/${runId}-${sha512Hex(live.raw)}.yml`,
-      localPath: live.path,
-      contentType: "application/yaml",
+      target,
+      latestPath: latest.path,
+      latestRaw: latest.raw,
+      betaPath: beta.path,
+      betaRaw: beta.raw,
       temporaryDirectory,
     });
-    recovered.push({
-      channel,
-      path: rollbackPath,
-      raw: rollbackRaw,
-      version: rollbackManifest.version,
-    });
+    summaries.push(`${target.key} latest ${latest.version} and beta ${beta.version}`);
   }
-  const latest = recovered.find((entry) => entry.channel === "latest");
-  const beta = recovered.find((entry) => entry.channel === "beta");
-  if (!latest || !beta) throw new Error("Both latest and beta recovery manifests are required.");
-  await activateManifests({
-    config,
-    latestPath: latest.path,
-    latestRaw: latest.raw,
-    betaPath: beta.path,
-    betaRaw: beta.raw,
-    temporaryDirectory,
-  });
   console.log(
-    `Restored latest ${latest.version} and beta ${beta.version}. Already-updated clients will not downgrade automatically.`,
+    `Restored ${summaries.join("; ")}. Already-updated clients will not downgrade automatically.`,
   );
 }
 

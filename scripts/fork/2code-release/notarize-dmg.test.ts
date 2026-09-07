@@ -20,6 +20,8 @@ const config = parseReleaseConfig({
   r2Prefix: "releases/desktop",
   manifestName: "latest-mac.yml",
   betaManifestName: "beta-mac.yml",
+  linuxManifestName: "latest-linux-arm64.yml",
+  linuxBetaManifestName: "beta-linux-arm64.yml",
   updaterCacheDirName: "2code-updater",
   protocolSchemes: ["twentyfirst-agents"],
   stagingPercentage: 100,

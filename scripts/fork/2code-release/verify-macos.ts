@@ -11,6 +11,7 @@ import * as NodeCrypto from "node:crypto";
 import { PNG } from "pngjs";
 
 import { TWO_CODE_PRODUCTION_PROFILE } from "../2code-desktop-distribution.ts";
+import { verifyAppUpdateConfiguration } from "./app-update-config.ts";
 import { verifyElectronBlockmap } from "./electron-blockmap.ts";
 import {
   expectedArtifactNames,
@@ -28,6 +29,8 @@ interface MacBundlePlist {
   readonly CFBundleShortVersionString?: unknown;
   readonly CFBundleURLTypes?: unknown;
 }
+
+export { verifyAppUpdateConfiguration };
 
 export const MAC_ICON_REPRESENTATIONS = [
   { name: "icon_16x16.png", size: 16, pixelExact: false },
@@ -53,36 +56,6 @@ function run(command: string, args: readonly string[]): { stdout: string; stderr
     );
   }
   return { stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
-}
-
-function readYamlScalar(raw: string, key: string): string | undefined {
-  const match = new RegExp(`^${key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}:\\s*(.+)$`, "m").exec(
-    raw,
-  );
-  if (!match?.[1]) return undefined;
-  const trimmed = match[1].trim();
-  if (
-    (trimmed.startsWith("'") && trimmed.endsWith("'")) ||
-    (trimmed.startsWith('"') && trimmed.endsWith('"'))
-  ) {
-    return trimmed.slice(1, -1);
-  }
-  return trimmed;
-}
-
-export function verifyAppUpdateConfiguration(
-  config: TwoCodeReleaseConfig,
-  appUpdateRaw: string,
-): void {
-  if (readYamlScalar(appUpdateRaw, "provider") !== "generic") {
-    throw new Error("Packaged app-update.yml must use the generic provider.");
-  }
-  if (readYamlScalar(appUpdateRaw, "url") !== config.feedUrl) {
-    throw new Error("Packaged app-update.yml does not point to the production 2code feed.");
-  }
-  if (readYamlScalar(appUpdateRaw, "updaterCacheDirName") !== config.updaterCacheDirName) {
-    throw new Error("Packaged app-update.yml does not retain the 2code updater cache name.");
-  }
 }
 
 export function verifyBundlePlist(config: TwoCodeReleaseConfig, plist: MacBundlePlist): void {

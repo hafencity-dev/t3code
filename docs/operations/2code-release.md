@@ -2,7 +2,8 @@
 
 The `2code Release` workflow publishes the legacy macOS Electron update channel from the
 `main-2code` branch without changing the upstream T3 Code release workflow. Existing 2code clients
-continue to poll the same Cloudflare R2 feed.
+continue to poll the same Cloudflare R2 feed. Every release also ships a Linux arm64 AppImage on
+the same feed, so both platforms always move together.
 
 The native Swift/Sparkle application is a separate product and is not part of this workflow.
 
@@ -15,15 +16,35 @@ Do not change these values without intentionally ending compatibility with insta
 - Apple team: `D78YC33UVC`
 - Architecture: `arm64`
 - Update feed: `https://pub-cb9e18e7e55d46cf9c297e4b612881f7.r2.dev/releases/desktop`
+- Updater manifests: `latest-mac.yml`/`beta-mac.yml` and `latest-linux-arm64.yml`/`beta-linux-arm64.yml`
 - Updater cache: `2code-updater`
 - Legacy URL scheme: `twentyfirst-agents`
 - GitHub tag namespace: `2code-v*`
 
-The release verifier checks the bundle identity, exact Developer ID authority for both app and DMG,
+The macOS verifier checks the bundle identity, exact Developer ID authority for both app and DMG,
 designated requirement, hardened-runtime entitlements, protocol schemes, embedded
 distribution/runtime metadata, updater configuration, architecture, both stapled notarization
 tickets, Gatekeeper assessment, final-artifact blockmaps, and all manifest hashes before
 publication.
+
+The Linux verifier extracts the AppImage and checks that the app, resource monitor, and
+browser-secret helper are aarch64 executables, that the desktop entry registers the legacy URL
+scheme for the released version, that the packaged updater configuration points at the production
+feed, and that `latest-linux-arm64.yml` hashes the final AppImage and advertises its embedded
+blockmap size (the updater needs it for differential downloads).
+
+## Linux arm64
+
+The Linux build runs on GitHub's hosted `ubuntu-24.04-arm` runner and needs no signing secrets.
+It must finish before the macOS build, which downloads the verified AppImage and prepares one
+release plan covering both platforms. A failed Linux build therefore blocks the release; the two
+platforms are never published separately.
+
+Automatic updates on Linux only work while the app runs as an AppImage. Install it to a
+user-writable location under a file name without a version number, for example
+`~/Applications/2code.AppImage`, so the updater can replace the file in place. Until the first
+Linux-enabled release has been published, an installed AppImage logs a `404` for
+`latest-linux-arm64.yml` on every update check; that is expected.
 
 ## GitHub setup
 
@@ -99,12 +120,18 @@ Publication is serialized and cannot be canceled by a newer run. It proceeds in 
 1. Verify the transferred candidate again.
 2. Create a draft `2code-v<version>` GitHub release and upload assets without overwriting different
    bytes.
-3. Upload content-addressed ZIP, DMG, and blockmap objects to R2.
+3. Upload content-addressed ZIP, DMG, blockmap, and AppImage objects to R2.
 4. Download every object through the public CDN and verify its size and SHA-512.
-5. Archive the previous latest and beta manifests independently.
-6. Upload and verify `beta-mac.yml`.
-7. Upload `latest-mac.yml` as the final updater mutation and verify it publicly.
-8. Publish the prepared GitHub draft.
+5. Archive the previous latest and beta manifests of both platforms independently. Linux rollbacks
+   live under `rollbacks/<version>/linux-<channel>/`; macOS keeps its original namespace.
+6. Upload and verify `beta-linux-arm64.yml`, then `latest-linux-arm64.yml`.
+7. Upload and verify `beta-mac.yml`.
+8. Upload `latest-mac.yml` as the final updater mutation and verify it publicly.
+9. Publish the prepared GitHub draft.
+
+The macOS channels remain the release state machine that preflight reads. Because the Linux
+pointers always move first, a Linux channel that already carries the configured version while
+macOS does not is the residue of an interrupted run and is replaced by the fresh candidate.
 
 Retries are safe. Existing immutable objects must contain identical bytes. If a beta-first pointer
 activation was interrupted, preflight resumes the exact already-live, content-addressed candidate
@@ -119,8 +146,8 @@ Run the workflow manually on `main-2code` with:
 - action: `promote`
 - staging percentage: an integer greater than the current percentage and no greater than `100`
 
-Both latest and beta channels must already contain the configured version. Their previous rollout
-manifests are archived independently before beta and then latest are advanced.
+All four channels must already contain the configured version. Their previous rollout manifests are
+archived independently before beta and then latest are advanced, Linux first and macOS last.
 
 ## Recovery
 
@@ -129,8 +156,10 @@ Run the workflow manually on `main-2code` with:
 - action: `recovery`
 - recovery version: the currently live version whose rollout should be stopped
 
-The job restores the independently archived latest and beta manifests, with latest again written
-last. It also archives the manifests that were live when recovery started.
+The job restores the independently archived latest and beta manifests of both platforms, with the
+macOS latest manifest again written last. It also archives the manifests that were live when
+recovery started. The release that first introduced the Linux channels has no earlier Linux
+manifest to restore; recovering it leaves the Linux pointers untouched and says so in the log.
 
 Recovery stops additional clients from receiving the bad version. It does **not** downgrade clients
 that already installed it because the legacy updater has downgrades disabled. Ship the actual fix as

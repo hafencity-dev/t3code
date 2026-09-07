@@ -89,6 +89,7 @@ export function githubReleaseAssetNames(plan: TwoCodeReleasePlan): readonly stri
   return [
     RELEASE_PLAN_NAME,
     plan.manifestName,
+    plan.linuxManifestName,
     ...plan.payloads.map((payload) => payload.localName),
   ].toSorted();
 }
@@ -306,7 +307,7 @@ async function prepareDraft(
       "--title",
       `2code v${plan.version}`,
       "--notes",
-      `2code desktop release built from ${plan.sourceCommit}. The legacy R2 feed remains the authoritative updater channel.`,
+      `2code desktop release built from ${plan.sourceCommit} for macOS arm64 and Linux arm64 (AppImage). The legacy R2 feed remains the authoritative updater channel.`,
       "--draft",
     ]);
     // fork: GitHub can briefly omit a newly created draft from both tag lookup and listings.

@@ -138,10 +138,75 @@ jobs:
             echo "- Decision: $RELEASE_DECISION"
           } >> "$GITHUB_STEP_SUMMARY"
 
-  build:
-    name: Build signed 2code macOS arm64
+  build_linux:
+    name: Build 2code Linux arm64
     needs: preflight
     if: needs.preflight.outputs.should_build == 'true'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      NODE_OPTIONS: --max-old-space-size=4096
+    steps:
+      - name: Checkout release commit
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ needs.preflight.outputs.ref }}
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@250f29ce396baf5e8f24498e17c0dfdebabc26eb # v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: |
+            args:
+              - --filter=@t3tools/desktop...
+              - --filter=t3...
+              - --filter=@t3tools/scripts...
+
+      - name: Install Linux desktop build libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsecret-1-dev pkg-config imagemagick libfuse2t64
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+
+      - name: Build AppImage
+        run: |
+          node scripts/build-desktop-artifact.ts \
+            --distribution 2code-production \
+            --platform linux \
+            --target AppImage \
+            --arch arm64 \
+            --build-version "${{ needs.preflight.outputs.desired_version }}" \
+            --output-dir release-2code \
+            --verbose
+
+      - name: Verify identity, updater contract, and architecture
+        run: node scripts/fork/2code-release/verify-linux.ts --artifact-dir release-2code
+
+      - name: Upload Linux release candidate
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: 2code-linux-${{ needs.preflight.outputs.desired_version }}-${{ needs.preflight.outputs.ref }}
+          path: |
+            release-2code/*.AppImage
+            release-2code/latest-linux-arm64.yml
+          if-no-files-found: error
+          retention-days: 30
+
+  build:
+    name: Build signed 2code macOS arm64
+    needs: [preflight, build_linux]
+    if: needs.preflight.outputs.should_build == 'true' && needs.build_linux.result == 'success'
     runs-on: macos-15
     timeout-minutes: 60
     environment:
@@ -217,6 +282,12 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: node scripts/fork/2code-release/notarize-dmg.ts --artifact-dir release-2code
 
+      - name: Download verified Linux release candidate
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: 2code-linux-${{ needs.preflight.outputs.desired_version }}-${{ needs.preflight.outputs.ref }}
+          path: release-2code
+
       - name: Prepare content-addressed updater payloads
         run: |
           node scripts/fork/2code-release/release-cli.ts prepare \
@@ -234,7 +305,9 @@ jobs:
             release-2code/*.dmg
             release-2code/*.zip
             release-2code/*.blockmap
+            release-2code/*.AppImage
             release-2code/latest-mac.yml
+            release-2code/latest-linux-arm64.yml
             release-2code/2code-release-plan.json
           if-no-files-found: error
           retention-days: 30

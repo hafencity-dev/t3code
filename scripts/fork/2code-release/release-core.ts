@@ -8,6 +8,7 @@ import {
   parseUpdateManifest,
   serializeUpdateManifest,
   type UpdateManifest,
+  type UpdateManifestFile,
 } from "../../lib/update-manifest.ts";
 
 export const RELEASE_CONFIG_PATH = "distributions/2code/release.json";
@@ -32,6 +33,9 @@ export interface TwoCodeReleaseConfig {
   readonly r2Prefix: string;
   readonly manifestName: "latest-mac.yml";
   readonly betaManifestName: "beta-mac.yml";
+  // Linux arm64 AppImage channels are published in lockstep with the macOS feed.
+  readonly linuxManifestName: "latest-linux-arm64.yml";
+  readonly linuxBetaManifestName: "beta-linux-arm64.yml";
   readonly updaterCacheDirName: "2code-updater";
   readonly protocolSchemes: readonly string[];
   readonly stagingPercentage: number;
@@ -54,6 +58,8 @@ export interface TwoCodeReleasePlan {
   readonly configSha256: string;
   readonly manifestName: "latest-mac.yml";
   readonly manifestSha512: string;
+  readonly linuxManifestName: "latest-linux-arm64.yml";
+  readonly linuxManifestSha512: string;
   readonly stagingPercentage: number;
   readonly payloads: readonly PreparedPayload[];
 }
@@ -218,6 +224,8 @@ export function parseReleaseConfig(value: unknown): TwoCodeReleaseConfig {
     r2Prefix,
     manifestName: requireLiteral(value, "manifestName", "latest-mac.yml"),
     betaManifestName: requireLiteral(value, "betaManifestName", "beta-mac.yml"),
+    linuxManifestName: requireLiteral(value, "linuxManifestName", "latest-linux-arm64.yml"),
+    linuxBetaManifestName: requireLiteral(value, "linuxBetaManifestName", "beta-linux-arm64.yml"),
     updaterCacheDirName: requireLiteral(value, "updaterCacheDirName", "2code-updater"),
     protocolSchemes,
     stagingPercentage,
@@ -433,8 +441,15 @@ export function decideReleaseAcrossChannels(input: {
   });
 }
 
-export function readManifest(raw: string, source: string): UpdateManifest {
-  return parseUpdateManifest(raw, source, "2code macOS");
+export const MAC_PLATFORM_LABEL = "2code macOS";
+export const LINUX_PLATFORM_LABEL = "2code Linux arm64";
+
+export function readManifest(
+  raw: string,
+  source: string,
+  platformLabel: string = MAC_PLATFORM_LABEL,
+): UpdateManifest {
+  return parseUpdateManifest(raw, source, platformLabel);
 }
 
 export function manifestStagingPercentage(manifest: UpdateManifest): number {
@@ -470,6 +485,10 @@ export function expectedArtifactNames(config: TwoCodeReleaseConfig): readonly [s
   ];
 }
 
+export function expectedLinuxArtifactNames(config: TwoCodeReleaseConfig): readonly [string] {
+  return [`2code-${config.version}-${config.architecture}.AppImage`];
+}
+
 function assertSafeManifestFilename(value: string): string {
   const basename = NodePath.basename(value);
   if (basename !== value || !/^[A-Za-z0-9._-]+$/.test(value)) {
@@ -489,34 +508,43 @@ export async function digestFile(
   };
 }
 
-function contentTypeFor(name: string): string {
+export function contentTypeFor(name: string): string {
   if (name.endsWith(".zip")) return "application/zip";
+  if (name.endsWith(".AppImage")) return "application/vnd.appimage";
   if (name.endsWith(".dmg")) return "application/x-apple-diskimage";
   if (name.endsWith(".blockmap")) return "application/octet-stream";
   if (name.endsWith(".yml")) return "application/yaml";
   return "application/octet-stream";
 }
 
-export async function prepareReleaseArtifacts(input: {
-  readonly config: TwoCodeReleaseConfig;
+async function prepareManifestPayloads(input: {
   readonly artifactDirectory: string;
-  readonly sourceCommit: string;
-}): Promise<TwoCodeReleasePlan> {
-  const manifestPath = NodePath.join(input.artifactDirectory, input.config.manifestName);
-  const generated = readManifest(await NodeFSP.readFile(manifestPath, "utf8"), manifestPath);
-  if (generated.version !== input.config.version) {
+  readonly manifestName: string;
+  readonly expectedNames: readonly string[];
+  readonly platformLabel: string;
+  readonly version: string;
+  readonly stagingPercentage: number;
+  /** Whether updater payloads ship a sidecar `.blockmap`; AppImages embed theirs. */
+  readonly blockmapSidecar: boolean;
+}): Promise<{ readonly payloads: readonly PreparedPayload[]; readonly manifestSha512: string }> {
+  const manifestPath = NodePath.join(input.artifactDirectory, input.manifestName);
+  const generated = readManifest(
+    await NodeFSP.readFile(manifestPath, "utf8"),
+    manifestPath,
+    input.platformLabel,
+  );
+  if (generated.version !== input.version) {
     throw new Error(
-      `Generated manifest version ${generated.version} does not match configured version ${input.config.version}.`,
+      `Generated ${input.manifestName} version ${generated.version} does not match configured version ${input.version}.`,
     );
   }
 
-  const expectedNames = expectedArtifactNames(input.config);
   const generatedNames = generated.files
     .map((file) => assertSafeManifestFilename(file.url))
     .toSorted();
-  if (JSON.stringify(generatedNames) !== JSON.stringify([...expectedNames].toSorted())) {
+  if (JSON.stringify(generatedNames) !== JSON.stringify([...input.expectedNames].toSorted())) {
     throw new Error(
-      `Generated manifest files ${generatedNames.join(", ")} do not match expected legacy files ${expectedNames.join(", ")}.`,
+      `Generated ${input.manifestName} files ${generatedNames.join(", ")} do not match expected legacy files ${input.expectedNames.join(", ")}.`,
     );
   }
 
@@ -528,7 +556,12 @@ export async function prepareReleaseArtifacts(input: {
     const digest = await digestFile(artifactPath);
     const objectDirectory = `objects/${digest.sha512Hex}`;
     const remotePath = `${objectDirectory}/${localName}`;
-    preparedFiles.push({ url: remotePath, sha512: digest.sha512, size: digest.size });
+    preparedFiles.push({
+      url: remotePath,
+      sha512: digest.sha512,
+      size: digest.size,
+      ...(file.blockMapSize === undefined ? {} : { blockMapSize: file.blockMapSize }),
+    });
     payloads.push({
       localName,
       remotePath,
@@ -537,6 +570,7 @@ export async function prepareReleaseArtifacts(input: {
       contentType: contentTypeFor(localName),
     });
 
+    if (!input.blockmapSidecar) continue;
     const blockmapName = `${localName}.blockmap`;
     const blockmapPath = NodePath.join(input.artifactDirectory, blockmapName);
     const blockmapDigest = await digestFile(blockmapPath);
@@ -551,21 +585,44 @@ export async function prepareReleaseArtifacts(input: {
 
   const preparedManifest = withStagingPercentage(
     { ...generated, files: preparedFiles },
-    input.config.stagingPercentage,
+    input.stagingPercentage,
   );
   const serializedManifest = serializeUpdateManifest(preparedManifest, {
-    platformLabel: "2code macOS",
+    platformLabel: input.platformLabel,
   });
   const temporaryManifestPath = `${manifestPath}.tmp`;
   await NodeFSP.writeFile(temporaryManifestPath, serializedManifest, "utf8");
   await NodeFSP.rename(temporaryManifestPath, manifestPath);
+  return { payloads, manifestSha512: sha512Base64(serializedManifest) };
+}
+
+export async function prepareReleaseArtifacts(input: {
+  readonly config: TwoCodeReleaseConfig;
+  readonly artifactDirectory: string;
+  readonly sourceCommit: string;
+}): Promise<TwoCodeReleasePlan> {
+  const mac = await prepareManifestPayloads({
+    artifactDirectory: input.artifactDirectory,
+    manifestName: input.config.manifestName,
+    expectedNames: expectedArtifactNames(input.config),
+    platformLabel: MAC_PLATFORM_LABEL,
+    version: input.config.version,
+    stagingPercentage: input.config.stagingPercentage,
+    blockmapSidecar: true,
+  });
+  const linux = await prepareManifestPayloads({
+    artifactDirectory: input.artifactDirectory,
+    manifestName: input.config.linuxManifestName,
+    expectedNames: expectedLinuxArtifactNames(input.config),
+    platformLabel: LINUX_PLATFORM_LABEL,
+    version: input.config.version,
+    stagingPercentage: input.config.stagingPercentage,
+    blockmapSidecar: false,
+  });
 
   const configSha256 = NodeCrypto.createHash("sha256")
     .update(JSON.stringify(input.config))
     .digest("hex");
-  const manifestSha512 = NodeCrypto.createHash("sha512")
-    .update(serializedManifest)
-    .digest("base64");
   const plan: TwoCodeReleasePlan = {
     schemaVersion: 1,
     version: input.config.version,
@@ -573,9 +630,11 @@ export async function prepareReleaseArtifacts(input: {
     sourceCommit: input.sourceCommit,
     configSha256,
     manifestName: input.config.manifestName,
-    manifestSha512,
+    manifestSha512: mac.manifestSha512,
+    linuxManifestName: input.config.linuxManifestName,
+    linuxManifestSha512: linux.manifestSha512,
     stagingPercentage: input.config.stagingPercentage,
-    payloads,
+    payloads: [...mac.payloads, ...linux.payloads],
   };
   await NodeFSP.writeFile(
     NodePath.join(input.artifactDirectory, RELEASE_PLAN_NAME),
@@ -595,6 +654,8 @@ export function parseReleasePlan(value: unknown): TwoCodeReleasePlan {
     typeof value.configSha256 !== "string" ||
     value.manifestName !== "latest-mac.yml" ||
     typeof value.manifestSha512 !== "string" ||
+    value.linuxManifestName !== "latest-linux-arm64.yml" ||
+    typeof value.linuxManifestSha512 !== "string" ||
     typeof value.stagingPercentage !== "number" ||
     !Array.isArray(value.payloads)
   ) {
@@ -644,25 +705,36 @@ export async function verifyPreparedArtifacts(input: {
     throw new Error("Release plan was built from a different 2code release config.");
   }
 
-  const manifestPath = NodePath.join(input.artifactDirectory, plan.manifestName);
-  const manifestRaw = await NodeFSP.readFile(manifestPath, "utf8");
-  const manifestDigest = NodeCrypto.createHash("sha512").update(manifestRaw).digest("base64");
-  if (manifestDigest !== plan.manifestSha512) {
-    throw new Error("Prepared manifest hash does not match release plan.");
-  }
-  const manifest = readManifest(manifestRaw, manifestPath);
-  if (
-    manifest.version !== plan.version ||
-    manifestStagingPercentage(manifest) !== plan.stagingPercentage
-  ) {
-    throw new Error("Prepared manifest metadata does not match release plan.");
+  const manifests = [
+    { name: plan.manifestName, sha512: plan.manifestSha512, platformLabel: MAC_PLATFORM_LABEL },
+    {
+      name: plan.linuxManifestName,
+      sha512: plan.linuxManifestSha512,
+      platformLabel: LINUX_PLATFORM_LABEL,
+    },
+  ] as const;
+  const manifestFiles: UpdateManifestFile[] = [];
+  for (const entry of manifests) {
+    const manifestPath = NodePath.join(input.artifactDirectory, entry.name);
+    const manifestRaw = await NodeFSP.readFile(manifestPath, "utf8");
+    if (sha512Base64(manifestRaw) !== entry.sha512) {
+      throw new Error(`Prepared ${entry.name} hash does not match release plan.`);
+    }
+    const manifest = readManifest(manifestRaw, manifestPath, entry.platformLabel);
+    if (
+      manifest.version !== plan.version ||
+      manifestStagingPercentage(manifest) !== plan.stagingPercentage
+    ) {
+      throw new Error(`Prepared ${entry.name} metadata does not match release plan.`);
+    }
+    manifestFiles.push(...manifest.files);
   }
 
   const manifestPayloads = plan.payloads.filter(
     (payload) => !payload.localName.endsWith(".blockmap"),
   );
   if (
-    JSON.stringify(manifest.files.map((file) => file.url).toSorted()) !==
+    JSON.stringify(manifestFiles.map((file) => file.url).toSorted()) !==
     JSON.stringify(manifestPayloads.map((payload) => payload.remotePath).toSorted())
   ) {
     throw new Error("Prepared manifest file URLs do not match release plan payloads.");
@@ -673,7 +745,7 @@ export async function verifyPreparedArtifacts(input: {
     if (digest.sha512 !== payload.sha512 || digest.size !== payload.size) {
       throw new Error(`Payload ${payload.localName} does not match its release plan hash/size.`);
     }
-    const manifestFile = manifest.files.find((file) => file.url === payload.remotePath);
+    const manifestFile = manifestFiles.find((file) => file.url === payload.remotePath);
     if (
       manifestFile &&
       (manifestFile.sha512 !== payload.sha512 || manifestFile.size !== payload.size)
@@ -688,10 +760,12 @@ export function serializeManifestWithRollout(
   raw: string,
   source: string,
   percentage: number,
+  platformLabel: string = MAC_PLATFORM_LABEL,
 ): string {
-  return serializeUpdateManifest(withStagingPercentage(readManifest(raw, source), percentage), {
-    platformLabel: "2code macOS",
-  });
+  return serializeUpdateManifest(
+    withStagingPercentage(readManifest(raw, source, platformLabel), percentage),
+    { platformLabel },
+  );
 }
 
 export function sha512Base64(value: string | Buffer): string {
