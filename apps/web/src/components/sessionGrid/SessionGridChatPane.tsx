@@ -29,6 +29,10 @@ import {
   sessionGridThreadNeedsAttention,
 } from "./sessionGrid.logic";
 
+// fork: personal session accents.
+import { SessionGridAccentPicker } from "./SessionGridAccentPicker";
+import { useSessionGridAccentStore } from "./sessionGridAccentStore";
+
 interface SessionGridChatPaneProps {
   readonly thread: EnvironmentThreadShell;
   readonly project: EnvironmentProject;
@@ -173,6 +177,7 @@ export const SessionGridChatPane = memo(function SessionGridChatPane(
     [thread.environmentId, thread.id],
   );
   const threadKey = scopedThreadKey(threadRef);
+  const accentColor = useSessionGridAccentStore((state) => state.colors[threadKey]);
   const lastVisitedAt = useUiStateStore((state) => state.threadLastVisitedAtById[threadKey]);
   const markThreadVisited = useUiStateStore((state) => state.markThreadVisited);
   const subtitle = displayThreadSubtitle(thread);
@@ -274,6 +279,7 @@ export const SessionGridChatPane = memo(function SessionGridChatPane(
         ref={setRunContextPortalTarget}
         className="flex min-w-0 w-fit max-w-[42%] shrink-0 items-center justify-end"
       />
+      <SessionGridAccentPicker threadKey={threadKey} title={thread.title} />
       {props.prStatus ? (
         <Button
           aria-label={props.prStatus.tooltip}
@@ -332,6 +338,7 @@ export const SessionGridChatPane = memo(function SessionGridChatPane(
         props.dragOver && "z-[2] ring-2 ring-ring/65",
         props.snoozed && "bg-muted/10",
       )}
+      style={accentColor ? { borderColor: accentColor } : undefined}
       data-session-grid-pane
       data-session-grid-activity={status.activity}
       onDragOver={(event) => {
@@ -347,6 +354,13 @@ export const SessionGridChatPane = memo(function SessionGridChatPane(
       onPointerDownCapture={focusPane}
       tabIndex={0}
     >
+      {accentColor ? (
+        <span
+          aria-hidden
+          className="pointer-events-none absolute inset-x-0 top-0 z-10 h-0.5"
+          style={{ backgroundColor: accentColor }}
+        />
+      ) : null}
       {props.focused ? (
         <span
           aria-hidden
