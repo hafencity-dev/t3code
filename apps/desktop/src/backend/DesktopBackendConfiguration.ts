@@ -488,7 +488,7 @@ const resolvePrimaryStartConfig = Effect.fn("desktop.backendConfiguration.resolv
       t3Home: environment.baseDir,
       host: backendExposure.bindHost,
       desktopBootstrapToken: input.bootstrapToken,
-      tailscaleServeEnabled: backendExposure.tailscaleServeEnabled,
+      tailscaleServeEnabled: false, // fork: desktop-owned Tailscale Serve
       tailscaleServePort: backendExposure.tailscaleServePort,
       desktopTelemetryFd: 4,
       desktopTelemetryControlFd: 5,

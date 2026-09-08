@@ -47,7 +47,7 @@ import * as DesktopLifecycle from "./app/DesktopLifecycle.ts";
 import * as DesktopLinuxUrlHandler from "./app/DesktopLinuxUrlHandler.ts";
 import * as DesktopShutdown from "./app/DesktopShutdown.ts";
 import * as DesktopObservability from "./app/DesktopObservability.ts";
-import * as DesktopServerExposure from "./backend/DesktopServerExposure.ts";
+import * as ForkServerExposure from "./backend/fork/DesktopServerExposureWithTailscale.ts"; // fork: desktop-owned Tailscale Serve
 import * as DesktopClientSettings from "./settings/DesktopClientSettings.ts";
 import * as DesktopSavedEnvironments from "./settings/DesktopSavedEnvironments.ts";
 import * as DesktopAppSettings from "./settings/DesktopAppSettings.ts";
@@ -155,7 +155,8 @@ const desktopSshLayer = desktopSshEnvironmentLayer.pipe(
   Layer.provideMerge(DesktopSshPasswordPrompts.layer()),
 );
 
-const desktopServerExposureLayer = DesktopServerExposure.layer.pipe(
+// fork: desktop-owned Tailscale Serve
+const desktopServerExposureLayer = ForkServerExposure.layer.pipe(
   Layer.provideMerge(DesktopNetworkInterfaces.layer),
   Layer.provideMerge(desktopFoundationLayer),
 );

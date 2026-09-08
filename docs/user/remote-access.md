@@ -83,6 +83,12 @@ Mobile keeps its manual environment selection.
 Join both devices to the same tailnet. In the desktop app, enable **Tailscale
 HTTPS** in **Settings → Connections**. Turn it off there to remove that route.
 
+Tailscale HTTPS requires **Network accessible** in the same settings section.
+Pair the mobile app through the **Tailscale IP** endpoint: it works at home and
+away without a reverse proxy in the path. Browsers and the hosted web app use the
+Tailscale HTTPS endpoint. A mobile session expires after 30 days, after which you
+pair the phone again.
+
 To start a command-line server with Tailscale HTTPS:
 
 ```bash
