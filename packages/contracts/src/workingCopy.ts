@@ -442,7 +442,7 @@ export type WorkingCopyTagCommitInput = typeof WorkingCopyTagCommitInput.Type;
  * runs arbitrary git in an arbitrary directory is a sandbox escape, and a
  * plausible empty value reads as "this repo has nothing".
  */
-export class WorkingCopyCwdDeniedError extends Schema.TaggedErrorClass<WorkingCopyCwdDeniedError>()(
+export class WorkingCopyCwdDeniedError extends Schema.TaggedError<WorkingCopyCwdDeniedError>()(
   "WorkingCopyCwdDeniedError",
   {
     operation: Schema.String,
@@ -458,7 +458,7 @@ export class WorkingCopyCwdDeniedError extends Schema.TaggedErrorClass<WorkingCo
  * A revision that does not look like an object name never reaches git as
  * positional argv. Raised by the argv builders, not by git.
  */
-export class WorkingCopyInvalidRevisionError extends Schema.TaggedErrorClass<WorkingCopyInvalidRevisionError>()(
+export class WorkingCopyInvalidRevisionError extends Schema.TaggedError<WorkingCopyInvalidRevisionError>()(
   "WorkingCopyInvalidRevisionError",
   {
     operation: Schema.String,
@@ -474,7 +474,7 @@ export class WorkingCopyInvalidRevisionError extends Schema.TaggedErrorClass<Wor
  * `index.lock` was still held after every retry. Distinct from a plain
  * non-zero exit so the client can say "another git process is running".
  */
-export class WorkingCopyIndexLockedError extends Schema.TaggedErrorClass<WorkingCopyIndexLockedError>()(
+export class WorkingCopyIndexLockedError extends Schema.TaggedError<WorkingCopyIndexLockedError>()(
   "WorkingCopyIndexLockedError",
   {
     operation: Schema.String,
@@ -491,7 +491,7 @@ export class WorkingCopyIndexLockedError extends Schema.TaggedErrorClass<Working
  * fork: f4 AI commit message — the no-changes answer. The tag is retained for
  * wire compatibility with clients that know the earlier empty-index behavior.
  */
-export class WorkingCopyNothingStagedError extends Schema.TaggedErrorClass<WorkingCopyNothingStagedError>()(
+export class WorkingCopyNothingStagedError extends Schema.TaggedError<WorkingCopyNothingStagedError>()(
   "WorkingCopyNothingStagedError",
   {
     operation: Schema.String,
@@ -511,7 +511,7 @@ export class WorkingCopyNothingStagedError extends Schema.TaggedErrorClass<Worki
  * Reuses the existing `VcsError` taxonomy — `VcsProcess` produces it for free —
  * and adds only the three failures the panel introduces.
  */
-export class WorkingCopyStashIdentityError extends Schema.TaggedErrorClass<WorkingCopyStashIdentityError>()(
+export class WorkingCopyStashIdentityError extends Schema.TaggedError<WorkingCopyStashIdentityError>()(
   "WorkingCopyStashIdentityError",
   { operation: Schema.String, detail: Schema.String, applied: Schema.Boolean },
 ) {

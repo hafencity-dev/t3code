@@ -212,13 +212,7 @@ export const SessionGridChatPane = memo(function SessionGridChatPane(
 
   const header = (
     <div className="flex min-w-0 items-center gap-1.5">
-      <ProjectFavicon
-        className="size-3.5 shrink-0"
-        cwd={props.project.workspaceRoot}
-        environmentId={thread.environmentId}
-        projectIcon={props.project.projectIcon}
-        projectName={props.project.title}
-      />
+      <ProjectFavicon className="size-3.5 shrink-0" project={props.project} />
       <Link
         className="min-w-0 flex-1 outline-none"
         params={routeParams}

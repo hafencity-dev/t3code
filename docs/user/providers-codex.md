@@ -74,6 +74,13 @@ client is connected to a remote environment. The shared **Usage** group starts e
 header to collapse it, and T3 Code remembers that choice locally across the normal and Session Grid
 sidebars.
 
+## Codex says I hit a usage limit
+
+When Codex stops on a usage limit, the thread names the window that ran out and
+when it resets, when Codex reports them. Send the message again after the reset. On a workspace plan the
+message also says whether your workspace owner needs to add credits or raise the
+spend limit to continue sooner.
+
 ## Send feedback to OpenAI
 
 In an existing Codex thread, send `/feedback` with an optional description, for

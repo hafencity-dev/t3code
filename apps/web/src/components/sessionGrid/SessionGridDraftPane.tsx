@@ -49,13 +49,7 @@ export const SessionGridDraftPane = memo(function SessionGridDraftPane(
       <span className="flex size-3.5 shrink-0 items-center justify-center rounded-full bg-ring/10 text-ring">
         <PlusIcon className="size-2.5" />
       </span>
-      <ProjectFavicon
-        className="size-3.5 shrink-0"
-        cwd={props.project.workspaceRoot}
-        environmentId={props.draft.environmentId}
-        projectIcon={props.project.projectIcon}
-        projectName={props.project.title}
-      />
+      <ProjectFavicon className="size-3.5 shrink-0" project={props.project} />
       <div className="min-w-0 flex-1">
         <div className="truncate text-xs font-semibold leading-4 text-foreground">New session</div>
         <div className="flex min-w-0 items-center gap-1.5 text-[10px] leading-3 text-muted-foreground/70">

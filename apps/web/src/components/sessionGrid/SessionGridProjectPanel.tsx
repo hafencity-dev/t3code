@@ -161,13 +161,7 @@ const SortableGridProject = memo(function SortableGridProject(props: SortableGri
           ref={setActivatorNodeRef}
           type="button"
         >
-          <ProjectFavicon
-            className="size-4"
-            cwd={project.workspaceRoot}
-            environmentId={project.environmentId}
-            projectIcon={project.projectIcon}
-            projectName={project.displayName}
-          />
+          <ProjectFavicon className="size-4" project={project} />
           <span className="min-w-0 flex-1">
             <span className="block truncate text-[13px] font-medium leading-4 text-sidebar-foreground">
               {project.displayName}

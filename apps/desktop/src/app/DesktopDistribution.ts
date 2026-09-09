@@ -6,7 +6,7 @@ import * as Schema from "effect/Schema";
 export const DesktopDistributionId = Schema.Literals(["default", "2code-production"]);
 export type DesktopDistributionId = typeof DesktopDistributionId.Type;
 
-const EmbeddedDesktopDistributionMetadata = Schema.Struct({
+export const EmbeddedDesktopDistributionMetadata = Schema.Struct({
   t3codeDistribution: Schema.optional(Schema.Literal("2code-production")),
   t3codeRuntimeVersion: Schema.optional(Schema.String),
 });
@@ -20,7 +20,7 @@ const decodeEmbeddedDesktopDistributionMetadata = Schema.decodeUnknownEffect(
   Schema.fromJsonString(EmbeddedDesktopDistributionMetadata),
 );
 
-export class DesktopDistributionMetadataError extends Schema.TaggedErrorClass<DesktopDistributionMetadataError>()(
+export class DesktopDistributionMetadataError extends Schema.TaggedError<DesktopDistributionMetadataError>()(
   "DesktopDistributionMetadataError",
   {
     operation: Schema.Literals(["read", "decode"]),

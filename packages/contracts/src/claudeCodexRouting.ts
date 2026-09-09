@@ -58,7 +58,7 @@ export const ClaudeCodexBridgeOperation = Schema.Literals([
 ]);
 export type ClaudeCodexBridgeOperation = typeof ClaudeCodexBridgeOperation.Type;
 
-export class ClaudeCodexBridgeError extends Schema.TaggedErrorClass<ClaudeCodexBridgeError>()(
+export class ClaudeCodexBridgeError extends Schema.TaggedError<ClaudeCodexBridgeError>()(
   "ClaudeCodexBridgeError",
   {
     operation: ClaudeCodexBridgeOperation,

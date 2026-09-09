@@ -3,6 +3,7 @@ import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import { ChildProcessSpawner } from "effect/unstable/process";
 
 import type { WorkingCopyStashEntry } from "@t3tools/contracts";
 import { LOG_FIELD_SEPARATOR, LOG_RECORD_SEPARATOR } from "./commands.ts";
@@ -18,6 +19,7 @@ import {
   stashPop,
   stashPush,
 } from "./WorkingCopyStash.ts";
+import type { WorkingCopyGit } from "./WorkingCopyGit.ts";
 import { StashPublish } from "./WorkingCopyStashIdentity.ts";
 import {
   git,
@@ -336,16 +338,28 @@ it.layer(WorkingCopyTestLayer)("stash operations", (it) => {
     Effect.gen(function* () {
       const repo = yield* seeded();
       yield* externalPush(repo, "reftable-hosted");
-      // Git 2.43 ignores unknown extensions on format version 0; the service
-      // must not, because it cannot lock what it cannot read.
-      yield* git(repo.cwd, ["config", "extensions.refStorage", "reftable"]);
+      // Report an unsupported backend without creating an invalid repository:
+      // newer Git rejects a refStorage extension on format version 0 outright.
+      const unsupportedGit: WorkingCopyGit = {
+        ...repo.git,
+        run: (input) =>
+          repo.git
+            .run(input)
+            .pipe(
+              Effect.map((output) =>
+                input.args.join(" ") === "config --get extensions.refStorage"
+                  ? { ...output, exitCode: ChildProcessSpawner.ExitCode(0), stdout: "reftable\n" }
+                  : output,
+              ),
+            ),
+      };
 
-      const entries = yield* readStashList(repo.git);
+      const entries = yield* readStashList(unsupportedGit);
       assert.deepStrictEqual(
         entries.map((entry) => [entry.label, entry.identity]),
         [["reftable-hosted", undefined]],
       );
-      const failure = yield* stashDrop(repo.git, {
+      const failure = yield* stashDrop(unsupportedGit, {
         ref: "stash@{0}",
         expectedCommit: entries[0]?.commit ?? "",
         expectedIdentity: "0".repeat(64),

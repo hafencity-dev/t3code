@@ -1,16 +1,34 @@
-// @effect-diagnostics nodeBuiltinImport:off - pre-ready Electron setup reads persisted settings synchronously before app services are available.
+// @effect-diagnostics nodeBuiltinImport:off - pre-ready Electron setup reads settings and prepares the Linux desktop entry synchronously before app services are available.
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Schema from "effect/Schema";
+import { EmbeddedDesktopDistributionMetadata } from "./DesktopDistribution.ts"; // fork: early 2code branding
 
 import * as Electron from "electron";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 
 import * as DesktopEarlyElectronStartup from "./DesktopEarlyElectronStartup.ts";
+import { resolveDesktopAppBranding } from "./DesktopEnvironment.ts";
+import { renderUrlHandlerDesktopEntry } from "./DesktopLinuxUrlHandler.ts";
 import * as ElectronProtocol from "../electron/ElectronProtocol.ts";
+
+const decodeDistributionMetadata = Schema.decodeUnknownSync(
+  Schema.fromJsonString(EmbeddedDesktopDistributionMetadata),
+);
+
+// Electron's portal identity must be established synchronously before app readiness.
+function readEarlyDesktopDistributionId() {
+  if (!Electron.app.isPackaged) return "default";
+  return (
+    decodeDistributionMetadata(
+      NodeFS.readFileSync(NodePath.join(Electron.app.getAppPath(), "package.json"), "utf8"),
+    ).t3codeDistribution ?? "default"
+  );
+}
 
 export interface DesktopPreReadyCommandLineReader {
   readonly hasSwitch: (switchName: string) => boolean;
@@ -46,6 +64,7 @@ export class DesktopPreReadyElectronOptions extends Context.Service<
   }
 >()("@t3tools/desktop/app/DesktopPreReadyPlatform/DesktopPreReadyElectronOptions") {}
 
+/** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.gen(function* () {
   const platform = yield* HostProcessPlatform;
   return yield* Effect.sync((): DesktopPreReadyElectronOptions["Service"] => {
@@ -56,6 +75,35 @@ export const make = Effect.gen(function* () {
     const linux = platform === "linux" ? resolveEarlyLinuxElectronOptionsFromProcess() : null;
 
     if (linux !== null) {
+      // The portal also requires a valid desktop entry. An AppImage update may
+      // have removed the executable referenced by the previous launch's entry.
+      try {
+        const distributionId = readEarlyDesktopDistributionId();
+        const applicationsDir = NodePath.posix.join(
+          process.env.XDG_DATA_HOME?.trim() ||
+            NodePath.posix.join(NodeOS.homedir(), ".local", "share"),
+          "applications",
+        );
+        NodeFS.mkdirSync(applicationsDir, { recursive: true });
+        NodeFS.writeFileSync(
+          NodePath.posix.join(applicationsDir, linux.linuxDesktopEntryName),
+          renderUrlHandlerDesktopEntry({
+            displayName: resolveDesktopAppBranding({
+              distributionId,
+              isDevelopment: linux.isDevelopment,
+              appVersion: Electron.app.getVersion(),
+            }).displayName,
+            execTarget: process.env.APPIMAGE?.trim() || process.execPath,
+            scheme: ElectronProtocol.getDesktopScheme(linux.isDevelopment),
+          }),
+          "utf8",
+        );
+      } catch {
+        // The URL handler retries with the full environment and logs failures.
+      }
+      // Chromium caches its portal registration during startup. Set the identity
+      // before any asynchronous work can initialize it with Electron's default.
+      Electron.app.setDesktopName(linux.linuxDesktopEntryName);
       Electron.app.commandLine.appendSwitch("class", linux.linuxWmClass);
       if (linux.passwordStore !== null && linuxPasswordStoreCommandLine === null) {
         Electron.app.commandLine.appendSwitch("password-store", linux.passwordStore);

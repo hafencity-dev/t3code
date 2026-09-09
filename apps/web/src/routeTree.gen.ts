@@ -17,6 +17,7 @@ import { Route as ConnectRouteImport } from './routes/connect'
 import { Route as ChatRouteImport } from './routes/_chat'
 import { Route as ChatIndexRouteImport } from './routes/_chat.index'
 import { Route as SettingsSourceControlRouteImport } from './routes/settings.source-control'
+import { Route as SettingsSnapShotRouteImport } from './routes/settings.snap-shot'
 import { Route as SettingsProvidersRouteImport } from './routes/settings.providers'
 import { Route as SettingsPromptRouteImport } from './routes/settings.prompt'
 import { Route as SettingsProjectsRouteImport } from './routes/settings.projects'
@@ -72,6 +73,11 @@ const ChatIndexRoute = ChatIndexRouteImport.update({
 const SettingsSourceControlRoute = SettingsSourceControlRouteImport.update({
   id: '/source-control',
   path: '/source-control',
+  getParentRoute: () => SettingsRoute,
+} as any)
+const SettingsSnapShotRoute = SettingsSnapShotRouteImport.update({
+  id: '/snap-shot',
+  path: '/snap-shot',
   getParentRoute: () => SettingsRoute,
 } as any)
 const SettingsProvidersRoute = SettingsProvidersRouteImport.update({
@@ -183,6 +189,7 @@ export interface FileRoutesByFullPath {
   '/settings/projects': typeof SettingsProjectsRoute
   '/settings/prompt': typeof SettingsPromptRoute
   '/settings/providers': typeof SettingsProvidersRoute
+  '/settings/snap-shot': typeof SettingsSnapShotRoute
   '/settings/source-control': typeof SettingsSourceControlRoute
   '/$environmentId/$threadId': typeof ChatEnvironmentIdThreadIdRoute
   '/draft/$draftId': typeof ChatDraftDraftIdRoute
@@ -208,6 +215,7 @@ export interface FileRoutesByTo {
   '/settings/projects': typeof SettingsProjectsRoute
   '/settings/prompt': typeof SettingsPromptRoute
   '/settings/providers': typeof SettingsProvidersRoute
+  '/settings/snap-shot': typeof SettingsSnapShotRoute
   '/settings/source-control': typeof SettingsSourceControlRoute
   '/': typeof ChatIndexRoute
   '/$environmentId/$threadId': typeof ChatEnvironmentIdThreadIdRoute
@@ -236,6 +244,7 @@ export interface FileRoutesById {
   '/settings/projects': typeof SettingsProjectsRoute
   '/settings/prompt': typeof SettingsPromptRoute
   '/settings/providers': typeof SettingsProvidersRoute
+  '/settings/snap-shot': typeof SettingsSnapShotRoute
   '/settings/source-control': typeof SettingsSourceControlRoute
   '/_chat/': typeof ChatIndexRoute
   '/_chat/$environmentId/$threadId': typeof ChatEnvironmentIdThreadIdRoute
@@ -265,6 +274,7 @@ export interface FileRouteTypes {
     | '/settings/projects'
     | '/settings/prompt'
     | '/settings/providers'
+    | '/settings/snap-shot'
     | '/settings/source-control'
     | '/$environmentId/$threadId'
     | '/draft/$draftId'
@@ -290,6 +300,7 @@ export interface FileRouteTypes {
     | '/settings/projects'
     | '/settings/prompt'
     | '/settings/providers'
+    | '/settings/snap-shot'
     | '/settings/source-control'
     | '/'
     | '/$environmentId/$threadId'
@@ -317,6 +328,7 @@ export interface FileRouteTypes {
     | '/settings/projects'
     | '/settings/prompt'
     | '/settings/providers'
+    | '/settings/snap-shot'
     | '/settings/source-control'
     | '/_chat/'
     | '/_chat/$environmentId/$threadId'
@@ -390,6 +402,13 @@ declare module '@tanstack/react-router' {
       path: '/source-control'
       fullPath: '/settings/source-control'
       preLoaderRoute: typeof SettingsSourceControlRouteImport
+      parentRoute: typeof SettingsRoute
+    }
+    '/settings/snap-shot': {
+      id: '/settings/snap-shot'
+      path: '/snap-shot'
+      fullPath: '/settings/snap-shot'
+      preLoaderRoute: typeof SettingsSnapShotRouteImport
       parentRoute: typeof SettingsRoute
     }
     '/settings/providers': {
@@ -544,6 +563,7 @@ interface SettingsRouteChildren {
   SettingsProjectsRoute: typeof SettingsProjectsRoute
   SettingsPromptRoute: typeof SettingsPromptRoute
   SettingsProvidersRoute: typeof SettingsProvidersRoute
+  SettingsSnapShotRoute: typeof SettingsSnapShotRoute
   SettingsSourceControlRoute: typeof SettingsSourceControlRoute
 }
 
@@ -559,6 +579,7 @@ const SettingsRouteChildren: SettingsRouteChildren = {
   SettingsProjectsRoute: SettingsProjectsRoute,
   SettingsPromptRoute: SettingsPromptRoute,
   SettingsProvidersRoute: SettingsProvidersRoute,
+  SettingsSnapShotRoute: SettingsSnapShotRoute,
   SettingsSourceControlRoute: SettingsSourceControlRoute,
 }
 

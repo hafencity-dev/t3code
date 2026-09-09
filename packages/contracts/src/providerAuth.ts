@@ -81,7 +81,7 @@ export type ProviderSignOutInput = typeof ProviderSignOutInput.Type;
  * the registry, or its driver does not implement account operations. `reason`
  * carries which.
  */
-export class ProviderAuthUnsupportedError extends Schema.TaggedErrorClass<ProviderAuthUnsupportedError>()(
+export class ProviderAuthUnsupportedError extends Schema.TaggedError<ProviderAuthUnsupportedError>()(
   "ProviderAuthUnsupportedError",
   {
     instanceId: ProviderInstanceId,
@@ -98,7 +98,7 @@ export class ProviderAuthUnsupportedError extends Schema.TaggedErrorClass<Provid
  * one `CODEX_HOME` would race on `auth.json`, so the second is refused rather
  * than queued.
  */
-export class ProviderAuthLoginInProgressError extends Schema.TaggedErrorClass<ProviderAuthLoginInProgressError>()(
+export class ProviderAuthLoginInProgressError extends Schema.TaggedError<ProviderAuthLoginInProgressError>()(
   "ProviderAuthLoginInProgressError",
   {
     instanceId: ProviderInstanceId,
@@ -113,7 +113,7 @@ export class ProviderAuthLoginInProgressError extends Schema.TaggedErrorClass<Pr
  * The provider process could not be started, or the account operation itself
  * failed. `detail` is safe to render — it never carries a credential.
  */
-export class ProviderAuthFailedError extends Schema.TaggedErrorClass<ProviderAuthFailedError>()(
+export class ProviderAuthFailedError extends Schema.TaggedError<ProviderAuthFailedError>()(
   "ProviderAuthFailedError",
   {
     instanceId: ProviderInstanceId,

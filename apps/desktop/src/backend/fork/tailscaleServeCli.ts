@@ -90,7 +90,7 @@ export const classifyTailscaleStderr = (
 
 const TailscaleSubcommand = Schema.Literals(["status", "serve"]);
 
-export class TailscaleServeCliError extends Schema.TaggedErrorClass<TailscaleServeCliError>()(
+export class TailscaleServeCliError extends Schema.TaggedError<TailscaleServeCliError>()(
   "TailscaleServeCliError",
   {
     subcommand: TailscaleSubcommand,

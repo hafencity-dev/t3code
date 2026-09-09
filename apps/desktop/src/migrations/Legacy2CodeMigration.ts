@@ -42,7 +42,7 @@ const LegacyMigrationOperation = Schema.Literals([
 ]);
 const decodeUnknownJson = Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Unknown));
 
-export class Legacy2CodeMigrationError extends Schema.TaggedErrorClass<Legacy2CodeMigrationError>()(
+export class Legacy2CodeMigrationError extends Schema.TaggedError<Legacy2CodeMigrationError>()(
   "Legacy2CodeMigrationError",
   {
     operation: LegacyMigrationOperation,

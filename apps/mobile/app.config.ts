@@ -32,6 +32,8 @@ const DEVELOPMENT_ASSETS = {
   splashIcon: "./assets/2code-app-icon.png",
   androidAdaptiveForeground: "./assets/2code-adaptive-icon.png",
   androidAdaptiveBackgroundColor: "#070707",
+  androidAdaptiveBackgroundImage: undefined,
+  androidSplashIcon: "./assets/2code-app-icon.png",
   androidMonochromeIcon: "./assets/2code-adaptive-icon.png",
   androidNotificationIcon: "./assets/2code-adaptive-icon.png",
   androidNotificationColor: "#B0FE93",
@@ -43,6 +45,8 @@ const PREVIEW_ASSETS = {
   splashIcon: "./assets/2code-app-icon.png",
   androidAdaptiveForeground: "./assets/2code-adaptive-icon.png",
   androidAdaptiveBackgroundColor: "#070707",
+  androidAdaptiveBackgroundImage: undefined,
+  androidSplashIcon: "./assets/2code-app-icon.png",
   androidMonochromeIcon: "./assets/2code-adaptive-icon.png",
   androidNotificationIcon: "./assets/2code-adaptive-icon.png",
   androidNotificationColor: "#B0FE93",
@@ -54,6 +58,8 @@ const RELEASE_ASSETS = {
   splashIcon: "./assets/2code-app-icon.png",
   androidAdaptiveForeground: "./assets/2code-adaptive-icon.png",
   androidAdaptiveBackgroundColor: "#070707",
+  androidAdaptiveBackgroundImage: undefined,
+  androidSplashIcon: "./assets/2code-app-icon.png",
   androidMonochromeIcon: "./assets/2code-adaptive-icon.png",
   androidNotificationIcon: "./assets/2code-adaptive-icon.png",
   androidNotificationColor: "#B0FE93",
@@ -163,7 +169,7 @@ const config: ExpoConfig = {
   slug: "t3-code",
   platforms: ["ios", "android"],
   scheme: variant.scheme,
-  version: "1.1.0",
+  version: "1.1.1",
   runtimeVersion: {
     // Development manifests resolve on every launch, so avoid fingerprint's
     // expensive native-project calculation there. Preview and production stay
@@ -174,7 +180,7 @@ const config: ExpoConfig = {
   icon: variant.assets.appIcon,
   userInterfaceStyle: "automatic",
   updates: {
-    enabled: true,
+    enabled: repoEnv.T3CODE_MOBILE_UPDATES_ENABLED !== "0",
     url: "https://u.expo.dev/d763fcb8-d37c-41ea-a773-b54a0ab4a454",
     checkAutomatically: "ON_LOAD",
     fallbackToCacheTimeout: 0,
@@ -194,6 +200,9 @@ const config: ExpoConfig = {
       `applinks:${variant.relyingParty}`,
       `webcredentials:${variant.relyingParty}`,
     ],
+    entitlements: {
+      "keychain-access-groups": [`$(AppIdentifierPrefix)${variant.iosBundleIdentifier}`],
+    },
     infoPlist: {
       NSAppTransportSecurity: {
         NSAllowsArbitraryLoads: true,
@@ -222,8 +231,14 @@ const config: ExpoConfig = {
   android: {
     icon: variant.assets.appIcon,
     package: variant.androidPackage,
+    ...(repoEnv.T3CODE_ANDROID_GOOGLE_SERVICES_FILE
+      ? { googleServicesFile: repoEnv.T3CODE_ANDROID_GOOGLE_SERVICES_FILE }
+      : {}),
     adaptiveIcon: {
       backgroundColor: variant.assets.androidAdaptiveBackgroundColor,
+      ...(variant.assets.androidAdaptiveBackgroundImage
+        ? { backgroundImage: variant.assets.androidAdaptiveBackgroundImage }
+        : {}),
       foregroundImage: variant.assets.androidAdaptiveForeground,
       monochromeImage: variant.assets.androidMonochromeIcon,
     },
@@ -287,6 +302,9 @@ const config: ExpoConfig = {
           shortcut_icon: {
             foregroundImage: variant.assets.androidAdaptiveForeground,
             backgroundColor: variant.assets.androidAdaptiveBackgroundColor,
+            ...(variant.assets.androidAdaptiveBackgroundImage
+              ? { backgroundImage: variant.assets.androidAdaptiveBackgroundImage }
+              : {}),
           },
         },
       },
@@ -321,11 +339,24 @@ const config: ExpoConfig = {
           image: variant.assets.splashIcon,
           backgroundColor: "#0a0a0a",
         },
+        android: {
+          // Android 12+ masks the splash icon to a circle over the central two thirds of
+          // its 288dp canvas, so the iOS export's corners get cut. A full-canvas image of
+          // the composed adaptive layers puts the wordmark in the same frame the launcher
+          // icon uses.
+          image: variant.assets.androidSplashIcon,
+          imageWidth: 288,
+          dark: { image: variant.assets.androidSplashIcon },
+        },
       },
     ],
     [
       "expo-build-properties",
       {
+        android: {
+          // Keep the supported floor explicit and covered by native notification tests.
+          minSdkVersion: 24,
+        },
         ios: {
           deploymentTarget: "18.0",
           // AppCheckCore 11.3+ includes Swift and needs module maps for these Objective-C dependencies.
