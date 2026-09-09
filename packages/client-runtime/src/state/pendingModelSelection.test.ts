@@ -7,7 +7,8 @@ import {
   type OrchestrationThread,
   type ScopedThreadRef,
 } from "@t3tools/contracts";
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
+import * as Cause from "effect/Cause";
 import * as Option from "effect/Option";
 import { AsyncResult, Atom, AtomRegistry } from "effect/unstable/reactivity";
 
@@ -231,6 +232,85 @@ describe("saveThreadModelSelection", () => {
     expect(client.pending()).toBeNull();
     expect(isModelSelectionSaving(client.registry, ref)).toBe(false);
     expect(client.picker()).toEqual(MODEL_A);
+  });
+
+  it.each(["stream failure", "stream error", "deleted"] as const)(
+    "releases Send when model confirmation encounters a %s",
+    async (failure) => {
+      const client = makeClient(ref, THREAD, 7);
+      let rejected: unknown;
+      const save = saveThreadModelSelection({
+        registry: client.registry,
+        threadRef: ref,
+        selection: MODEL_B,
+        stateAtom: client.stateAtom,
+        dispatch: async () => ({ sequence: 8 }),
+      }).catch((error: unknown) => {
+        rejected = error;
+      });
+      await settle();
+      if (failure === "stream failure") {
+        client.registry.set(client.stateAtom, AsyncResult.failure(Cause.die("Stream closed")));
+      } else {
+        client.registry.set(
+          client.stateAtom,
+          AsyncResult.success({
+            ...EMPTY_ENVIRONMENT_THREAD_STATE,
+            data: failure === "deleted" ? Option.none() : Option.some(THREAD),
+            status: failure === "deleted" ? "deleted" : "cached",
+            error: failure === "deleted" ? Option.none() : Option.some("Stream closed"),
+            appliedSequence: 7,
+          }),
+        );
+      }
+      await settle();
+      try {
+        expect(isModelSelectionSaving(client.registry, ref)).toBe(false);
+        expect(rejected).toBeInstanceOf(Error);
+      } finally {
+        client.apply({ ...THREAD, modelSelection: MODEL_B }, 8);
+        await save;
+        client.registry.dispose();
+      }
+    },
+  );
+
+  it("bounds a missing stream confirmation and allows a later model save", async () => {
+    vi.useFakeTimers();
+    const client = makeClient(ref, THREAD, 7);
+    let rejected: unknown;
+    const save = saveThreadModelSelection({
+      registry: client.registry,
+      threadRef: ref,
+      selection: MODEL_B,
+      stateAtom: client.stateAtom,
+      dispatch: async () => ({ sequence: 8 }),
+    }).catch((error: unknown) => {
+      rejected = error;
+    });
+    try {
+      await settle();
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(isModelSelectionSaving(client.registry, ref)).toBe(false);
+      expect(String(rejected)).toContain("confirmation");
+      client.apply({ ...THREAD, modelSelection: MODEL_B }, 8);
+      const retry = saveThreadModelSelection({
+        registry: client.registry,
+        threadRef: ref,
+        selection: MODEL_C,
+        stateAtom: client.stateAtom,
+        dispatch: async () => ({ sequence: 9 }),
+      });
+      client.apply({ ...THREAD, modelSelection: MODEL_C }, 9);
+      await retry;
+      expect(client.pending()).toBeNull();
+      expect(client.picker()).toEqual(MODEL_C);
+    } finally {
+      client.apply({ ...THREAD, modelSelection: MODEL_B }, 8);
+      await save;
+      client.registry.dispose();
+      vi.useRealTimers();
+    }
   });
 
   it("ignores a second pick while one is saving", async () => {

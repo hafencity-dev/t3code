@@ -1779,6 +1779,16 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const sendDisabledReason =
     (isModelSaving ? "Saving model selection…" : null) ??
     externalSendDisabledReason ??
+    // fork: surface the specific blocker instead of labeling every missing provider as offline.
+    (environmentUnavailable !== null
+      ? "Environment disconnected"
+      : providerCatalogPending
+        ? "Loading providers…"
+        : noProviderAvailable
+          ? "Choose an available provider in Settings"
+          : projectSelectionRequired
+            ? "Choose a project before sending"
+            : null) ??
     (activePendingProgress
       ? attachmentBlockReason
       : (attachmentBlockReason ?? providerSendBlockReason));

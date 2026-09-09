@@ -6,6 +6,7 @@ import { StageBackdropButtonArt, useSidebarStageBackdropVariant } from "../Sideb
 import { Button } from "../ui/button";
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../ui/menu";
 import { Spinner } from "../ui/spinner";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip"; // fork: explain blocked sends
 import { composerFloatingLayerProps } from "./composerEventScope";
 
 interface PendingActionState {
@@ -219,6 +220,19 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
     );
   }
 
+  const sendButtonLabel =
+    sendDisabledReason ??
+    (isEnvironmentUnavailable
+      ? "Environment disconnected"
+      : isConnecting
+        ? "Connecting"
+        : isPreparingWorktree
+          ? "Preparing worktree"
+          : isSendBusy
+            ? "Sending"
+            : !hasSendableContent
+              ? "Write a message or attach a file"
+              : "Send message");
   const sendButton = (
     <button
       type="submit"
@@ -236,19 +250,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
         isEnvironmentUnavailable ||
         !hasSendableContent
       }
-      aria-label={
-        isEnvironmentUnavailable
-          ? "Environment disconnected"
-          : sendDisabledReason
-            ? sendDisabledReason
-            : isConnecting
-              ? "Connecting"
-              : isPreparingWorktree
-                ? "Preparing worktree"
-                : isSendBusy
-                  ? "Sending"
-                  : "Send message"
-      }
+      aria-label={sendButtonLabel}
     >
       {stageBackdropVariant ? (
         <span className="absolute inset-0 -z-10" aria-hidden="true">
@@ -271,14 +273,22 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
     </button>
   );
 
+  // Disabled buttons do not receive pointer events; the wrapper keeps the reason readable.
+  const sendButtonWithReason = (
+    <Tooltip>
+      <TooltipTrigger render={<span className="inline-flex" />}>{sendButton}</TooltipTrigger>
+      <TooltipPopup>{sendButtonLabel}</TooltipPopup>
+    </Tooltip>
+  );
+
   if (!isRunning) {
-    return sendButton;
+    return sendButtonWithReason;
   }
 
   return (
     <>
       {renderStopGenerationButton(false)}
-      {showSendWhileRunning && hasSendableContent ? sendButton : null}
+      {showSendWhileRunning && hasSendableContent ? sendButtonWithReason : null}
     </>
   );
 });
