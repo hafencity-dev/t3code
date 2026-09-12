@@ -35,6 +35,7 @@ function makeThread(overrides: Partial<EnvironmentThreadShell> = {}): Environmen
     id,
     projectId: PROJECT_A,
     title: "Thread",
+    pullRequests: [],
     modelSelection: {
       instanceId: ProviderInstanceId.make("codex"),
       model: "gpt-5.4",

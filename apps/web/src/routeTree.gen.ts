@@ -21,6 +21,7 @@ import { Route as SettingsSnapShotRouteImport } from './routes/settings.snap-sho
 import { Route as SettingsProvidersRouteImport } from './routes/settings.providers'
 import { Route as SettingsPromptRouteImport } from './routes/settings.prompt'
 import { Route as SettingsProjectsRouteImport } from './routes/settings.projects'
+import { Route as SettingsOpenSourceLicensesRouteImport } from './routes/settings.open-source-licenses'
 import { Route as SettingsModelRoutingRouteImport } from './routes/settings.model-routing'
 import { Route as SettingsKeybindingsRouteImport } from './routes/settings.keybindings'
 import { Route as SettingsIntegrationsRouteImport } from './routes/settings.integrations'
@@ -95,6 +96,12 @@ const SettingsProjectsRoute = SettingsProjectsRouteImport.update({
   path: '/projects',
   getParentRoute: () => SettingsRoute,
 } as any)
+const SettingsOpenSourceLicensesRoute =
+  SettingsOpenSourceLicensesRouteImport.update({
+    id: '/open-source-licenses',
+    path: '/open-source-licenses',
+    getParentRoute: () => SettingsRoute,
+  } as any)
 const SettingsModelRoutingRoute = SettingsModelRoutingRouteImport.update({
   id: '/model-routing',
   path: '/model-routing',
@@ -186,6 +193,7 @@ export interface FileRoutesByFullPath {
   '/settings/integrations': typeof SettingsIntegrationsRoute
   '/settings/keybindings': typeof SettingsKeybindingsRoute
   '/settings/model-routing': typeof SettingsModelRoutingRoute
+  '/settings/open-source-licenses': typeof SettingsOpenSourceLicensesRoute
   '/settings/projects': typeof SettingsProjectsRoute
   '/settings/prompt': typeof SettingsPromptRoute
   '/settings/providers': typeof SettingsProvidersRoute
@@ -212,6 +220,7 @@ export interface FileRoutesByTo {
   '/settings/integrations': typeof SettingsIntegrationsRoute
   '/settings/keybindings': typeof SettingsKeybindingsRoute
   '/settings/model-routing': typeof SettingsModelRoutingRoute
+  '/settings/open-source-licenses': typeof SettingsOpenSourceLicensesRoute
   '/settings/projects': typeof SettingsProjectsRoute
   '/settings/prompt': typeof SettingsPromptRoute
   '/settings/providers': typeof SettingsProvidersRoute
@@ -241,6 +250,7 @@ export interface FileRoutesById {
   '/settings/integrations': typeof SettingsIntegrationsRoute
   '/settings/keybindings': typeof SettingsKeybindingsRoute
   '/settings/model-routing': typeof SettingsModelRoutingRoute
+  '/settings/open-source-licenses': typeof SettingsOpenSourceLicensesRoute
   '/settings/projects': typeof SettingsProjectsRoute
   '/settings/prompt': typeof SettingsPromptRoute
   '/settings/providers': typeof SettingsProvidersRoute
@@ -271,6 +281,7 @@ export interface FileRouteTypes {
     | '/settings/integrations'
     | '/settings/keybindings'
     | '/settings/model-routing'
+    | '/settings/open-source-licenses'
     | '/settings/projects'
     | '/settings/prompt'
     | '/settings/providers'
@@ -297,6 +308,7 @@ export interface FileRouteTypes {
     | '/settings/integrations'
     | '/settings/keybindings'
     | '/settings/model-routing'
+    | '/settings/open-source-licenses'
     | '/settings/projects'
     | '/settings/prompt'
     | '/settings/providers'
@@ -325,6 +337,7 @@ export interface FileRouteTypes {
     | '/settings/integrations'
     | '/settings/keybindings'
     | '/settings/model-routing'
+    | '/settings/open-source-licenses'
     | '/settings/projects'
     | '/settings/prompt'
     | '/settings/providers'
@@ -430,6 +443,13 @@ declare module '@tanstack/react-router' {
       path: '/projects'
       fullPath: '/settings/projects'
       preLoaderRoute: typeof SettingsProjectsRouteImport
+      parentRoute: typeof SettingsRoute
+    }
+    '/settings/open-source-licenses': {
+      id: '/settings/open-source-licenses'
+      path: '/open-source-licenses'
+      fullPath: '/settings/open-source-licenses'
+      preLoaderRoute: typeof SettingsOpenSourceLicensesRouteImport
       parentRoute: typeof SettingsRoute
     }
     '/settings/model-routing': {
@@ -560,6 +580,7 @@ interface SettingsRouteChildren {
   SettingsIntegrationsRoute: typeof SettingsIntegrationsRoute
   SettingsKeybindingsRoute: typeof SettingsKeybindingsRoute
   SettingsModelRoutingRoute: typeof SettingsModelRoutingRoute
+  SettingsOpenSourceLicensesRoute: typeof SettingsOpenSourceLicensesRoute
   SettingsProjectsRoute: typeof SettingsProjectsRoute
   SettingsPromptRoute: typeof SettingsPromptRoute
   SettingsProvidersRoute: typeof SettingsProvidersRoute
@@ -576,6 +597,7 @@ const SettingsRouteChildren: SettingsRouteChildren = {
   SettingsIntegrationsRoute: SettingsIntegrationsRoute,
   SettingsKeybindingsRoute: SettingsKeybindingsRoute,
   SettingsModelRoutingRoute: SettingsModelRoutingRoute,
+  SettingsOpenSourceLicensesRoute: SettingsOpenSourceLicensesRoute,
   SettingsProjectsRoute: SettingsProjectsRoute,
   SettingsPromptRoute: SettingsPromptRoute,
   SettingsProvidersRoute: SettingsProvidersRoute,

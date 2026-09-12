@@ -67,12 +67,12 @@ it.effect("builds a legacy-compatible 2code updater configuration", () =>
       sign: true,
       title: "2code 1.0.108 Installer",
       background: "dmg/dmg-background-latest.png",
-      window: { width: 540, height: 412 },
+      window: { width: 640, height: 432 },
       contents: [
-        { x: 130, y: 220, type: "file" },
-        { x: 410, y: 220, type: "link", path: "/Applications" },
+        { x: 166, y: 214, type: "file" },
+        { x: 474, y: 214, type: "link", path: "/Applications" },
       ],
-      iconSize: 80,
+      iconSize: 120,
       iconTextSize: 12,
     });
     assert.deepStrictEqual(mac.protocols, [

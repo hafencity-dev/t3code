@@ -219,9 +219,11 @@ export const make = Effect.gen(function* () {
       questionAttachments: true,
       fileAttachments: { maxUploadBytes: PROVIDER_SEND_TURN_MAX_FILE_BYTES },
       pullRequests: true,
+      inlineMessageContext: true,
       threadSettlement: true,
       threadAutoSettlement: true,
       threadRestartContinuation: true,
+      projectSettingsOverrides: true,
       threadSnooze: true,
       environmentThemes: true,
       usageLimitSources: true,
@@ -235,6 +237,8 @@ export const make = Effect.gen(function* () {
       claudeCodexFastMode: true, // fork: f5
       workingCopyRevision: true, // fork: remote Git
       workingCopyStashIdentity: true, // fork: remote Git
+      threadPullRequests: true,
+      pullRequestStackActions: true,
       threadPullRequestLinking: true,
       environmentIcon: true,
       ...(serverSelfUpdate === null ? {} : { serverSelfUpdate }),
