@@ -134,6 +134,7 @@ import { OrchestrationEventStoreLive } from "./persistence/Layers/OrchestrationE
 import { OrchestrationEventStore } from "./persistence/Services/OrchestrationEventStore.ts";
 import { PersistenceSqlError } from "./persistence/Errors.ts";
 import * as ProviderRegistry from "./provider/Services/ProviderRegistry.ts";
+import { WorkingCopyService } from "./vcs/workingCopy/WorkingCopyService.ts"; // fork: f4 source-control panel
 import * as ProviderService from "./provider/Services/ProviderService.ts";
 import { ProviderAuthService } from "./provider/Services/ProviderAuthService.ts";
 import { ProviderInstanceRegistry } from "./provider/Services/ProviderInstanceRegistry.ts";
@@ -787,6 +788,15 @@ const buildAppUnderTest = (options?: {
       ),
       Layer.provide(
         Layer.mergeAll(
+          // fork: f4 — the source-control panel rides this `Layer.provide`
+          // rather than adding a pipe step: `Layer.pipe` maxes out at 20
+          // arguments. Every method is stubbed out; the served-routes tests
+          // never call them.
+          Layer.mock(WorkingCopyService)({}),
+          Layer.mock(ProviderService.ProviderService)({
+            uploadFeedback: () => Effect.die("Provider feedback is not stubbed in this test"),
+            ...options?.layers?.providerService,
+          }),
           Layer.mock(ProviderRegistry.ProviderRegistry)({
             getProviders: Effect.succeed([]),
             refresh: () => Effect.succeed([]),

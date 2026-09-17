@@ -17,6 +17,29 @@ Install [GitHub CLI](https://cli.github.com/) 2.81.0 or newer, then sign in:
 gh auth login
 ```
 
+### Work with Local Changes
+
+- Open the Source Control panel from the branch icon in the workspace title bar or with
+  `Cmd/Ctrl + Shift + G`. The panel stays open when you switch threads and follows the active
+  project.
+- Write a commit message at the top of the panel, then stage individual files or whole change
+  groups. Changed files use a collapsible folder tree by default. When nothing is staged, the
+  message generator describes all active changes, and the primary commit action stages and commits
+  them together. If anything is already staged, generation and commit continue to use only that
+  staged selection.
+- Use the graph button in the repository toolbar to switch between working-copy changes and commit
+  history. Search, refresh, sync, stash, undo, and discard actions live in the same toolbar.
+- Source Control can remain open beside the standard right panel, including while viewing a file
+  diff.
+- Discarding one file, a folder or change group, or all changes always asks for confirmation first.
+  When Git supports backups, the success message also offers Undo.
+- Stash apply, pop, and drop, and restoring a discard backup, verify the exact stash entry shown
+  before changing anything. If the stash list moved meanwhile, from another device or a terminal,
+  the action is refused and asks you to refresh rather than touching a different entry. Repository
+  changes made from another device or the terminal refresh the open panel views automatically.
+- After upgrading, a commit message drafted before drafts became per-server appears under the commit
+  box as **Recover old commit draft…**, where you choose to use it here or discard it.
+
 ### Forgejo and Gitea
 
 Install [Forgejo CLI (`fj`)](https://codeberg.org/forgejo-contrib/forgejo-cli) or

@@ -1,7 +1,6 @@
 import { RefreshIcon } from "~/components/ui/refresh-icon";
 import { useAtomValue } from "@effect/atom-react";
 import type { FileDiffContentsLoader, FileDiffMetadata } from "@pierre/diffs";
-import { useParams } from "@tanstack/react-router";
 import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
@@ -9,6 +8,7 @@ import {
 import { safeErrorLogAttributes } from "@t3tools/client-runtime/errors";
 import type { ScopedThreadRef, TurnId } from "@t3tools/contracts";
 import {
+  ArrowLeftIcon, // fork: f4 — back to source control
   ArrowRightIcon,
   CheckIcon,
   ChevronDownIcon,
@@ -32,6 +32,7 @@ import { openDiffFilePrimaryAction } from "../diffFileActions";
 import { useCheckpointDiff } from "~/lib/checkpointDiffState";
 import { cn } from "~/lib/utils";
 import { selectThreadDiffPanelSelection, useDiffPanelStore } from "../diffPanelStore";
+import { useSourceControlStore } from "../sourceControlStore"; // fork: f4 — back to source control
 import { useLocalStorage } from "../hooks/useLocalStorage";
 import { useTheme } from "../hooks/useTheme";
 import {
@@ -48,15 +49,25 @@ import { areAllDiffFilesCollapsed, toggleAllDiffFiles } from "../lib/diffCollaps
 import { useTurnDiffSummaries } from "../hooks/useTurnDiffSummaries";
 import { useWorkspaceMutationRefresh } from "../hooks/useWorkspaceMutationRefresh";
 import { useProject, useThread } from "../state/entities";
-import { resolveThreadRouteRef } from "../threadRoutes";
 import { useClientSettings, useUpdateClientSettings } from "../hooks/useSettings";
 import { formatShortTimestamp } from "../timestampFormat";
 import { DiffFilePathCopyButton } from "./DiffFilePathCopyButton";
 import { DiffPanelLoadingState, DiffPanelShell, type DiffPanelMode } from "./DiffPanelShell";
 import { DiffStatLabel } from "./chat/DiffStatLabel";
-import { AnnotatableCodeView, type AnnotatableCodeViewHandle } from "./diffs/AnnotatableCodeView";
+import {
+  AnnotatableCodeView,
+  type AnnotatableCodeViewHandle,
+  type HunkActionAnchor,
+} from "./diffs/AnnotatableCodeView";
 import { DiffFileTree } from "./diffs/DiffFileTree";
 import { diffFileTreeEntries } from "./diffs/diffFileTree.logic";
+// fork: f4 hunk staging
+import {
+  useDiffHunkStaging,
+  type DiffHunkStagingSelection,
+} from "./sourceControl/useDiffHunkStaging";
+import { useDraftDiffTarget } from "./sourceControl/useDraftDiffTarget"; // fork: f4
+import { showsSelectThreadEmptyState } from "~/lib/sourceControl/draftDiffTarget"; // fork: f4
 import { Button } from "./ui/button";
 import { ToggleGroup, Toggle } from "./ui/toggle-group";
 import { Switch } from "./ui/switch";
@@ -120,12 +131,15 @@ const EMPTY_COLLAPSED_DIFF_FILE_KEYS: ReadonlySet<string> = new Set();
 
 interface DiffPanelProps {
   mode?: DiffPanelMode;
+  /** The chat surface owns thread selection; grid mode has no routed thread. */
+  threadRef: ScopedThreadRef;
   composerDraftTarget: ScopedThreadRef | DraftId;
   workspaceMutationId: string | null;
 }
 
 export default function DiffPanel({
   mode = "inline",
+  threadRef,
   composerDraftTarget,
   workspaceMutationId,
 }: DiffPanelProps) {
@@ -148,12 +162,9 @@ export default function DiffPanel({
   const [codeViewRevision, setCodeViewRevision] = useState(0);
   const [codeView, setCodeView] = useState<AnnotatableCodeViewHandle | null>(null);
 
-  const routeThreadRef = useParams({
-    strict: false,
-    select: (params) => resolveThreadRouteRef(params),
-  });
-  const activeThreadId = routeThreadRef?.threadId ?? null;
-  const activeThread = useThread(routeThreadRef);
+  const draftDiffTarget = useDraftDiffTarget(composerDraftTarget);
+  const activeThreadId = threadRef.threadId;
+  const activeThread = useThread(threadRef);
   const activeProjectId = activeThread?.projectId ?? null;
   const activeProject = useProject(
     activeThread && activeProjectId
@@ -163,28 +174,32 @@ export default function DiffPanel({
         }
       : null,
   );
-  const activeCwd = activeThread?.worktreePath ?? activeProject?.workspaceRoot;
+  // A draft has no server thread yet, so its working-copy diff still recovers
+  // the cwd from composer state. The thread identity itself always comes from
+  // the owning ChatView, including when that view lives inside the session grid.
+  const activeCwd =
+    activeThread?.worktreePath ?? activeProject?.workspaceRoot ?? draftDiffTarget.cwd ?? undefined;
   const activeRepositoryRoot = activeThread?.worktreePath
     ? undefined
     : activeProject?.repositoryIdentity?.rootPath;
-  const serverConfig = useAtomValue(
-    serverEnvironment.configValueAtom(activeThread?.environmentId ?? null),
-  );
+  const activeEnvironmentId =
+    activeThread?.environmentId ?? draftDiffTarget.environmentId ?? threadRef.environmentId;
+  const serverConfig = useAtomValue(serverEnvironment.configValueAtom(activeEnvironmentId));
   const openInPreferredEditor = useOpenInPreferredEditor(
-    activeThread?.environmentId ?? null,
+    activeEnvironmentId,
     serverConfig?.availableEditors ?? [],
   );
   const getDiffFileContents = useAtomCommand(reviewEnvironment.diffFileContents);
   const gitStatusQuery = useEnvironmentQuery(
-    activeThread !== null && activeThread !== undefined && activeCwd != null
+    activeEnvironmentId !== null && activeCwd != null
       ? vcsEnvironment.status({
-          environmentId: activeThread.environmentId,
+          environmentId: activeEnvironmentId,
           input: { cwd: activeCwd },
         })
       : null,
   );
   const diffSelection = useDiffPanelStore((state) =>
-    selectThreadDiffPanelSelection(state.byThreadKey, routeThreadRef),
+    selectThreadDiffPanelSelection(state.byThreadKey, threadRef),
   );
   const isGitRepo = gitStatusQuery.data?.isRepo ?? true;
   const { turnDiffSummaries, inferredCheckpointTurnCountByTurnId } =
@@ -205,14 +220,54 @@ export default function DiffPanel({
   );
 
   useEffect(() => {
-    if (!routeThreadRef || diffSelection.kind !== "turn") return;
+    if (diffSelection.kind !== "turn") return;
     useDiffPanelStore.getState().reconcileTurnSelection(
-      routeThreadRef,
+      threadRef,
       orderedTurnDiffSummaries.map((summary) => summary.turnId),
     );
-  }, [diffSelection, orderedTurnDiffSummaries, routeThreadRef]);
+  }, [diffSelection, orderedTurnDiffSummaries, threadRef]);
 
   const selectedTurnId = diffSelection.kind === "turn" ? diffSelection.turnId : null;
+  // fork: f4 hunk staging — one file, one side of the index. Every git-scope
+  // derivation below stays untouched; this selection simply short-circuits them.
+  const workingCopySelection = useMemo<DiffHunkStagingSelection | null>(() => {
+    if (diffSelection.kind === "working-copy") {
+      return {
+        kind: "working-copy",
+        side: diffSelection.side,
+        filePath: diffSelection.filePath,
+        oldPath: diffSelection.oldPath,
+      };
+    }
+    // fork: f4 source-control panel — a commit's file rides the same surface.
+    if (diffSelection.kind === "commit") {
+      return {
+        kind: "commit",
+        hash: diffSelection.hash,
+        shortHash: diffSelection.shortHash,
+        filePath: diffSelection.filePath,
+        oldPath: diffSelection.oldPath,
+      };
+    }
+    return null;
+  }, [diffSelection]);
+  const flipWorkingCopySide = useCallback(
+    (nextSide: "staged" | "unstaged") => {
+      if (workingCopySelection?.kind !== "working-copy") return;
+      useDiffPanelStore.getState().selectWorkingCopyFile(threadRef, {
+        side: nextSide,
+        filePath: workingCopySelection.filePath,
+        ...(workingCopySelection.oldPath ? { oldPath: workingCopySelection.oldPath } : {}),
+      });
+    },
+    [threadRef, workingCopySelection],
+  );
+  const hunkStaging = useDiffHunkStaging({
+    environmentId: activeEnvironmentId,
+    cwd: activeCwd ?? null,
+    selection: workingCopySelection,
+    onSideExhausted: flipWorkingCopySide,
+  });
   const selectedGitScope = diffSelection.kind === "unstaged" ? "unstaged" : "branch";
   const selectedBaseRef = diffSelection.kind === "branch" ? diffSelection.baseRef : null;
   const selectedFilePath = diffSelection.kind === "turn" ? diffSelection.filePath : null;
@@ -227,24 +282,31 @@ export default function DiffPanel({
     selectedTurn &&
     (selectedTurn.checkpointTurnCount ?? inferredCheckpointTurnCountByTurnId[selectedTurn.turnId]);
   const latestTurn = orderedTurnDiffSummaries[0];
-  const selectedScopeLabel =
-    selectedTurnId === null
+  const selectedScopeLabel = hunkStaging.active
+    ? hunkStaging.label /* fork: f4 hunk staging */
+    : selectedTurnId === null
       ? selectedGitScope === "unstaged"
         ? "Working tree"
         : "Branch changes"
       : selectedTurn?.turnId === latestTurn?.turnId
         ? "Latest turn"
         : `Turn ${selectedCheckpointTurnCount ?? "?"}`;
-  const reviewSectionId = selectedTurn ? `turn:${selectedTurn.turnId}` : selectedGitScope;
-  const collapseScopeKey = routeThreadRef
-    ? `${routeThreadRef.environmentId}:${routeThreadRef.threadId}:${reviewSectionId}`
-    : null;
+  const reviewSectionId = hunkStaging.active
+    ? hunkStaging.sectionId /* fork: f4 hunk staging */
+    : selectedTurn
+      ? `turn:${selectedTurn.turnId}`
+      : selectedGitScope;
+  const collapseScopeKey = `${threadRef.environmentId}:${threadRef.threadId}:${reviewSectionId}`;
   const codeViewMountKey = `${collapseScopeKey ?? reviewSectionId}:${codeViewRevision}`;
-  const reviewSectionTitle = selectedTurn
-    ? `Turn ${selectedCheckpointTurnCount ?? "?"}`
-    : selectedGitScope === "unstaged"
-      ? "Working tree"
-      : "Branch changes";
+
+  const reviewSectionTitle = hunkStaging.active
+    ? hunkStaging.label /* fork: f4 hunk staging */
+    : selectedTurn
+      ? `Turn ${selectedCheckpointTurnCount ?? "?"}`
+      : selectedGitScope === "unstaged"
+        ? "Working tree"
+        : "Branch changes";
+
   const selectedCheckpointRange = useMemo(
     () =>
       typeof selectedCheckpointTurnCount === "number"
@@ -267,7 +329,9 @@ export default function DiffPanel({
     { enabled: isGitRepo && selectedTurn !== undefined },
   );
   const primaryBranchDiffPreview = useEnvironmentQuery(
-    selectedTurnId === null && activeThread && activeCwd
+    // fork: f4 hunk staging — a working-copy file diff has its own source, so
+    // the branch preview is not fetched at all while one is open.
+    selectedTurnId === null && !hunkStaging.active && activeThread && activeCwd
       ? reviewEnvironment.diffPreview({
           environmentId: activeThread.environmentId,
           input: {
@@ -300,9 +364,7 @@ export default function DiffPanel({
     : primaryBranchDiffPreview;
   const canRefreshGitDiff =
     isGitRepo && selectedTurnId === null && activeThread != null && activeCwd != null;
-  const activeThreadRefreshKey = routeThreadRef
-    ? `${routeThreadRef.environmentId}:${routeThreadRef.threadId}`
-    : null;
+  const activeThreadRefreshKey = `${threadRef.environmentId}:${threadRef.threadId}`;
 
   const selectedGitSource = branchDiffPreview.data?.sources.find(
     (source) => source.kind === (selectedGitScope === "unstaged" ? "working-tree" : "branch-range"),
@@ -388,12 +450,25 @@ export default function DiffPanel({
   ];
   const gitDiff = selectedGitSource?.diff;
 
-  const selectedPatch = selectedTurn ? activeCheckpointDiff.data?.diff : gitDiff;
-  const isSelectedPatchTruncated = !selectedTurn && selectedGitSource?.truncated === true;
-  const isLoadingSelectedPatch = selectedTurn
-    ? activeCheckpointDiff.isPending
-    : branchDiffPreview.isPending;
-  const selectedPatchError = selectedTurn ? activeCheckpointDiff.error : branchDiffPreview.error;
+  // fork: f4 hunk staging — the working-copy source wins when it is active.
+  const selectedPatch = hunkStaging.active
+    ? hunkStaging.patch
+    : selectedTurn
+      ? activeCheckpointDiff.data?.diff
+      : gitDiff;
+  const isSelectedPatchTruncated = hunkStaging.active
+    ? hunkStaging.truncated
+    : !selectedTurn && selectedGitSource?.truncated === true;
+  const isLoadingSelectedPatch = hunkStaging.active
+    ? hunkStaging.isPending
+    : selectedTurn
+      ? activeCheckpointDiff.isPending
+      : branchDiffPreview.isPending;
+  const selectedPatchError = hunkStaging.active
+    ? hunkStaging.error
+    : selectedTurn
+      ? activeCheckpointDiff.error
+      : branchDiffPreview.error;
   const hasResolvedPatch = typeof selectedPatch === "string";
   const hasNoNetChanges = hasResolvedPatch && selectedPatch.trim().length === 0;
   const lazySource =
@@ -499,6 +574,26 @@ export default function DiffPanel({
     () => renderableFileEntries.map((file) => file.fileKey),
     [renderableFileEntries],
   );
+  // fork: f4 hunk staging — a working-copy selection renders exactly one file,
+  // and its hunks are the same parse the clusters came from, so cluster N
+  // anchors inside rendered hunk N. `undefined` everywhere else keeps the
+  // annotation list identical to upstream.
+  const hunkActionAnchors = useMemo<ReadonlyArray<HunkActionAnchor> | undefined>(() => {
+    const fileKey = codeViewFiles[0]?.fileKey;
+    if (!hunkStaging.active || fileKey === undefined || codeViewFiles.length !== 1) {
+      return undefined;
+    }
+    return hunkStaging.clusters.map((cluster) => ({
+      fileKey,
+      hunkIndex: cluster.index,
+      side: cluster.anchor.side,
+      lineNumber: cluster.anchor.lineNumber,
+      // fork: f4 F-19 — the pending action participates in the annotation
+      // entry, and therefore in the viewer's item version hash. Without it the
+      // cluster's spinner and disabled state never repainted.
+      state: hunkStaging.pendingKey,
+    }));
+  }, [codeViewFiles, hunkStaging.active, hunkStaging.clusters, hunkStaging.pendingKey]);
   const allDiffFilesCollapsed = areAllDiffFilesCollapsed(diffFileKeys, collapsedDiffFileKeys);
   const diffLineStat = useMemo(() => {
     if (!selectedTurn && selectedGitSource?.files) {
@@ -577,7 +672,7 @@ export default function DiffPanel({
   const openDiffFile = useCallback(
     (filePath: string) => {
       openDiffFilePrimaryAction({
-        threadRef: routeThreadRef,
+        threadRef,
         filePath,
         activeCwd,
         repositoryRoot: activeRepositoryRoot,
@@ -587,12 +682,8 @@ export default function DiffPanel({
             if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
               console.warn("Failed to open diff file in editor.", {
                 operation: "open-diff-file",
-                ...(routeThreadRef
-                  ? {
-                      environmentId: routeThreadRef.environmentId,
-                      threadId: routeThreadRef.threadId,
-                    }
-                  : {}),
+                environmentId: threadRef.environmentId,
+                threadId: threadRef.threadId,
                 ...safeErrorLogAttributes(squashAtomCommandFailure(result)),
               });
             }
@@ -600,7 +691,7 @@ export default function DiffPanel({
         },
       });
     },
-    [activeCwd, activeRepositoryRoot, openInPreferredEditor, routeThreadRef],
+    [activeCwd, activeRepositoryRoot, openInPreferredEditor, threadRef],
   );
   const toggleDiffFileCollapsed = useCallback(
     (fileKey: string) => {
@@ -633,21 +724,43 @@ export default function DiffPanel({
   }, [collapseScopeKey, defaultCollapsedDiffFileKeys, diffFileKeys]);
 
   const selectTurn = (turnId: TurnId) => {
-    if (!routeThreadRef) return;
-    useDiffPanelStore.getState().selectTurn(routeThreadRef, turnId);
+    useDiffPanelStore.getState().selectTurn(threadRef, turnId);
   };
   const selectGitScope = (scope: "branch" | "unstaged") => {
-    if (!routeThreadRef) return;
-    useDiffPanelStore.getState().selectGitScope(routeThreadRef, scope);
+    useDiffPanelStore.getState().selectGitScope(threadRef, scope);
   };
   const selectBranchBaseRef = (baseRef: string | null) => {
-    if (!routeThreadRef) return;
-    useDiffPanelStore.getState().selectBranchBaseRef(routeThreadRef, baseRef);
+    useDiffPanelStore.getState().selectBranchBaseRef(threadRef, baseRef);
   };
 
   const headerRow = (
     <>
       <div className="flex min-w-0 flex-1 items-center gap-3 [-webkit-app-region:no-drag]">
+        {/* fork: f4 — a file-scoped diff is only ever opened from the source
+            control panel, and in a narrow right panel opening it hides the very
+            list the user was working from. The way back is a control, not a
+            "find the tab again" exercise. */}
+        {hunkStaging.active && (
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <Button
+                  type="button"
+                  size="icon-xs"
+                  variant="ghost"
+                  className="-me-1.5 shrink-0"
+                  aria-label="Back to source control"
+                  onClick={() => {
+                    useSourceControlStore.getState().setOpen(true);
+                  }}
+                />
+              }
+            >
+              <ArrowLeftIcon className="size-3.5" />
+            </TooltipTrigger>
+            <TooltipPopup side="bottom">Back to source control</TooltipPopup>
+          </Tooltip>
+        )}
         <DropdownMenu>
           <DropdownMenuTrigger
             className="inline-flex h-6 max-w-full items-center gap-1 rounded-md bg-accent px-2 text-xs font-medium text-accent-foreground outline-none transition-colors hover:bg-accent/80 focus-visible:ring-2 focus-visible:ring-ring"
@@ -659,7 +772,8 @@ export default function DiffPanel({
           <DropdownMenuContent align="start" className="w-60">
             <DropdownMenuItem
               className={
-                selectedTurnId === null && selectedGitScope === "unstaged"
+                /* fork: f4 hunk staging — a working-copy file is its own scope */
+                selectedTurnId === null && !hunkStaging.active && selectedGitScope === "unstaged"
                   ? "bg-foreground/[0.08]"
                   : undefined
               }
@@ -669,7 +783,7 @@ export default function DiffPanel({
             </DropdownMenuItem>
             <DropdownMenuItem
               className={
-                selectedTurnId === null && selectedGitScope === "branch"
+                selectedTurnId === null && !hunkStaging.active && selectedGitScope === "branch"
                   ? "bg-foreground/[0.08]"
                   : undefined
               }
@@ -986,7 +1100,12 @@ export default function DiffPanel({
 
   return (
     <DiffPanelShell mode={mode} header={headerRow}>
-      {!activeThread ? (
+      {/* fork: f4 — a file-scoped diff renders without a thread; only the
+          turn/branch scopes below actually need one. */}
+      {showsSelectThreadEmptyState({
+        hasThread: Boolean(activeThread),
+        fileScopedDiffActive: hunkStaging.active,
+      }) ? (
         <div className="flex flex-1 items-center justify-center px-5 text-center text-xs text-muted-foreground/70">
           Select a thread to inspect turn diffs.
         </div>
@@ -1016,11 +1135,13 @@ export default function DiffPanel({
               isLoadingSelectedPatch ? (
                 <DiffPanelLoadingState
                   label={
-                    selectedTurn
-                      ? "Loading checkpoint diff..."
-                      : selectedGitScope === "unstaged"
-                        ? "Loading working tree diff..."
-                        : "Loading branch diff..."
+                    hunkStaging.active
+                      ? "Loading file diff..." /* fork: f4 hunk staging */
+                      : selectedTurn
+                        ? "Loading checkpoint diff..."
+                        : selectedGitScope === "unstaged"
+                          ? "Loading working tree diff..."
+                          : "Loading branch diff..."
                   }
                 />
               ) : (
@@ -1078,6 +1199,10 @@ export default function DiffPanel({
                     sectionId={reviewSectionId}
                     sectionTitle={reviewSectionTitle}
                     composerDraftTarget={composerDraftTarget}
+                    {...(hunkActionAnchors
+                      ? /* fork: f4 hunk staging */
+                        { hunkActionAnchors, renderHunkActions: hunkStaging.renderCluster }
+                      : {})}
                     renderHeaderFilenameSuffix={(fileDiff) => {
                       const path = resolveFileDiffPath(fileDiff);
                       const stat = fileStats.get(path);
@@ -1190,6 +1315,8 @@ export default function DiffPanel({
           </div>
         </>
       )}
+      {/* fork: f4 hunk staging — the discard-hunk rung of the safety ladder. */}
+      {hunkStaging.active ? hunkStaging.confirmDialog : null}
     </DiffPanelShell>
   );
 }

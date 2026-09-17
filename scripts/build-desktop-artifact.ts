@@ -36,6 +36,15 @@ import {
 import { loadRepoEnv } from "./lib/public-config.ts";
 import { selectDesktopRuntimeExternalDependencies } from "./lib/desktop-external-packages.ts";
 import { resolveCatalogDependencies } from "./lib/resolve-catalog.ts";
+// fork: keep the legacy 2code release identity isolated from upstream desktop defaults.
+import {
+  DESKTOP_DISTRIBUTIONS,
+  renderTwoCodeLegacyMacEntitlements,
+  resolveDesktopDistributionStageMetadata,
+  resolveDesktopDistributionProfile,
+  type DesktopDistribution as DesktopDistributionId,
+  type DesktopDistributionProfile,
+} from "./fork/2code-desktop-distribution.ts";
 
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -59,6 +68,7 @@ const APPLE_TEAM_ID_PATTERN = /^[A-Z0-9]{10}$/u;
 
 const BuildPlatform = Schema.Literals(["mac", "linux", "win"]);
 const BuildArch = Schema.Literals(["arm64", "x64", "universal"]);
+const DesktopDistribution = Schema.Literals(DESKTOP_DISTRIBUTIONS);
 
 const WorkspaceConfig = Schema.Struct({
   catalog: Schema.optional(Schema.Record(Schema.String, Schema.String)),
@@ -150,6 +160,7 @@ const PLATFORM_CONFIG: Record<typeof BuildPlatform.Type, PlatformConfig> = {
 };
 
 interface BuildCliInput {
+  readonly distribution?: Option.Option<DesktopDistributionId>;
   readonly platform: Option.Option<typeof BuildPlatform.Type>;
   readonly target: Option.Option<string>;
   readonly arch: Option.Option<typeof BuildArch.Type>;
@@ -907,6 +918,7 @@ const resolvePythonForNodeGyp = Effect.fn("resolvePythonForNodeGyp")(function* (
 });
 
 interface ResolvedBuildOptions {
+  readonly distribution: DesktopDistributionId | undefined;
   readonly platform: typeof BuildPlatform.Type;
   readonly target: string;
   readonly arch: typeof BuildArch.Type;
@@ -926,6 +938,8 @@ interface StagePackageJson {
   readonly version: string;
   readonly buildVersion: string;
   readonly t3codeCommitHash: string;
+  readonly t3codeDistribution?: DesktopDistributionId;
+  readonly t3codeRuntimeVersion?: string;
   readonly private: true;
   readonly packageManager: string;
   readonly description: string;
@@ -941,7 +955,7 @@ interface StagePackageJson {
 export const STAGE_INSTALL_ARGS = ["install", "--prod"] as const;
 export const DESKTOP_ELECTRON_LANGUAGES = ["en-US"] as const;
 export const DESKTOP_FILE_EXCLUSIONS = [
-  // T3 Code always passes the user's installed Claude executable to the SDK,
+  // 2code always passes the user's installed Claude executable to the SDK,
   // so the SDK's optional platform packages (each a ~200MB bundled executable)
   // are dead weight. The trailing dash keeps the SDK's own JS package.
   "!**/node_modules/@anthropic-ai/claude-agent-sdk-*/**/*",
@@ -1538,6 +1552,9 @@ const AzureTrustedSigningOptionsConfig = Config.all({
 });
 
 const BuildEnvConfig = Config.all({
+  distribution: Config.schema(DesktopDistribution, "T3CODE_DESKTOP_DISTRIBUTION").pipe(
+    Config.option,
+  ),
   platform: Config.schema(BuildPlatform, "T3CODE_DESKTOP_PLATFORM").pipe(Config.option),
   target: Config.string("T3CODE_DESKTOP_TARGET").pipe(Config.option),
   arch: Config.schema(BuildArch, "T3CODE_DESKTOP_ARCH").pipe(Config.option),
@@ -1597,6 +1614,12 @@ export const resolveBuildOptions = Effect.fn("resolveBuildOptions")(function* (
   const env = yield* BuildEnvConfig;
   const hostPlatform = yield* HostProcessPlatform;
 
+  const distribution = mergeOptions(
+    input.distribution ?? Option.none(),
+    env.distribution,
+    undefined,
+  );
+
   const platform = mergeOptions(
     input.platform,
     env.platform,
@@ -1648,6 +1671,7 @@ export const resolveBuildOptions = Effect.fn("resolveBuildOptions")(function* (
     Option.getOrUndefined(input.wslRuntime) ?? Option.getOrUndefined(env.wslRuntime);
 
   return {
+    distribution,
     platform,
     target,
     arch,
@@ -2579,7 +2603,13 @@ export function resolveDesktopWebAssetBrand(version: string): WebAssetBrand {
   return resolveWebAssetBrandForChannel(resolveDesktopUpdateChannel(version));
 }
 
-export function resolveDesktopBuildIconAssets(version: string): DesktopBuildIconAssets {
+export function resolveDesktopBuildIconAssets(
+  version: string,
+  distributionProfile?: DesktopDistributionProfile,
+): DesktopBuildIconAssets {
+  // fork: branded distributions can override icons without changing upstream defaults.
+  if (distributionProfile?.iconAssets) return distributionProfile.iconAssets;
+
   if (resolveDesktopUpdateChannel(version) === "nightly") {
     return {
       macIconPng: BRAND_ASSET_PATHS.nightlyMacIconPng,
@@ -2614,8 +2644,16 @@ export function resolvePackageManagerUserAgent(packageManager: string): string {
 
 export function resolveDesktopProductName(version: string): string {
   return resolveDesktopUpdateChannel(version) === "nightly"
-    ? "T3 Code (Nightly)"
-    : (desktopPackageJson.productName ?? "T3 Code");
+    ? "2code (Nightly)"
+    : (desktopPackageJson.productName ?? "2code");
+}
+
+export function shouldResolveMacPasskeySigningConfiguration(
+  platform: typeof BuildPlatform.Type,
+  signed: boolean,
+  distributionProfile: DesktopDistributionProfile | undefined,
+): boolean {
+  return platform === "mac" && signed && distributionProfile?.macSigning !== "legacy-entitlements";
 }
 
 export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
@@ -2628,19 +2666,29 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   macPasskeySigning:
     | {
         readonly entitlementsPath: string;
-        readonly provisioningProfilePath: string;
+        readonly entitlementsInheritPath?: string;
+        readonly provisioningProfilePath?: string;
       }
     | undefined,
   // Windows only, and false when no Linux CLI archive was handed to the build:
   // staging skips the archive in that case, and listing a resource whose
   // source file was never written fails the electron-builder step.
   wslRuntimeBundled = false,
+  // fork: selected only by the dedicated 2code production release workflow.
+  distributionProfile?: DesktopDistributionProfile,
   arch?: typeof BuildArch.Type,
 ) {
+  const appId = distributionProfile?.appId ?? DESKTOP_APP_ID;
+  const productName = distributionProfile?.productName ?? resolveDesktopProductName(version);
+  const executableName = distributionProfile?.executableName;
+  const protocol = distributionProfile?.protocols ?? {
+    name: "2code",
+    schemes: ["t3code", "t3code-dev"],
+  };
   const buildConfig: Record<string, unknown> = {
-    appId: DESKTOP_APP_ID,
-    productName: resolveDesktopProductName(version),
-    artifactName: "T3-Code-${version}-${arch}.${ext}",
+    appId,
+    productName,
+    artifactName: distributionProfile?.artifactNames.default ?? "T3-Code-${version}-${arch}.${ext}",
     electronLanguages: [...DESKTOP_ELECTRON_LANGUAGES],
     files: [
       ...DESKTOP_FILE_EXCLUSIONS,
@@ -2668,18 +2716,22 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
     ],
   };
   const updateChannel = resolveDesktopUpdateChannel(version);
-  if (!isDesktopPreviewVersion(version)) {
-    const publishConfig = yield* resolveGitHubPublishConfig(updateChannel);
-    if (publishConfig) {
-      buildConfig.publish = [publishConfig];
-    } else if (mockUpdates) {
-      buildConfig.publish = [
-        {
-          provider: "generic",
-          url: resolveMockUpdateServerUrl(mockUpdateServerPort),
-        },
-      ];
-    }
+  const publishConfig = distributionProfile
+    ? undefined
+    : isDesktopPreviewVersion(version)
+      ? undefined
+      : yield* resolveGitHubPublishConfig(updateChannel);
+  if (distributionProfile) {
+    buildConfig.publish = [{ ...distributionProfile.updates }];
+  } else if (publishConfig) {
+    buildConfig.publish = [publishConfig];
+  } else if (!isDesktopPreviewVersion(version) && mockUpdates) {
+    buildConfig.publish = [
+      {
+        provider: "generic",
+        url: resolveMockUpdateServerUrl(mockUpdateServerPort),
+      },
+    ];
   }
 
   if (platform === "mac") {
@@ -2687,23 +2739,37 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
     const repoRoot = yield* RepoRoot;
     buildConfig.mac = {
       target: target === "dmg" ? [target, "zip"] : [target],
+      ...(distributionProfile ? { artifactName: distributionProfile.artifactNames.mac } : {}),
       icon: "icon.icns",
       category: "public.app-category.developer-tools",
+      ...(executableName ? { executableName } : {}),
+      ...(distributionProfile
+        ? {
+            hardenedRuntime: true,
+            gatekeeperAssess: false,
+            ...(signed ? { forceCodeSigning: true } : {}),
+          }
+        : {}),
       extendInfo: {
         NSScreenCaptureUsageDescription:
           "T3 Code captures the active window when you use the window capture shortcut.",
       },
       protocols: [
         {
-          name: "T3 Code",
-          schemes: ["t3code", "t3code-dev"],
+          name: protocol.name,
+          schemes: [...protocol.schemes],
         },
       ],
       ...(signed ? { sign: path.join(repoRoot, "scripts/sign-macos.ts") } : {}),
       ...(macPasskeySigning
         ? {
             entitlements: macPasskeySigning.entitlementsPath,
-            provisioningProfile: macPasskeySigning.provisioningProfilePath,
+            ...(macPasskeySigning.entitlementsInheritPath
+              ? { entitlementsInherit: macPasskeySigning.entitlementsInheritPath }
+              : {}),
+            ...(macPasskeySigning.provisioningProfilePath
+              ? { provisioningProfile: macPasskeySigning.provisioningProfilePath }
+              : {}),
           }
         : {}),
     };
@@ -2711,10 +2777,16 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
 
   if (platform === "mac" && target === "dmg") {
     buildConfig.dmg = {
+      ...(distributionProfile
+        ? {
+            artifactName: distributionProfile.artifactNames.dmg,
+            ...(signed ? { sign: true } : {}),
+          }
+        : {}),
       // Give the themed installer its own Finder volume name. Finder caches
       // DMG window backgrounds by volume name, so reusing a generic name can
       // make a newly built background look unchanged during testing.
-      title: `${resolveDesktopProductName(version)} ${version} Installer`,
+      title: `${productName} ${version} Installer`,
       background: `dmg/dmg-background-${updateChannel}.png`,
       window: {
         width: 640,
@@ -2734,7 +2806,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   if (platform === "linux") {
     buildConfig.linux = {
       target: [target],
-      executableName: "t3code",
+      executableName: executableName ?? "t3code",
       icon: "icons",
       category: "Development",
       // electron-builder turns these into MimeType=x-scheme-handler/<scheme>;
@@ -2742,8 +2814,8 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       // t3code:// OAuth callbacks to the app.
       protocols: [
         {
-          name: "T3 Code",
-          schemes: ["t3code", "t3code-dev"],
+          name: protocol.name,
+          schemes: [...protocol.schemes],
         },
       ],
       desktop: {
@@ -2763,6 +2835,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
     const winConfig: Record<string, unknown> = {
       target: [target],
       icon: "icon.ico",
+      ...(executableName ? { executableName } : {}),
       // Resource editing applies the product metadata and icon independently
       // of code signing. Disabling it for local unsigned builds leaves the
       // packaged executable with Electron's stock icon.
@@ -3406,7 +3479,9 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   });
 
   const appVersion = options.version ?? serverPackageJson.version;
-  const iconAssets = resolveDesktopBuildIconAssets(appVersion);
+  // fork: a distribution profile changes packaging identity only; the embedded server stays upstream-versioned.
+  const distributionProfile = resolveDesktopDistributionProfile(options.distribution);
+  const iconAssets = resolveDesktopBuildIconAssets(appVersion, distributionProfile);
   const commitHash = yield* resolveGitCommitHash(repoRoot);
   const mkdir = options.keepStage ? fs.makeTempDirectory : fs.makeTempDirectoryScoped;
   const stageRoot = yield* mkdir({
@@ -3593,13 +3668,17 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   const stageProdResourcesDir = path.join(stageAppDir, "apps/desktop/prod-resources");
   yield* fs.copy(stageResourcesDir, stageProdResourcesDir);
 
-  const configuredMacPasskeySigning =
-    options.platform === "mac" && options.signed
-      ? yield* Effect.try({
-          try: () => resolveMacPasskeySigningConfiguration(loadRepoEnv({ repoRoot })),
-          catch: MacPasskeySigningConfigurationResolutionError.fromCause,
-        })
-      : undefined;
+  const usesLegacyMacSigning = distributionProfile?.macSigning === "legacy-entitlements";
+  const configuredMacPasskeySigning = shouldResolveMacPasskeySigningConfiguration(
+    options.platform,
+    options.signed,
+    distributionProfile,
+  )
+    ? yield* Effect.try({
+        try: () => resolveMacPasskeySigningConfiguration(loadRepoEnv({ repoRoot })),
+        catch: MacPasskeySigningConfigurationResolutionError.fromCause,
+      })
+    : undefined;
   const macPasskeySigning = configuredMacPasskeySigning
     ? {
         ...configuredMacPasskeySigning,
@@ -3619,6 +3698,13 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
       });
     }
     yield* fs.writeFileString(macEntitlementsPath, renderMacPasskeyEntitlements(macPasskeySigning));
+  }
+  const legacyMacEntitlementsPath =
+    options.platform === "mac" && options.signed && usesLegacyMacSigning
+      ? path.join(stageAppDir, "entitlements.2code.mac.plist")
+      : undefined;
+  if (legacyMacEntitlementsPath) {
+    yield* fs.writeFileString(legacyMacEntitlementsPath, renderTwoCodeLegacyMacEntitlements());
   }
 
   // Windows splits dependencies per process: app.asar carries only the
@@ -3644,13 +3730,14 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
       ? path.join(stageAppDir, WINDOWS_SERVER_RESOURCE_SOURCE_DIR, WINDOWS_SERVER_ASAR_RESOURCE)
       : undefined;
   const stagePackageJson: StagePackageJson = {
-    name: "t3code",
+    name: distributionProfile?.packageName ?? "t3code",
     version: appVersion,
     buildVersion: appVersion,
     t3codeCommitHash: commitHash,
+    ...resolveDesktopDistributionStageMetadata(distributionProfile, serverPackageJson.version),
     private: true,
     packageManager: rootPackageJson.packageManager,
-    description: "T3 Code desktop build",
+    description: distributionProfile?.description ?? "2code desktop build",
     author: "T3 Tools",
     main: "apps/desktop/dist-electron/main.cjs",
     build: yield* createBuildConfig(
@@ -3665,8 +3752,14 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
             entitlementsPath: macEntitlementsPath,
             provisioningProfilePath: macPasskeySigning.provisioningProfilePath,
           }
-        : undefined,
+        : legacyMacEntitlementsPath
+          ? {
+              entitlementsPath: legacyMacEntitlementsPath,
+              entitlementsInheritPath: legacyMacEntitlementsPath,
+            }
+          : undefined,
       bundlesWslRuntime({ platform: options.platform, runtimeArchivePath: options.wslRuntime }),
+      distributionProfile,
       options.arch,
     ),
     dependencies: stageDependencies,
@@ -3866,6 +3959,11 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
 });
 
 const buildDesktopArtifactCli = Command.make("build-desktop-artifact", {
+  // fork: opt-in legacy identity; omitted builds retain upstream desktop behavior.
+  distribution: Flag.choice("distribution", DESKTOP_DISTRIBUTIONS).pipe(
+    Flag.withDescription("Desktop distribution profile (env: T3CODE_DESKTOP_DISTRIBUTION)."),
+    Flag.optional,
+  ),
   platform: Flag.choice("platform", BuildPlatform.literals).pipe(
     Flag.withDescription("Build platform (env: T3CODE_DESKTOP_PLATFORM)."),
     Flag.optional,
@@ -3924,7 +4022,7 @@ const buildDesktopArtifactCli = Command.make("build-desktop-artifact", {
     Flag.optional,
   ),
 }).pipe(
-  Command.withDescription("Build a desktop artifact for T3 Code."),
+  Command.withDescription("Build a desktop artifact for 2code."),
   Command.withHandler((input) => Effect.flatMap(resolveBuildOptions(input), buildDesktopArtifact)),
 );
 

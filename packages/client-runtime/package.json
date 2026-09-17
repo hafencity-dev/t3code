@@ -135,6 +135,10 @@
       "types": "./src/state/orchestration.ts",
       "default": "./src/state/orchestration.ts"
     },
+    "./state/claude-codex-routing": {
+      "types": "./src/state/claudeCodexRouting.ts",
+      "default": "./src/state/claudeCodexRouting.ts"
+    },
     "./state/presentation": {
       "types": "./src/state/presentation.ts",
       "default": "./src/state/presentation.ts"
@@ -230,6 +234,14 @@
     "./state/vcs": {
       "types": "./src/state/vcs.ts",
       "default": "./src/state/vcs.ts"
+    },
+    "./state/working-copy": {
+      "types": "./src/state/workingCopy.ts",
+      "default": "./src/state/workingCopy.ts"
+    },
+    "./state/working-copy-logic": {
+      "types": "./src/state/workingCopy.logic.ts",
+      "default": "./src/state/workingCopy.logic.ts"
     },
     "./work-log/user-input": {
       "types": "./src/work-log/userInput.ts",

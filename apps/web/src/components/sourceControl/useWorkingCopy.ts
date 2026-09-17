@@ -1,0 +1,844 @@
+/**
+ * The panel's data + action layer.
+ *
+ * Liveness contract (there is no `subscribeWorkingCopy` — see
+ * `build-log-f4-server.md` deviation 1):
+ *
+ *   1. the shared working-copy revision drives every mutable query atom. It is
+ *      bumped by the per-thread `subscribeVcsStatus` push (which carries the
+ *      server's revision after every mutation, agent write or reconnect), by a
+ *      mutation's old-server fallback, and by manual/focus refreshes,
+ *   2. a slow interval is the floor for external git on servers without
+ *      revisions, and it runs ONLY while the panel is visible and idle. No
+ *      timer survives the panel being hidden.
+ *
+ * fork: f4 source-control panel
+ */
+import {
+  isAtomCommandInterrupted,
+  squashAtomCommandFailure,
+  type AtomCommandResult,
+} from "@t3tools/client-runtime/state/runtime";
+import {
+  WORKING_COPY_POLL_INTERVAL_MS,
+  nextStatusFailureStreak,
+  shouldPollWorkingCopy,
+  shouldShowStatusErrorBanner,
+} from "@t3tools/client-runtime/state/working-copy-logic";
+import {
+  type EnvironmentId,
+  type WorkingCopyOperation,
+  type WorkingCopyStashEntry,
+  type WorkingCopyStatusResult,
+} from "@t3tools/contracts";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+
+import {
+  commitToastText,
+  confirmAbortOperation,
+  confirmDiscardChanges,
+  confirmStashDrop,
+  discardToastText,
+  undoCommitToastText,
+} from "~/lib/sourceControl/safetyLadder";
+import { stackedThreadToast, toastManager } from "~/components/ui/toast";
+import { useEnvironmentQuery } from "~/state/query";
+import { useAtomCommand } from "~/state/use-atom-command";
+import { vcsEnvironment } from "~/state/vcs";
+import { workingCopyEnvironment } from "~/state/workingCopy";
+
+import {
+  actionBusyKey,
+  BUSY_DROPPED_PRESS_TITLE,
+  BUSY_KEY_SEPARATOR,
+  describeWorkingCopyError,
+  isCwdDeniedError,
+  isNothingStagedError,
+  STAGE_ALL_PATHS,
+  stashBusyId,
+  withBusyKey,
+  workingCopyBusyKey,
+} from "./sourceControlPanel.logic";
+
+// fork: remote Git — why a stash button did nothing, in the user's words.
+const STASH_UNSUPPORTED_TITLE = "Not supported by this server";
+const STASH_UNSUPPORTED_SERVER =
+  "This T3 Code server cannot verify which stash it is changing. Update the server to apply, pop, drop or restore stashes from here.";
+const STASH_UNSUPPORTED_ENTRY =
+  "This repository's stash storage cannot be verified safely. Use git directly for this entry.";
+import type { ConfirmOutcome } from "./useSourceControlConfirm";
+
+export interface SourceControlScope {
+  readonly environmentId: EnvironmentId;
+  readonly cwd: string;
+}
+
+type ConfirmFn = (
+  options: import("~/lib/sourceControl/safetyLadder").SourceControlConfirmOptions,
+) => Promise<ConfirmOutcome>;
+
+function failureMessage(result: { readonly cause: import("effect/Cause").Cause<unknown> }): string {
+  return describeWorkingCopyError(squashAtomCommandFailure(result));
+}
+
+function errorToast(title: string, detail: string): void {
+  toastManager.add(
+    stackedThreadToast({
+      type: "error",
+      title,
+      // Full, untruncated stderr — the server keeps it on `detail` precisely so
+      // this toast can show it.
+      description: detail,
+      timeout: 0,
+    }),
+  );
+}
+
+/**
+ * fork: f4 F-01 — the panel's ONE failure surface, shared with the remote
+ * actions (push / pull / publish / sync) which used to swallow their errors
+ * entirely because nothing read `stacked.error` / `pull.error`.
+ */
+export function reportSourceControlFailure(
+  title: string,
+  result: { readonly _tag: string; readonly cause: import("effect/Cause").Cause<unknown> },
+): void {
+  if (isAtomCommandInterrupted(result as never)) return;
+  const error = squashAtomCommandFailure(result as never);
+  errorToast(
+    isCwdDeniedError(error) ? "This folder is outside your open projects" : title,
+    describeWorkingCopyError(error),
+  );
+}
+
+/** fork: f4 — plain, non-alarming guidance (no stderr, short timeout). */
+export function sourceControlInfoToast(title: string): void {
+  toastManager.add(stackedThreadToast({ type: "info", title, timeout: 5_000 }));
+}
+
+function undoToast(
+  title: string,
+  undoLabel: string,
+  onUndo: () => void,
+  description?: string,
+): void {
+  toastManager.add(
+    stackedThreadToast({
+      type: "success",
+      title,
+      ...(description !== undefined ? { description } : {}),
+      timeout: 10_000,
+      actionProps: { children: undoLabel, onClick: onUndo },
+    }),
+  );
+}
+
+// ─── Status + liveness ──────────────────────────────────────────────────────
+
+export interface WorkingCopyStatusView {
+  readonly status: WorkingCopyStatusResult | null;
+  readonly isPending: boolean;
+  readonly isRefreshing: boolean;
+  readonly showErrorBanner: boolean;
+  readonly errorMessage: string | null;
+  readonly dismissErrorBanner: () => void;
+  readonly refresh: () => void;
+}
+
+export function useWorkingCopyStatus(
+  scope: SourceControlScope | null,
+  options: { readonly visible: boolean; readonly busy: boolean },
+): WorkingCopyStatusView {
+  const query = useEnvironmentQuery(
+    scope === null
+      ? null
+      : workingCopyEnvironment.status({
+          environmentId: scope.environmentId,
+          input: { cwd: scope.cwd },
+        }),
+  );
+  // The existing per-thread VCS status subscription is the push channel: while
+  // it is mounted, every server-side repository change (including a
+  // stage/unstage that leaves the summary unchanged) bumps the shared
+  // working-copy revision that the status, diff, stash, backup and history
+  // atoms depend on. Nothing here reads its value.
+  useEnvironmentQuery(
+    scope === null
+      ? null
+      : vcsEnvironment.status({ environmentId: scope.environmentId, input: { cwd: scope.cwd } }),
+  );
+  // The explicit Refresh invalidates every active view; coming back to the
+  // tab re-reads the worktree-owned views and leaves the environment-wide
+  // refs cache to server pushes.
+  const refreshRepository = useAtomCommand(workingCopyEnvironment.refresh, {
+    reportFailure: false,
+  });
+  const refreshAll = useCallback(() => {
+    if (scope === null) return;
+    void refreshRepository({ environmentId: scope.environmentId, input: { cwd: scope.cwd } });
+  }, [refreshRepository, scope]);
+  const refreshWorktree = useCallback(() => {
+    if (scope === null) return;
+    void refreshRepository({
+      environmentId: scope.environmentId,
+      input: { cwd: scope.cwd, domains: ["worktree", "stashes"] },
+    });
+  }, [refreshRepository, scope]);
+
+  const scopeKey = scope === null ? null : JSON.stringify([scope.environmentId, scope.cwd]);
+  const [lastGood, setLastGood] = useState<{
+    readonly scopeKey: string;
+    readonly status: WorkingCopyStatusResult;
+  } | null>(null);
+  useEffect(() => {
+    const nextStatus = query.data;
+    if (scopeKey === null || nextStatus === null) return;
+    setLastGood((current) =>
+      current?.scopeKey === scopeKey && current.status === nextStatus
+        ? current
+        : { scopeKey, status: nextStatus },
+    );
+  }, [query.data, scopeKey]);
+  // A failed background refresh must not blank a perfectly usable tree. The
+  // error band says the snapshot may be stale while the last good data remains
+  // actionable, matching VS Code's stale-while-revalidate behavior.
+  const status = query.data ?? (lastGood?.scopeKey === scopeKey ? lastGood.status : null);
+
+  const [failureStreak, setFailureStreak] = useState(0);
+  const [dismissed, setDismissed] = useState(false);
+  const refreshPendingRef = useRef(query.isPending);
+  refreshPendingRef.current = query.isPending;
+  const queuedRefreshRef = useRef(false);
+  const requestRefresh = useCallback(() => {
+    if (scopeKey === null) return;
+    if (refreshPendingRef.current) {
+      queuedRefreshRef.current = true;
+      return;
+    }
+    query.refresh();
+  }, [query.refresh, scopeKey]);
+
+  // Multiple mutation invalidations, status pushes and poll ticks may arrive
+  // during one read. Collapse them into at most one follow-up read.
+  useEffect(() => {
+    if (query.isPending || !queuedRefreshRef.current || scopeKey === null) return;
+    queuedRefreshRef.current = false;
+    query.refresh();
+  }, [query.isPending, query.refresh, scopeKey]);
+
+  useEffect(() => {
+    setFailureStreak(0);
+    setDismissed(false);
+    queuedRefreshRef.current = false;
+  }, [scopeKey]);
+
+  useEffect(() => {
+    if (query.isPending) return;
+    setFailureStreak((current) => nextStatusFailureStreak(current, query.error !== null));
+    if (query.error === null) setDismissed(false);
+  }, [query.error, query.isPending]);
+
+  // Coming back to the tab re-reads every active view once. `focus` and
+  // `visibilitychange` fire together, so one short window collapses the pair.
+  const lastRestoreRef = useRef(0);
+  useEffect(() => {
+    if (scope === null || !options.visible || typeof window === "undefined") return;
+    const restore = () => {
+      if (document.hidden) return;
+      const now = Date.now();
+      if (now - lastRestoreRef.current < RESTORE_REFRESH_WINDOW_MS) return;
+      lastRestoreRef.current = now;
+      refreshWorktree();
+    };
+    window.addEventListener("focus", restore);
+    document.addEventListener("visibilitychange", restore);
+    return () => {
+      window.removeEventListener("focus", restore);
+      document.removeEventListener("visibilitychange", restore);
+    };
+  }, [options.visible, refreshWorktree, scope]);
+
+  /**
+   * fork: f4 F-29 — the poll interval is NOT re-created on every busy
+   * transition. `options.busy` used to be a dependency of the effect, so a
+   * burst of activity restarted the 15 s timer continuously and it could never
+   * fire. Busy is read through a ref inside the tick instead.
+   */
+  const pollBusyRef = useRef(options.busy);
+  pollBusyRef.current = options.busy;
+  const isRepo = status?.isRepo ?? null;
+  useEffect(() => {
+    if (
+      !shouldPollWorkingCopy({
+        visible: options.visible,
+        hasCwd: scope !== null,
+        busy: false,
+        isRepo,
+      })
+    ) {
+      return;
+    }
+    const timer = window.setInterval(() => {
+      // Skip a tick while a mutation is in flight rather than tearing the timer
+      // down and building a new one.
+      if (pollBusyRef.current) return;
+      // fork: f4 F-29 — the `visible` prop is hard-coded `true` by the only
+      // call site, so the document's own visibility is the real gate on
+      // "no work while nobody is looking".
+      if (typeof document !== "undefined" && document.hidden) return;
+      requestRefresh();
+    }, WORKING_COPY_POLL_INTERVAL_MS);
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [isRepo, options.visible, requestRefresh, scope]);
+
+  const dismissErrorBanner = useCallback(() => {
+    setDismissed(true);
+  }, []);
+
+  return {
+    status,
+    isPending: query.isPending,
+    isRefreshing: query.isPending && status !== null,
+    showErrorBanner: shouldShowStatusErrorBanner({
+      consecutiveFailures: failureStreak,
+      dismissed,
+    }),
+    errorMessage: query.error,
+    dismissErrorBanner,
+    refresh: refreshAll,
+  };
+}
+
+/** Focus and visibility restore fire back to back; treat them as one. */
+const RESTORE_REFRESH_WINDOW_MS = 1_000;
+
+// ─── Actions ────────────────────────────────────────────────────────────────
+
+export interface WorkingCopyActions {
+  readonly busy: ReadonlySet<string>;
+  readonly isBusy: (key: string) => boolean;
+  readonly stage: (paths: ReadonlyArray<string>) => Promise<void>;
+  readonly unstage: (paths: ReadonlyArray<string>) => Promise<void>;
+  readonly discard: (paths: ReadonlyArray<string> | null) => Promise<void>;
+  readonly commit: (
+    message: string,
+    options?: { readonly stageAllFirst: boolean },
+  ) => Promise<boolean>;
+  readonly amend: (message: string) => Promise<boolean>;
+  readonly undoLastCommit: () => Promise<void>;
+  readonly resolveConflict: (path: string, side?: "ours" | "theirs") => Promise<void>;
+  readonly abortOperation: (operation: WorkingCopyOperation) => Promise<void>;
+  readonly stashPush: (message: string, includeUntracked: boolean) => Promise<void>;
+  /**
+   * fork: remote Git — every stash mutation names the entry as displayed:
+   * position, commit and reflog identity travel together and the server
+   * refuses the request once any of them no longer match.
+   */
+  readonly stashApply: (entry: WorkingCopyStashEntry) => Promise<void>;
+  readonly stashPop: (entry: WorkingCopyStashEntry) => Promise<void>;
+  readonly stashDrop: (entry: WorkingCopyStashEntry) => Promise<void>;
+  readonly restoreBackup: (entry: WorkingCopyStashEntry) => Promise<void>;
+  readonly cherryPick: (hash: string) => Promise<void>;
+  readonly revertCommit: (hash: string, mainline?: number) => Promise<void>;
+  readonly checkoutCommit: (hash: string) => Promise<void>;
+  readonly resetToCommit: (hash: string, mode: "soft" | "mixed" | "hard") => Promise<void>;
+  readonly tagCommit: (hash: string, name: string) => Promise<void>;
+  readonly applyPatch: (
+    patch: string,
+    flags: { cached?: boolean; reverse?: boolean },
+  ) => Promise<boolean>;
+  /**
+   * fork: f4 AI commit message. Resolves to the generated message, or `null`
+   * when generation failed (already toasted) — it NEVER writes the draft
+   * itself; the composer decides what to do with the text.
+   */
+  readonly generateCommitMessage: (options: { readonly amend: boolean }) => Promise<string | null>;
+}
+
+/** The busy key the ✨ button watches. One generation per panel at a time. */
+export const GENERATE_COMMIT_MESSAGE_BUSY_KEY = actionBusyKey("generate-commit-message");
+
+export function useWorkingCopyActions(
+  scope: SourceControlScope | null,
+  confirmWith: ConfirmFn,
+  /** fork: remote Git — the server advertises `workingCopyStashIdentity`. */
+  stashIdentitySupported: boolean,
+): WorkingCopyActions {
+  const [busy, setBusy] = useState<ReadonlySet<string>>(() => new Set<string>());
+
+  const stagePaths = useAtomCommand(workingCopyEnvironment.stagePaths);
+  const unstagePaths = useAtomCommand(workingCopyEnvironment.unstagePaths);
+  const discardPaths = useAtomCommand(workingCopyEnvironment.discardPaths);
+  const restoreDiscardBackup = useAtomCommand(workingCopyEnvironment.restoreDiscardBackup);
+  const commitStaged = useAtomCommand(workingCopyEnvironment.commitStaged);
+  const amendCommit = useAtomCommand(workingCopyEnvironment.amendCommit);
+  const undoCommit = useAtomCommand(workingCopyEnvironment.undoLastCommit);
+  const resolveConflictCommand = useAtomCommand(workingCopyEnvironment.resolveConflict);
+  const abortOperationCommand = useAtomCommand(workingCopyEnvironment.abortOperation);
+  const stashPushCommand = useAtomCommand(workingCopyEnvironment.stashPush);
+  const stashApplyCommand = useAtomCommand(workingCopyEnvironment.stashApply);
+  const stashPopCommand = useAtomCommand(workingCopyEnvironment.stashPop);
+  const stashDropCommand = useAtomCommand(workingCopyEnvironment.stashDrop);
+  const cherryPickCommand = useAtomCommand(workingCopyEnvironment.cherryPick);
+  const revertCommand = useAtomCommand(workingCopyEnvironment.revertCommit);
+  const checkoutCommand = useAtomCommand(workingCopyEnvironment.checkoutCommit);
+  const resetCommand = useAtomCommand(workingCopyEnvironment.resetToCommit);
+  const tagCommand = useAtomCommand(workingCopyEnvironment.tagCommit);
+  const applyPatchCommand = useAtomCommand(workingCopyEnvironment.applyPatch);
+  const generateCommitMessageCommand = useAtomCommand(workingCopyEnvironment.generateCommitMessage); // fork: f4 AI commit message
+
+  const busyRef = useRef(busy);
+  busyRef.current = busy;
+
+  const setBusyKey = useCallback((key: string, active: boolean) => {
+    const next = withBusyKey(busyRef.current, key, active);
+    // Update the ref synchronously. React state does not commit until the next
+    // render, so ref-only-on-render leaves a same-tick double press unguarded.
+    busyRef.current = next;
+    setBusy(next);
+  }, []);
+
+  /**
+   * Re-entrant press on a key already in flight is a no-op. Doubling `discard`
+   * would leave two backup stashes and two undo toasts pointing at different
+   * states.
+   *
+   * fork: f4 F-04/F-06 — the drop is no longer SILENT. Every control that maps
+   * to a busy key now renders disabled + pending while that key is in flight
+   * (`isBusy`, `busyPaths`), so a dropped press should only be reachable from
+   * the keyboard, where nothing can be greyed out. When it does happen it says
+   * so, because "accepted and discarded with no feedback" is the defect.
+   */
+  const run = useCallback(
+    async <A>(
+      key: string,
+      title: string,
+      execute: () => Promise<AtomCommandResult<A, unknown>>,
+    ): Promise<A | null> => {
+      if (busyRef.current.has(key)) {
+        sourceControlInfoToast(BUSY_DROPPED_PRESS_TITLE);
+        return null;
+      }
+      setBusyKey(key, true);
+      try {
+        const result = await execute();
+        if (result._tag === "Failure") {
+          if (!isAtomCommandInterrupted(result)) {
+            const error = squashAtomCommandFailure(result);
+            errorToast(
+              isCwdDeniedError(error) ? "This folder is outside your open projects" : title,
+              failureMessage(result),
+            );
+          }
+          return null;
+        }
+        return result.value;
+      } finally {
+        setBusyKey(key, false);
+      }
+    },
+    [setBusyKey],
+  );
+
+  return useMemo<WorkingCopyActions>(() => {
+    const noScope = async () => undefined;
+    if (scope === null) {
+      const never = async () => {
+        await noScope();
+      };
+      const neverBool = async () => false;
+      return {
+        busy,
+        isBusy: () => false,
+        stage: never,
+        unstage: never,
+        discard: never,
+        commit: neverBool,
+        amend: neverBool,
+        undoLastCommit: never,
+        resolveConflict: never,
+        abortOperation: never,
+        stashPush: never,
+        stashApply: never,
+        stashPop: never,
+        stashDrop: never,
+        restoreBackup: never,
+        cherryPick: never,
+        revertCommit: never,
+        checkoutCommit: never,
+        resetToCommit: never,
+        tagCommit: never,
+        applyPatch: neverBool,
+        generateCommitMessage: async () => null,
+      };
+    }
+
+    const { environmentId, cwd } = scope;
+    const target = <I>(input: I) => ({ environmentId, input: { cwd, ...input } });
+
+    /**
+     * The wire identity of a listed entry, or `null` (already toasted) when
+     * this server cannot validate it. An identity-less request is never sent:
+     * an old server would resolve `stash@{n}` positionally and may hit the
+     * wrong entry after a renumbering.
+     */
+    const stashTarget = (entry: {
+      readonly ref: string;
+      readonly commit?: string | undefined;
+      readonly identity?: string | undefined;
+    }) => {
+      if (!stashIdentitySupported) {
+        errorToast(STASH_UNSUPPORTED_TITLE, STASH_UNSUPPORTED_SERVER);
+        return null;
+      }
+      if (entry.commit === undefined || entry.identity === undefined) {
+        errorToast(STASH_UNSUPPORTED_TITLE, STASH_UNSUPPORTED_ENTRY);
+        return null;
+      }
+      return target({
+        ref: entry.ref,
+        expectedCommit: entry.commit,
+        expectedIdentity: entry.identity,
+      });
+    };
+
+    const doUndoLastCommit = async (): Promise<boolean> => {
+      const result = await run(actionBusyKey("undo-commit"), "Could not undo the commit", () =>
+        undoCommit(target({})),
+      );
+      return result !== null;
+    };
+
+    return {
+      busy,
+      isBusy: (key) => busy.has(key),
+
+      stage: async (paths) => {
+        if (paths.length === 0) return;
+        await run(actionBusyKey("stage", paths.join(BUSY_KEY_SEPARATOR)), "Could not stage", () =>
+          stagePaths(target({ paths })),
+        );
+      },
+
+      unstage: async (paths) => {
+        if (paths.length === 0) return;
+        await run(
+          actionBusyKey("unstage", paths.join(BUSY_KEY_SEPARATOR)),
+          "Could not unstage",
+          () => unstagePaths(target({ paths })),
+        );
+      },
+
+      /**
+       * `null` means "everything" (the discard-all rung); the wire spells that
+       * as an empty `paths` array.
+       *
+       * Every scope asks before reaching Git. After confirmation the server
+       * takes a pathspec-stash backup when possible and the client offers Undo;
+       * `confirmedDestructive` also authorizes the old-Git fallback when no
+       * backup can be created.
+       */
+      discard: async (paths) => {
+        const key = actionBusyKey("discard", paths === null ? "*" : paths.join(BUSY_KEY_SEPARATOR));
+        const outcome = await confirmWith(confirmDiscardChanges(paths));
+        if (outcome !== "confirmed") return;
+
+        const result = await run(key, "Could not discard changes", () =>
+          discardPaths(
+            target({
+              paths: paths ?? [],
+              confirmedDestructive: true,
+            }),
+          ),
+        );
+        if (result === null) return;
+
+        if (result.requiresConfirmation === true) {
+          // A matching server cannot return this after the explicit flag, but
+          // do not silently issue a second destructive request if versions drift.
+          errorToast("Could not discard changes", "The server did not accept the confirmation.");
+          return;
+        }
+
+        if (!result.recoverable) {
+          toastManager.add(stackedThreadToast({ type: "success", title: discardToastText(paths) }));
+          return;
+        }
+        const backupRef = result.backupRef;
+        if (backupRef === undefined) {
+          if (result.warning !== undefined) {
+            toastManager.add(
+              stackedThreadToast({
+                type: "warning",
+                title: discardToastText(paths),
+                description: result.warning,
+                timeout: 0,
+              }),
+            );
+            return;
+          }
+          // `stash push` exited 0 with nothing to save: the rows were already
+          // clean. Saying "Discarded" here would be a lying state.
+          toastManager.add(stackedThreadToast({ type: "success", title: "Nothing to discard" }));
+          return;
+        }
+        const backupIdentity = result.backupIdentity;
+        if (backupIdentity === undefined || !stashIdentitySupported) {
+          // The backup exists but cannot be named safely; Undo would have to
+          // guess which entry to pop. Point at the list instead.
+          toastManager.add(
+            stackedThreadToast({
+              type: "success",
+              title: discardToastText(paths),
+              description:
+                `A backup was saved under Stashes & backups. ${result.warning ?? ""}`.trim(),
+            }),
+          );
+          return;
+        }
+        undoToast(
+          discardToastText(paths),
+          "Undo",
+          () => {
+            void run(
+              actionBusyKey("restore-backup", backupIdentity),
+              "Could not restore the backup",
+              () =>
+                restoreDiscardBackup(
+                  target({
+                    ref: backupRef,
+                    expectedCommit: backupRef,
+                    expectedIdentity: backupIdentity,
+                  }),
+                ),
+            );
+          },
+          result.warning,
+        );
+      },
+
+      /**
+       * Commit path, mirroring 2code's: when nothing is staged the client
+       * stages everything FIRST and aborts the commit if that staging fails.
+       * The server never runs `add` of its own — that is the §5.0.2 blocker.
+       */
+      commit: async (message, options) => {
+        if (options?.stageAllFirst) {
+          const staged = await run(actionBusyKey("stage", "*"), "Could not stage changes", () =>
+            // `STAGE_ALL_PATHS` is the wire spelling of "everything";
+            // the server runs one pathless `add -A` for it.
+            stagePaths(target({ paths: STAGE_ALL_PATHS })),
+          );
+          if (staged === null) return false;
+        }
+        const result = await run(actionBusyKey("commit"), "Could not commit", () =>
+          commitStaged(target({ message })),
+        );
+        if (result === null) return false;
+        undoToast(commitToastText(result.shortHash, result.filesChanged), "Undo", () => {
+          void doUndoLastCommit();
+        });
+        return true;
+      },
+
+      amend: async (message) => {
+        const result = await run(actionBusyKey("commit"), "Could not amend", () =>
+          amendCommit(target(message.trim().length > 0 ? { message } : {})),
+        );
+        return result !== null;
+      },
+
+      undoLastCommit: async () => {
+        // `run` already toasts the failure; adding an unconditional success
+        // toast on top of it showed both at once for the same action.
+        const undone = await doUndoLastCommit();
+        if (!undone) return;
+        toastManager.add(stackedThreadToast({ type: "success", title: undoCommitToastText() }));
+      },
+
+      resolveConflict: async (path, side) => {
+        await run(actionBusyKey("resolve", path), "Could not resolve the conflict", () =>
+          resolveConflictCommand(target(side === undefined ? { path } : { path, side })),
+        );
+      },
+
+      abortOperation: async (operation) => {
+        const outcome = await confirmWith(confirmAbortOperation(operation));
+        if (outcome !== "confirmed") return;
+        await run(actionBusyKey("abort"), `Could not abort the ${operation}`, () =>
+          abortOperationCommand(target({ operation })),
+        );
+      },
+
+      stashPush: async (message, includeUntracked) => {
+        await run(actionBusyKey("stash-push"), "Could not stash", () =>
+          stashPushCommand(
+            target(
+              message.trim().length > 0 ? { message, includeUntracked } : { includeUntracked },
+            ),
+          ),
+        );
+      },
+
+      stashApply: async (entry) => {
+        const request = stashTarget(entry);
+        if (request === null) return;
+        await run(
+          workingCopyBusyKey.stashApply(stashBusyId(entry)),
+          "Could not apply the stash",
+          () => stashApplyCommand(request),
+        );
+      },
+
+      stashPop: async (entry) => {
+        const request = stashTarget(entry);
+        if (request === null) return;
+        await run(workingCopyBusyKey.stashPop(stashBusyId(entry)), "Could not pop the stash", () =>
+          stashPopCommand(request),
+        );
+      },
+
+      /** The one stash action with no undo — hence the only stash confirm. */
+      stashDrop: async (entry) => {
+        const request = stashTarget(entry);
+        if (request === null) return;
+        // The confirmation names the entry captured before the dialog opened;
+        // the server compares that capture, not whatever is at `ref` by then.
+        const outcome = await confirmWith(
+          confirmStashDrop({ ref: entry.ref, message: entry.label }),
+        );
+        if (outcome !== "confirmed") return;
+        await run(
+          workingCopyBusyKey.stashDrop(stashBusyId(entry)),
+          "Could not drop the stash",
+          () => stashDropCommand(request),
+        );
+      },
+
+      restoreBackup: async (entry) => {
+        const request = stashTarget(entry);
+        if (request === null) return;
+        await run(
+          workingCopyBusyKey.restoreBackup(stashBusyId(entry)),
+          "Could not restore the backup",
+          () => restoreDiscardBackup(request),
+        );
+      },
+
+      cherryPick: async (hash) => {
+        const result = await run(actionBusyKey("cherry-pick", hash), "Could not cherry-pick", () =>
+          cherryPickCommand(target({ hash })),
+        );
+        if (result === null) return;
+        undoToast(commitToastText(result.shortHash, result.filesChanged), "Undo", () => {
+          void doUndoLastCommit();
+        });
+      },
+
+      revertCommit: async (hash, mainline) => {
+        const result = await run(actionBusyKey("revert", hash), "Could not revert", () =>
+          revertCommand(target(mainline === undefined ? { hash } : { hash, mainline })),
+        );
+        if (result === null) return;
+        undoToast(commitToastText(result.shortHash, result.filesChanged), "Undo", () => {
+          void doUndoLastCommit();
+        });
+      },
+
+      checkoutCommit: async (hash) => {
+        await run(actionBusyKey("checkout", hash), "Could not check out that commit", () =>
+          checkoutCommand(target({ hash })),
+        );
+      },
+
+      resetToCommit: async (hash, mode) => {
+        await run(actionBusyKey("reset", hash), "Could not reset", () =>
+          resetCommand(target({ hash, mode })),
+        );
+      },
+
+      tagCommit: async (hash, name) => {
+        await run(actionBusyKey("tag", hash), "Could not create the tag", () =>
+          tagCommand(target({ hash, name })),
+        );
+      },
+
+      applyPatch: async (patch, flags) => {
+        const result = await run(actionBusyKey("apply-patch"), "Could not apply the patch", () =>
+          applyPatchCommand(target({ patch, ...flags })),
+        );
+        return result !== null;
+      },
+
+      /**
+       * fork: f4 AI commit message. Not routed through `run` for one reason:
+       * "nothing to describe" is guidance rather than a failure, and rendering it in
+       * the same red, timeout-0 toast as a git stderr dump reads as a bug.
+       */
+      generateCommitMessage: async ({ amend }) => {
+        const key = GENERATE_COMMIT_MESSAGE_BUSY_KEY;
+        if (busyRef.current.has(key)) {
+          sourceControlInfoToast(BUSY_DROPPED_PRESS_TITLE);
+          return null;
+        }
+        setBusyKey(key, true);
+        try {
+          const result = await generateCommitMessageCommand(target(amend ? { amend } : {}));
+          if (result._tag === "Failure") {
+            if (isAtomCommandInterrupted(result)) return null;
+            const error = squashAtomCommandFailure(result);
+            if (isNothingStagedError(error)) {
+              toastManager.add(
+                stackedThreadToast({
+                  type: "info",
+                  title: describeWorkingCopyError(error),
+                  timeout: 6_000,
+                }),
+              );
+              return null;
+            }
+            errorToast(
+              isCwdDeniedError(error)
+                ? "This folder is outside your open projects"
+                : "Could not generate a commit message",
+              failureMessage(result),
+            );
+            return null;
+          }
+          return result.value.message;
+        } finally {
+          setBusyKey(key, false);
+        }
+      },
+    };
+  }, [
+    abortOperationCommand,
+    amendCommit,
+    applyPatchCommand,
+    busy,
+    checkoutCommand,
+    cherryPickCommand,
+    commitStaged,
+    confirmWith,
+    discardPaths,
+    generateCommitMessageCommand,
+    resetCommand,
+    resolveConflictCommand,
+    restoreDiscardBackup,
+    revertCommand,
+    run,
+    setBusyKey,
+    scope,
+    stagePaths,
+    stashApplyCommand,
+    stashDropCommand,
+    stashIdentitySupported,
+    stashPopCommand,
+    stashPushCommand,
+    tagCommand,
+    undoCommit,
+    unstagePaths,
+  ]);
+}

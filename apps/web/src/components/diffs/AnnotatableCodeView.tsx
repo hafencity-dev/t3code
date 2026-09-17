@@ -24,10 +24,30 @@ import { StyledDiffCodeView, type StyledDiffCodeViewOptions } from "./StyledDiff
 
 interface DiffCommentAnnotationEntry {
   id: string;
-  kind: "draft" | "comment";
+  // fork: f4 hunk staging — `hunk` entries carry an action cluster instead of
+  // comment text; they ride the annotation channel because it is the only
+  // virtualization-aware, measured seam the viewer exposes inside a file.
+  kind: "draft" | "comment" | "hunk";
   range: SelectedLineRange;
   rangeLabel: string;
   text: string;
+  /** Set only on `hunk` entries: which hunk of which file the cluster acts on. */
+  hunk?: { fileKey: string; index: number };
+}
+
+/** fork: f4 hunk staging — one action cluster's anchor inside a rendered file. */
+export interface HunkActionAnchor {
+  readonly fileKey: string;
+  readonly hunkIndex: number;
+  readonly side: AnnotationSide;
+  readonly lineNumber: number;
+  /**
+   * fork: f4 F-19 — opaque render state for this cluster (which action is in
+   * flight). It exists only so it can enter the item `version` hash below: the
+   * viewer memoises annotations on that hash, and a hunk entry whose id, label
+   * and text are all constant by construction can never repaint.
+   */
+  readonly state?: string | undefined;
 }
 
 interface DiffCommentAnnotationGroup {
@@ -95,6 +115,10 @@ interface AnnotatableCodeViewProps {
     fileKey: string,
     collapsed: boolean,
   ) => ReactNode;
+  // fork: f4 hunk staging — both absent for every upstream caller, which keeps
+  // the rendered item list byte-identical to today.
+  hunkActionAnchors?: ReadonlyArray<HunkActionAnchor>;
+  renderHunkActions?: (fileKey: string, hunkIndex: number) => ReactNode;
 }
 
 interface DiffSelectionContext {
@@ -115,6 +139,8 @@ export function AnnotatableCodeView({
   renderHeaderMetadata,
   renderHeaderFilenameSuffix,
   renderHeaderPrefix,
+  hunkActionAnchors,
+  renderHunkActions,
 }: AnnotatableCodeViewProps) {
   const addReviewComment = useComposerDraftStore((store) => store.addReviewComment);
   const removeReviewComment = useComposerDraftStore((store) => store.removeReviewComment);
@@ -153,8 +179,30 @@ export function AnnotatableCodeView({
               text: comment.text,
             });
           }, []);
+        // fork: f4 hunk staging — one entry per hunk, with an id derived from
+        // the file key and the hunk index so the cluster keeps its identity
+        // across re-renders. Its `text` carries the anchor's render state, so a
+        // pending action DOES change the version hash (F-19).
+        const withHunks = (hunkActionAnchors ?? [])
+          .filter((anchor) => anchor.fileKey === fileKey)
+          .reduce<DiffCommentLineAnnotation[]>((annotations, anchor) => {
+            const range: SelectedLineRange = {
+              start: anchor.lineNumber,
+              end: anchor.lineNumber,
+              side: anchor.side,
+              endSide: anchor.side,
+            };
+            return appendAnnotationEntry(annotations, range, {
+              id: `hunk:${fileKey}:${anchor.hunkIndex}`,
+              kind: "hunk",
+              range,
+              rangeLabel: "",
+              text: anchor.state ?? "",
+              hunk: { fileKey, index: anchor.hunkIndex },
+            });
+          }, persisted);
         const annotations =
-          draft?.fileKey === fileKey ? [...persisted, draft.annotation] : persisted;
+          draft?.fileKey === fileKey ? [...withHunks, draft.annotation] : withHunks;
         return {
           id: fileKey,
           type: "diff",
@@ -172,7 +220,7 @@ export function AnnotatableCodeView({
           ),
         };
       }),
-    [draft, files, reviewComments, sectionId],
+    [draft, files, hunkActionAnchors, reviewComments, sectionId],
   );
 
   const removeEntry = useCallback(
@@ -278,22 +326,33 @@ export function AnnotatableCodeView({
       }
       renderAnnotation={(annotation) => {
         const hasDraft = annotation.metadata.entries.some((entry) => entry.kind === "draft");
+        const hasHunkActions = annotation.metadata.entries.some((entry) => entry.kind === "hunk");
         return (
           <div
-            className={hasDraft ? "py-1" : "divide-y divide-border/30 border-y border-border/30"}
+            className={
+              hasDraft || hasHunkActions
+                ? "py-1"
+                : "divide-y divide-border/30 border-y border-border/30"
+            }
           >
-            {annotation.metadata.entries.map((entry) => (
-              <DiffCommentAnnotation
-                key={entry.id}
-                kind={entry.kind}
-                rangeLabel={entry.rangeLabel}
-                text={entry.kind === "draft" ? draftText : entry.text}
-                onTextChange={setDraftText}
-                onCancel={() => removeEntry(entry.id)}
-                onComment={(text) => submitEntry(entry.id, text)}
-                onDelete={() => removeEntry(entry.id)}
-              />
-            ))}
+            {annotation.metadata.entries.map((entry) =>
+              entry.kind === "hunk" ? (
+                <div key={entry.id}>
+                  {entry.hunk ? renderHunkActions?.(entry.hunk.fileKey, entry.hunk.index) : null}
+                </div>
+              ) : (
+                <DiffCommentAnnotation
+                  key={entry.id}
+                  kind={entry.kind}
+                  rangeLabel={entry.rangeLabel}
+                  text={entry.kind === "draft" ? draftText : entry.text}
+                  onTextChange={setDraftText}
+                  onCancel={() => removeEntry(entry.id)}
+                  onComment={(text) => submitEntry(entry.id, text)}
+                  onDelete={() => removeEntry(entry.id)}
+                />
+              ),
+            )}
           </div>
         );
       }}

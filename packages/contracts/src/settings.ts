@@ -613,6 +613,92 @@ export const CodexSettings = makeProviderSettingsSchema(
 );
 export type CodexSettings = typeof CodexSettings.Type;
 
+export const ClaudeCodexRoutingPromptMode = Schema.Literals(["managed", "custom", "none"]);
+export type ClaudeCodexRoutingPromptMode = typeof ClaudeCodexRoutingPromptMode.Type;
+
+export const ClaudeCodexTaskRoute = Schema.Literals(["claude", "codex", "adaptive"]);
+export type ClaudeCodexTaskRoute = typeof ClaudeCodexTaskRoute.Type;
+
+export const ClaudeCodexClaudeSubagentModel = Schema.Literals(["opus", "fable", "sonnet"]);
+export type ClaudeCodexClaudeSubagentModel = typeof ClaudeCodexClaudeSubagentModel.Type;
+
+export const ClaudeCodexClaudeSubagentModels = Schema.Struct({
+  exploration: Schema.optionalKey(ClaudeCodexClaudeSubagentModel),
+  implementation: Schema.optionalKey(ClaudeCodexClaudeSubagentModel),
+  verification: Schema.optionalKey(ClaudeCodexClaudeSubagentModel),
+  planning: Schema.optionalKey(ClaudeCodexClaudeSubagentModel),
+  design: Schema.optionalKey(ClaudeCodexClaudeSubagentModel),
+  review: Schema.optionalKey(ClaudeCodexClaudeSubagentModel),
+});
+export type ClaudeCodexClaudeSubagentModels = typeof ClaudeCodexClaudeSubagentModels.Type;
+
+export const ClaudeCodexSecondOpinionMode = Schema.Literals([
+  "off",
+  "plans",
+  "reviews",
+  "plans-and-reviews",
+]);
+export type ClaudeCodexSecondOpinionMode = typeof ClaudeCodexSecondOpinionMode.Type;
+
+/** Structured guidance for choosing the subagent that owns each kind of work.
+ * These are prompt preferences, not a second runtime router: the main session
+ * remains the orchestrator and Codex is reached through Agent. */
+export const ClaudeCodexModelPreferences = Schema.Struct({
+  /** Legacy fallback for settings saved before Claude models became per-category. */
+  claudeSubagentModel: ClaudeCodexClaudeSubagentModel.pipe(
+    Schema.withDecodingDefault(Effect.succeed("opus" as const)),
+  ),
+  claudeSubagentModels: ClaudeCodexClaudeSubagentModels.pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
+  ),
+  exploration: ClaudeCodexTaskRoute.pipe(
+    Schema.withDecodingDefault(Effect.succeed("codex" as const)),
+  ),
+  implementation: ClaudeCodexTaskRoute.pipe(
+    Schema.withDecodingDefault(Effect.succeed("codex" as const)),
+  ),
+  verification: ClaudeCodexTaskRoute.pipe(
+    Schema.withDecodingDefault(Effect.succeed("adaptive" as const)),
+  ),
+  planning: ClaudeCodexTaskRoute.pipe(
+    Schema.withDecodingDefault(Effect.succeed("claude" as const)),
+  ),
+  design: ClaudeCodexTaskRoute.pipe(Schema.withDecodingDefault(Effect.succeed("claude" as const))),
+  review: ClaudeCodexTaskRoute.pipe(Schema.withDecodingDefault(Effect.succeed("claude" as const))),
+  secondOpinion: ClaudeCodexSecondOpinionMode.pipe(
+    Schema.withDecodingDefault(Effect.succeed("plans-and-reviews" as const)),
+  ),
+});
+export type ClaudeCodexModelPreferences = typeof ClaudeCodexModelPreferences.Type;
+export const DEFAULT_CLAUDE_CODEX_MODEL_PREFERENCES: ClaudeCodexModelPreferences =
+  Schema.decodeSync(ClaudeCodexModelPreferences)({});
+
+/** Per-Claude-instance routing. Omitted from a Claude config means disabled,
+ * preserving the behavior of every pre-feature settings file. */
+export const ClaudeCodexRoutingSettings = Schema.Struct({
+  // Omitted or zero disables the total-duration limit; socket inactivity is separate.
+  requestTimeoutSeconds: Schema.optionalKey(
+    Schema.Union([
+      Schema.Literal(0),
+      Schema.Int.check(Schema.isBetween({ minimum: 60, maximum: 7200 })),
+    ]),
+  ),
+  enabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  model: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+  modelPreferences: ClaudeCodexModelPreferences.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_CLAUDE_CODEX_MODEL_PREFERENCES)),
+  ),
+  promptMode: ClaudeCodexRoutingPromptMode.pipe(
+    Schema.withDecodingDefault(Effect.succeed("managed" as const)),
+  ),
+  customPrompt: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+  additionalInstructions: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+});
+export type ClaudeCodexRoutingSettings = typeof ClaudeCodexRoutingSettings.Type;
+export const DEFAULT_CLAUDE_CODEX_ROUTING_SETTINGS: ClaudeCodexRoutingSettings = Schema.decodeSync(
+  ClaudeCodexRoutingSettings,
+)({});
+
 // Empty, or an integer from 100,000 to 1,000,000. Shared by the full
 // Claude settings schema and its patch so an out-of-range value fails at
 // the update that introduced it.
@@ -655,6 +741,11 @@ export const ClaudeSettings = makeProviderSettingsSchema(
         },
       }),
     ),
+    codexRouting: Schema.optionalKey(
+      ClaudeCodexRoutingSettings.pipe(
+        Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
+      ),
+    ),
     autoCompactWindow: TrimmedString.check(
       Schema.isPattern(CLAUDE_AUTO_COMPACT_WINDOW_PATTERN),
     ).pipe(
@@ -678,7 +769,7 @@ export type ClaudeSettings = typeof ClaudeSettings.Type;
 
 export const CursorSettings = makeProviderSettingsSchema(
   {
-    // Off by default like Grok and OpenCode. Users opt in from Settings.
+    // fork: only Codex and Claude Agent start enabled in 2code.
     enabled: Schema.Boolean.pipe(
       Schema.withDecodingDefault(Effect.succeed(false)),
       Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
@@ -841,7 +932,7 @@ export const OpenCodeSettings = makeProviderSettingsSchema(
       Schema.withDecodingDefault(Effect.succeed("")),
       Schema.annotateKey({
         title: "Server URL",
-        description: "Leave blank to let T3 Code spawn the server when needed.",
+        description: "Leave blank to let 2code spawn the server when needed.",
         providerSettingsForm: {
           placeholder: "http://127.0.0.1:4096",
           clearWhenEmpty: "omit",
@@ -1228,6 +1319,10 @@ export const ServerSettings = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
   observability: ObservabilitySettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+  // fork: f5 global GPT fast mode, independent of provider instance lifecycles
+  claudeCodexFastModeEnabled: Schema.Boolean.pipe(
+    Schema.withDecodingDefault(Effect.succeed(false)),
+  ),
   // Keyed by a user-chosen id so a source keeps its rows across edits. Entries
   // this build cannot decode round-trip untouched, as provider instances do.
   usageLimitSources: Schema.Record(UsageLimitSourceId, UsageLimitSourceConfig).pipe(
@@ -1353,6 +1448,7 @@ const ClaudeSettingsPatch = Schema.Struct({
   homePath: Schema.optionalKey(TrimmedString),
   customModels: Schema.optionalKey(Schema.Array(CustomModelSetting)),
   launchArgs: Schema.optionalKey(TrimmedString),
+  codexRouting: Schema.optionalKey(ClaudeCodexRoutingSettings),
   // Validated at the patch boundary so a typo fails the one update with a
   // schema error instead of a generic whole-settings failure.
   autoCompactWindow: Schema.optionalKey(
@@ -1498,6 +1594,7 @@ export const ServerSettingsPatch = Schema.Struct({
   // patches risk leaving driver-specific config in a half-merged state.
   // The web UI sends a fully-formed map every time it edits this field.
   providerInstances: Schema.optionalKey(Schema.Record(ProviderInstanceId, ProviderInstanceConfig)),
+  claudeCodexFastModeEnabled: Schema.optionalKey(Schema.Boolean), // fork: f5 GPT fast
   // Per-entry, unlike `providerInstances`: a client only ever adds or removes
   // one source, and sending the whole map races another edit that has not
   // echoed back yet. `null` removes; the server merges into its current map.

@@ -209,6 +209,7 @@ import {
   selectThreadPreviewMiniPlayer,
   usePreviewMiniPlayerStore,
 } from "../previewMiniPlayerStore";
+import { useSourceControlStore } from "../sourceControlStore"; // fork: f4 source-control panel
 import { isThreadOwnPullRequest } from "./pullRequest/pullRequestDetail.logic";
 import { PullRequestDetailPanel } from "./pullRequest/PullRequestDetailPanel";
 import { PullRequestDetailGhost } from "./pullRequest/PullRequestGhosts";
@@ -226,7 +227,11 @@ import {
   foldSubagentActivities,
 } from "@t3tools/client-runtime/state/subagentRuntime";
 import { BranchToolbar, type BranchToolbarHandle } from "./BranchToolbar";
-import { resolveShortcutCommand, shortcutLabelForCommand } from "../keybindings";
+import {
+  formatShortcutLabel, // fork: f4 source-control shortcut label
+  resolveShortcutCommand,
+  shortcutLabelForCommand,
+} from "../keybindings";
 import ThreadTerminalDrawer from "./ThreadTerminalDrawer";
 import {
   AlarmClockIcon,
@@ -239,6 +244,7 @@ import {
   WifiOffIcon,
 } from "lucide-react";
 import { cn, randomHex, randomUUID } from "~/lib/utils";
+import { COMPOSER_KEY_OWNING_SELECTOR } from "~/lib/composerTypeToFocus"; // fork: f4 focus model
 import { stackedThreadToast, toastManager } from "./ui/toast";
 import { decodeProjectScriptKeybindingRule } from "~/lib/projectScriptKeybindings";
 import { type NewProjectScriptInput } from "./ProjectScriptsControl";
@@ -487,6 +493,7 @@ import {
 } from "../lib/attachmentUploadQueue";
 import { sanitizeThreadErrorMessage } from "~/rpc/transportError";
 import { RightPanelSheet } from "./RightPanelSheet";
+import { SourceControlPanelShell } from "./sourceControl/SourceControlPanelShell"; // fork: f4
 import { previewEnvironment } from "../state/preview";
 import { clampFileAttachmentUploadBytes } from "@t3tools/client-runtime/state/attachments";
 import { appAtomRegistry } from "../rpc/atomRegistry";
@@ -618,6 +625,12 @@ const DevicePanel = lazy(() =>
   import("./device/DevicePanel").then((module) => ({ default: module.DevicePanel })),
 );
 const FilePreviewPanel = lazy(() => import("./files/FilePreviewPanel"));
+// fork: f4 source-control surface
+const SourceControlPanel = lazy(() =>
+  import("./sourceControl/SourceControlPanel").then((module) => ({
+    default: module.SourceControlPanel,
+  })),
+);
 const EMPTY_PENDING_FILE_SURFACE_IDS: ReadonlySet<string> = new Set();
 const TYPE_TO_FOCUS_EDITABLE_SELECTOR = [
   "input",
@@ -676,6 +689,10 @@ function shouldRedirectInputToComposer(event: Event): boolean {
   if (event.defaultPrevented) return false;
   if (eventPathContainsSelector(event, TYPE_TO_FOCUS_EDITABLE_SELECTOR)) return false;
   if (eventPathContainsSelector(event, TYPE_TO_FOCUS_INTERACTIVE_SELECTOR)) return false;
+  // fork: f4 focus model — an `aria-activedescendant` composite keeps focus on
+  // its container, so no leaf role above is ever in the path and every bare key
+  // it owns was stolen into the composer.
+  if (eventPathContainsSelector(event, COMPOSER_KEY_OWNING_SELECTOR)) return false;
   if (document.querySelector(TYPE_TO_FOCUS_FLOATING_LAYER_SELECTOR)) return false;
   return true;
 }
@@ -1996,6 +2013,7 @@ export default function ChatView(props: ChatViewProps) {
     selectActiveRightPanel(state.byThreadKey, activeThreadRef),
   );
   const diffOpen = activeRightPanelKind === "diff";
+  const sourceControlOpen = useSourceControlStore((state) => state.isOpen); // fork: f4
   const explicitDiffOpenRef = useRef<ScopedThreadRef | null>(null);
   useLayoutEffect(() => {
     const explicitThreadRef = explicitDiffOpenRef.current;
@@ -2039,6 +2057,7 @@ export default function ChatView(props: ChatViewProps) {
   );
   const previewPanelOpen = activeRightPanelKind === "preview" && isPreviewSupportedInRuntime();
   const rightPanelOpen = rightPanelState.isOpen;
+  const workspacePanelOpen = sourceControlOpen || rightPanelOpen; // fork: f4
   const { active: panelAnimationsActive, durationMs: panelAnimationDurationMs } =
     usePanelAnimationSettings();
   const activeTerminalDrawerPresence = usePanelPresence(
@@ -4551,6 +4570,11 @@ export default function ChatView(props: ChatViewProps) {
     if (!activeThreadRef || !activeProject) return;
     useRightPanelStore.getState().open(activeThreadRef, "files");
   }, [activeProject, activeThreadRef]);
+  // fork: f4 source-control panel
+  const toggleSourceControlSurface = useCallback(() => {
+    if (!activeProject && !sourceControlOpen) return;
+    useSourceControlStore.getState().toggleOpen();
+  }, [activeProject, sourceControlOpen]);
   const addAgentsSurface = useCallback(() => {
     if (!activeThreadRef) return;
     useRightPanelStore.getState().open(activeThreadRef, "agents");
@@ -5006,12 +5030,26 @@ export default function ChatView(props: ChatViewProps) {
   );
   const toggleRightPanel = useCallback(() => {
     if (!activeThreadRef) return;
+    // fork: f4 — in the sheet layout only one panel is visible at a time.
+    if (sourceControlOpen && shouldUseRightPanelSheet) {
+      useSourceControlStore.getState().setOpen(false);
+      if (!rightPanelOpen) {
+        useRightPanelStore.getState().toggleVisibility(activeThreadRef);
+      }
+      return;
+    }
     if (rightPanelOpen) {
       closePreviewPanel();
       return;
     }
     useRightPanelStore.getState().toggleVisibility(activeThreadRef);
-  }, [activeThreadRef, closePreviewPanel, rightPanelOpen]);
+  }, [
+    activeThreadRef,
+    closePreviewPanel,
+    rightPanelOpen,
+    shouldUseRightPanelSheet,
+    sourceControlOpen,
+  ]);
   const toggleRightPanelMaximized = useCallback(() => {
     if (!canMaximizeRightPanel) return;
     setMaximizedRightPanelThreadKey((threadKey) =>
@@ -9438,6 +9476,49 @@ export default function ChatView(props: ChatViewProps) {
     },
     [activeThreadRef, diffOpen, isServerThread, onDiffPanelOpen],
   );
+  // fork: f4 hunk staging — the changes list opens files in the EXISTING diff
+  // surface rather than a second viewer, and staged/unstaged are distinct
+  // selections so staging a hunk flips the file to the other side.
+  const onOpenWorkingCopyDiff = useCallback(
+    (file: {
+      readonly path: string;
+      readonly area: "staged" | "unstaged" | "conflicted";
+      readonly oldPath?: string | undefined;
+    }) => {
+      if (!activeThreadRef) return;
+      useDiffPanelStore.getState().selectWorkingCopyFile(activeThreadRef, {
+        // A conflicted file has no meaningful index side to stage from; it
+        // opens on the worktree side, where the resolution is happening.
+        side: file.area === "staged" ? "staged" : "unstaged",
+        filePath: file.path,
+        oldPath: file.oldPath,
+      });
+      useRightPanelStore.getState().open(activeThreadRef, "diff");
+      onDiffPanelOpen?.();
+    },
+    [activeThreadRef, onDiffPanelOpen],
+  );
+  // fork: f4 source-control panel — a file inside a History commit opens in the
+  // same diff surface, read-only.
+  const onOpenCommitFileDiff = useCallback(
+    (file: {
+      readonly hash: string;
+      readonly shortHash: string;
+      readonly path: string;
+      readonly oldPath?: string | undefined;
+    }) => {
+      if (!activeThreadRef) return;
+      useDiffPanelStore.getState().selectCommitFile(activeThreadRef, {
+        hash: file.hash,
+        shortHash: file.shortHash,
+        filePath: file.path,
+        oldPath: file.oldPath,
+      });
+      useRightPanelStore.getState().open(activeThreadRef, "diff");
+      onDiffPanelOpen?.();
+    },
+    [activeThreadRef, onDiffPanelOpen],
+  );
   // The revert handler is read from a ref at call-time so the callback
   // reference is fully stable and never busts TimelineRowCtx identity.
   const onRevertToTurnCountRef = useRef(onRevertToTurnCount);
@@ -9503,6 +9584,17 @@ export default function ChatView(props: ChatViewProps) {
       terminalAvailable={activeProject !== null}
       terminalOpen={terminalUiState.terminalOpen}
       terminalShortcutLabel={shortcutLabelForCommand(keybindings, "terminal.toggle")}
+      // fork: f4 source-control panel
+      sourceControlAvailable={activeProject !== null || sourceControlOpen}
+      sourceControlOpen={sourceControlOpen}
+      sourceControlShortcutLabel={formatShortcutLabel({
+        key: "g",
+        metaKey: false,
+        ctrlKey: false,
+        modKey: true,
+        shiftKey: true,
+        altKey: false,
+      })}
       rightPanelAvailable={activeProject !== null}
       rightPanelOpen={rightPanelOpen}
       rightPanelShortcutLabel={shortcutLabelForCommand(keybindings, "rightPanel.toggle")}
@@ -9512,6 +9604,7 @@ export default function ChatView(props: ChatViewProps) {
         rightPanelOpen && activeRightPanelSurface?.kind === "agents" ? 0 : agentPanelModel.liveCount
       }
       onToggleTerminal={toggleTerminalVisibility}
+      onToggleSourceControl={toggleSourceControlSurface} // fork: f4
       onToggleRightPanel={toggleRightPanel}
     />
   );
@@ -9526,14 +9619,16 @@ export default function ChatView(props: ChatViewProps) {
     >
       {!shouldUseRightPanelSheet ? (
         <span
-          aria-hidden={!rightPanelOpen}
+          aria-hidden={!workspacePanelOpen}
           className={cn(
             "flex shrink-0",
             panelAnimationsActive &&
               "motion-safe:transition-opacity motion-safe:[transition-duration:var(--panel-animation-duration)] motion-safe:ease-out",
-            rightPanelOpen ? "pointer-events-auto opacity-100" : "pointer-events-none opacity-0",
+            workspacePanelOpen
+              ? "pointer-events-auto opacity-100"
+              : "pointer-events-none opacity-0",
           )}
-          inert={!rightPanelOpen}
+          inert={!workspacePanelOpen}
         >
           <RightPanelMaximizeControl
             maximized={rightPanelMaximized}
@@ -9543,6 +9638,23 @@ export default function ChatView(props: ChatViewProps) {
       ) : null}
       <div className="pointer-events-auto flex h-full items-center">{panelToggleControls}</div>
     </div>
+  );
+  // fork: f4 source-control panel
+  const sourceControlScopeKey = `${environmentId}:${gitCwd ?? activeProject?.workspaceRoot ?? "no-project"}`;
+  const sourceControlContent = (
+    <Suspense fallback={null}>
+      <SourceControlPanel
+        key={sourceControlScopeKey}
+        mode="embedded"
+        environmentId={environmentId}
+        cwd={gitCwd}
+        scopeKey={sourceControlScopeKey}
+        repoLabel={activeProject?.title ?? gitCwd ?? "Repository"}
+        visible={sourceControlOpen}
+        onOpenDiff={onOpenWorkingCopyDiff}
+        onOpenCommitFile={onOpenCommitFileDiff}
+      />
+    </Suspense>
   );
   const rightPanelContent = activeThreadRef ? (
     renderedRightPanelSurface?.kind === "preview" ? (
@@ -9582,6 +9694,7 @@ export default function ChatView(props: ChatViewProps) {
         <DiffPanel
           key={activeThreadKey}
           mode="embedded"
+          threadRef={activeThreadRef} // fork: f4
           composerDraftTarget={composerDraftTarget}
           workspaceMutationId={workspaceMutationId}
         />
@@ -10323,7 +10436,23 @@ export default function ChatView(props: ChatViewProps) {
           {rightPanelContent}
         </RightPanelTabs>
       ) : null}
-      {rightPanelPresent && shouldUseRightPanelSheet && activeThreadRef ? (
+      {/* fork: f4 source-control panel — inline and sheet placements */}
+      {!shouldUseRightPanelSheet && sourceControlOpen ? (
+        <SourceControlPanelShell mode="inline" maximized={rightPanelMaximized}>
+          {sourceControlContent}
+        </SourceControlPanelShell>
+      ) : null}
+      {shouldUseRightPanelSheet && sourceControlOpen ? (
+        <RightPanelSheet
+          animationDurationMs={panelAnimationsActive ? panelAnimationDurationMs : 0}
+          open
+          onClose={() => useSourceControlStore.getState().setOpen(false)}
+        >
+          <SourceControlPanelShell mode="sheet" layoutControls={panelToggleControls}>
+            {sourceControlContent}
+          </SourceControlPanelShell>
+        </RightPanelSheet>
+      ) : shouldUseRightPanelSheet && rightPanelPresent && activeThreadRef ? (
         <RightPanelSheet
           animationDurationMs={panelAnimationsActive ? panelAnimationDurationMs : 0}
           open={rightPanelOpen}

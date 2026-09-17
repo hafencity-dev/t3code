@@ -16,6 +16,7 @@ export * from "./provider.ts";
 export * from "./providerInstance.ts";
 export * from "./providerSetup.ts";
 export * from "./providerRuntime.ts";
+export * from "./claudeCodexRouting.ts"; // fork: f5 Claude Code → Codex routing
 export * from "./providerUsageLimits.ts";
 export * from "./usageLimitSourceId.ts";
 export * from "./model.ts";
@@ -24,6 +25,7 @@ export * from "./server.ts";
 export * from "./settings.ts";
 export * from "./git.ts";
 export * from "./vcs.ts";
+export * from "./workingCopy.ts"; // fork: f4 source-control panel contract
 export * from "./sourceControl.ts";
 export * from "./projectClone.ts";
 export * from "./pullRequest.ts";

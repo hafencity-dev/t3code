@@ -63,6 +63,14 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.serverReportClientActivity]: AuthOrchestrationReadScope,
   [WS_METHODS.serverReportHostPowerState]: AuthOrchestrationOperateScope,
   [WS_METHODS.serverGetBackgroundPolicy]: AuthOrchestrationReadScope,
+  // fork: f5 — status is a pure read. Installing, signing in/out, and loading
+  // the live catalog operate the provider runtime, so standard paired clients
+  // use the same orchestration scope as the other provider settings.
+  [WS_METHODS.claudeCodexBridgeGetStatus]: AuthOrchestrationReadScope,
+  [WS_METHODS.claudeCodexBridgeInstall]: AuthOrchestrationOperateScope,
+  [WS_METHODS.claudeCodexBridgeStartSignIn]: AuthOrchestrationOperateScope,
+  [WS_METHODS.claudeCodexBridgeSignOut]: AuthOrchestrationOperateScope,
+  [WS_METHODS.claudeCodexBridgeGetModels]: AuthOrchestrationOperateScope,
   [WS_METHODS.cloudGetRelayClientStatus]: AuthRelayReadScope,
   [WS_METHODS.cloudInstallRelayClient]: AuthRelayWriteScope,
   [WS_METHODS.pullRequestsList]: AuthOrchestrationReadScope,
@@ -129,6 +137,43 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.vcsCreateRef]: AuthOrchestrationOperateScope,
   [WS_METHODS.vcsSwitchRef]: AuthOrchestrationOperateScope,
   [WS_METHODS.vcsInit]: AuthOrchestrationOperateScope,
+  // fork: f4 — source-control panel. Reads are `orchestration:read`; anything
+  // that touches the index, the worktree, refs or the stash is
+  // `orchestration:operate`, so a read-only paired client can look but not
+  // stage, commit, discard or reset.
+  [WS_METHODS.workingCopyStatus]: AuthOrchestrationReadScope,
+  [WS_METHODS.workingCopyDiff]: AuthOrchestrationReadScope,
+  [WS_METHODS.workingCopyFileAtRef]: AuthOrchestrationReadScope,
+  [WS_METHODS.workingCopyStagePaths]: AuthOrchestrationOperateScope,
+  [WS_METHODS.workingCopyUnstagePaths]: AuthOrchestrationOperateScope,
+  [WS_METHODS.workingCopyApplyPatch]: AuthOrchestrationOperateScope,
+  [WS_METHODS.workingCopyDiscardPaths]: AuthOrchestrationOperateScope,
+  [WS_METHODS.workingCopyRestoreDiscardBackup]: AuthOrchestrationOperateScope,
+  [WS_METHODS.workingCopyListDiscardBackups]: AuthOrchestrationReadScope,
+  [WS_METHODS.workingCopyCommitStaged]: AuthOrchestrationOperateScope,
+  [WS_METHODS.workingCopyAmendCommit]: AuthOrchestrationOperateScope,
+  [WS_METHODS.workingCopyUndoLastCommit]: AuthOrchestrationOperateScope,
+  [WS_METHODS.workingCopyLastCommitMessage]: AuthOrchestrationReadScope,
+  // fork: f4 AI commit message — a READ: it reads the staged diff and returns
+  // text. It never touches the index, the worktree, refs or the stash, so it
+  // takes the same scope as its sibling reads.
+  [WS_METHODS.workingCopyGenerateCommitMessage]: AuthOrchestrationReadScope,
+  [WS_METHODS.workingCopyLog]: AuthOrchestrationReadScope,
+  [WS_METHODS.workingCopyCommitDetail]: AuthOrchestrationReadScope,
+  [WS_METHODS.workingCopyCommitFileDiff]: AuthOrchestrationReadScope,
+  [WS_METHODS.workingCopyStashList]: AuthOrchestrationReadScope,
+  [WS_METHODS.workingCopyStashPush]: AuthOrchestrationOperateScope,
+  [WS_METHODS.workingCopyStashApply]: AuthOrchestrationOperateScope,
+  [WS_METHODS.workingCopyStashPop]: AuthOrchestrationOperateScope,
+  [WS_METHODS.workingCopyStashDrop]: AuthOrchestrationOperateScope,
+  [WS_METHODS.workingCopyResolveConflict]: AuthOrchestrationOperateScope,
+  [WS_METHODS.workingCopyAbortOperation]: AuthOrchestrationOperateScope,
+  [WS_METHODS.workingCopyCherryPick]: AuthOrchestrationOperateScope,
+  [WS_METHODS.workingCopyRevertCommit]: AuthOrchestrationOperateScope,
+  [WS_METHODS.workingCopyCheckoutCommit]: AuthOrchestrationOperateScope,
+  [WS_METHODS.workingCopyResetToCommit]: AuthOrchestrationOperateScope,
+  [WS_METHODS.workingCopyTagCommit]: AuthOrchestrationOperateScope,
+  // end fork: f4
   [WS_METHODS.reviewGetDiffPreview]: AuthReviewWriteScope,
   [WS_METHODS.reviewGetDiffFileContents]: AuthReviewWriteScope,
   [WS_METHODS.terminalOpen]: AuthTerminalOperateScope,

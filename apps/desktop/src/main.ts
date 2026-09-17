@@ -36,6 +36,7 @@ import * as DesktopAppActivation from "./app/DesktopAppActivation.ts";
 import * as DesktopAppIdentity from "./app/DesktopAppIdentity.ts";
 import * as DesktopConnectionCatalogStore from "./app/DesktopConnectionCatalogStore.ts";
 import * as DesktopClerk from "./app/DesktopClerk.ts";
+import * as DesktopDistribution from "./app/DesktopDistribution.ts"; // fork: 2code distribution
 import * as DesktopApplicationMenu from "./window/DesktopApplicationMenu.ts";
 import * as DesktopAssets from "./app/DesktopAssets.ts";
 import * as DesktopBackendConfiguration from "./backend/DesktopBackendConfiguration.ts";
@@ -75,11 +76,19 @@ const desktopEnvironmentLayer = Layer.unwrap(
     );
     const platform = yield* HostProcessPlatform;
     const processArch = yield* HostProcessArchitecture;
+    // fork: distribution metadata selects the isolated 2code production state.
+    const distribution = yield* DesktopDistribution.resolveDesktopDistribution({
+      appPath: metadata.appPath,
+      appVersion: metadata.appVersion,
+      isPackaged: metadata.isPackaged,
+    });
     return DesktopEnvironment.layer({
       dirname: __dirname,
       homeDirectory: NodeOS.homedir(),
       platform,
       processArch,
+      distributionId: distribution.id,
+      runtimeVersion: distribution.runtimeVersion,
       ...metadata,
     });
   }),

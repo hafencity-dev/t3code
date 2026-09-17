@@ -77,6 +77,7 @@ import * as GitManager from "./git/GitManager.ts";
 import * as EnvironmentTheme from "./environmentTheme.ts";
 import * as Keybindings from "./keybindings.ts";
 import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
+import { ClaudeCodexFastModeLive } from "./provider/claudeCodex/ClaudeCodexFastModeBinding.ts"; // fork: f5 GPT fast
 import { OrchestrationReactorLive } from "./orchestration/Layers/OrchestrationReactor.ts";
 import { RuntimeReceiptBusLive } from "./orchestration/Layers/RuntimeReceiptBus.ts";
 import { ProviderRuntimeIngestionLive } from "./orchestration/Layers/ProviderRuntimeIngestion.ts";
@@ -105,6 +106,7 @@ import * as VcsProcess from "./vcs/VcsProcess.ts";
 import * as VcsProvisioningService from "./vcs/VcsProvisioningService.ts";
 import * as VcsStatusBroadcaster from "./vcs/VcsStatusBroadcaster.ts";
 import * as ProjectCloneTracker from "./project/ProjectCloneTracker.ts";
+import * as WorkingCopyService from "./vcs/workingCopy/WorkingCopyService.ts"; // fork: f4 source-control panel
 import * as GitWorkflowService from "./git/GitWorkflowService.ts";
 import * as ReviewService from "./review/ReviewService.ts";
 import * as SourceControlProviderRegistry from "./sourceControl/SourceControlProviderRegistry.ts";
@@ -372,6 +374,21 @@ const VcsLayerLive = Layer.empty.pipe(
   Layer.provideMerge(VcsProjectConfig.layer),
   Layer.provideMerge(VcsDriverRegistryLayerLive),
   Layer.provideMerge(VcsProvisioningService.layer.pipe(Layer.provide(VcsDriverRegistryLayerLive))),
+  // fork: f4 — source-control panel. Its remaining requirements
+  // (`ProjectionSnapshotQuery` for the cwd containment guard, plus
+  // `ServerSettingsService` / `ProviderRegistry` / `ProviderInstanceRegistry`
+  // for the AI commit message) are satisfied further down
+  // `RuntimeCoreDependenciesLive` / `RuntimeDependenciesLive`, which is why
+  // this rides an existing chain rather than adding a pipe step there:
+  // `Layer.pipe` maxes out at 20 arguments. `TextGeneration.layer` is provided
+  // here because `GitManagerLayerLive` exposes it *earlier* in that chain,
+  // i.e. on the consuming side of this layer.
+  Layer.provideMerge(
+    WorkingCopyService.layer.pipe(
+      Layer.provide(VcsDriverRegistryLayerLive),
+      Layer.provide(TextGeneration.layer), // fork: f4 AI commit message
+    ),
+  ),
   Layer.provideMerge(GitWorkflowLayerLive),
   Layer.provideMerge(ReviewLayerLive),
   Layer.provideMerge(SourceControlRepositoryServiceLayerLive),
@@ -782,7 +799,11 @@ const makeServerLayer = Layer.unwrap(
         ],
         { concurrency: "unbounded" },
       ).pipe(Effect.asVoid),
-    }).pipe(Layer.provideMerge(RuntimeDependenciesLive), Layer.provide(launcherLayer));
+    }).pipe(
+      Layer.provide(ClaudeCodexFastModeLive), // fork: f5 initialize before autonomous startup resumes
+      Layer.provideMerge(RuntimeDependenciesLive),
+      Layer.provide(launcherLayer),
+    );
 
     const routesLayer = HttpRouter.serve(makeRoutesLayer.pipe(Layer.provide(launcherLayer)), {
       disableLogger: !config.logWebSocketEvents,

@@ -18,6 +18,7 @@ export type SettingsPath =
   | "/settings/keybindings"
   | "/settings/snap-shot"
   | "/settings/providers"
+  | "/settings/model-routing" // fork: f5 Claude Code → Codex routing
   | "/settings/integrations"
   | "/settings/source-control"
   | "/settings/storage"
@@ -87,6 +88,7 @@ export const SETTINGS_SECTION_LABELS: Readonly<Record<SettingsPath, string>> = {
   "/settings/keybindings": "Keybindings",
   "/settings/snap-shot": "SnapShots",
   "/settings/providers": "Providers",
+  "/settings/model-routing": "Model Routing", // fork: f5
   "/settings/integrations": "Integrations",
   "/settings/source-control": "Source Control",
   "/settings/storage": "Storage",
@@ -546,6 +548,42 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["refresh availability versions auth state models background probes seconds off"],
     providerSettingsOnly: true,
   },
+  // fork: f5 Claude Code → Codex routing
+  {
+    id: "model-routing",
+    title: "Claude Code → Codex",
+    to: "/settings/model-routing",
+  },
+  {
+    id: "model-routing-account",
+    title: "Codex bridge account",
+    to: "/settings/model-routing",
+    targetId: "model-routing",
+  },
+  {
+    id: "model-routing-timeout",
+    title: "Routing request timeout",
+    to: "/settings/model-routing",
+    searchTerms: ["gpt codex bridge timeout tokens limits compact duration"],
+  },
+  // fork: f5 GPT fast
+  {
+    id: "model-routing-gpt-fast",
+    title: "GPT Fast",
+    to: "/settings/model-routing",
+    searchTerms: ["gpt fast priority codex bridge server-wide main agent subagents"],
+  },
+  {
+    id: "model-routing-preferences",
+    title: "Routing preferences",
+    searchTerms: ["model preferences subagent claude codex"],
+    to: "/settings/model-routing",
+  },
+  {
+    id: "model-routing-prompt",
+    title: "Prompt instructions",
+    to: "/settings/model-routing",
+  },
   {
     id: "agent-browser-access",
     title: "Agent browser access",
@@ -805,6 +843,7 @@ const SETTINGS_CATEGORY_SCOPES: Readonly<Record<SettingsPath, SettingsSearchScop
   // environment at any selection. Neither needs a particular scope to render.
   "/settings/keybindings": null,
   "/settings/providers": null,
+  "/settings/model-routing": null,
   "/settings/integrations": null,
   "/settings/source-control": "environment-defaults",
   "/settings/storage": "project-defaults",

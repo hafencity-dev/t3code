@@ -20,11 +20,12 @@ import {
   KeyboardIcon,
   Link2Icon,
   PaletteIcon,
+  RouteIcon, // fork: f5 Claude Code → Codex routing
   SearchIcon,
   Settings2Icon,
   XIcon,
 } from "lucide-react";
-import { useLocation, useNavigate } from "@tanstack/react-router";
+import { useLocation, useNavigate, useSearch } from "@tanstack/react-router";
 
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
@@ -82,6 +83,7 @@ const SETTINGS_SECTION_ICONS: Readonly<
   "/settings/keybindings": KeyboardIcon,
   "/settings/snap-shot": SnapShotIcon,
   "/settings/providers": BotIcon,
+  "/settings/model-routing": RouteIcon, // fork: f5
   "/settings/integrations": BlocksIcon,
   "/settings/source-control": GitBranchIcon,
   "/settings/storage": HardDriveIcon,
@@ -107,7 +109,7 @@ function SettingsSectionIcon({ to }: { to: SettingsPath }) {
 export function SettingsSidebarNav({ pathname }: { pathname: string }) {
   const navigate = useNavigate();
   const currentHash = useLocation({ select: (location) => location.hash });
-  const currentSearch = useLocation({ select: (location) => location.search });
+  const currentSearch = useSearch({ strict: false });
   const scopeSearch = useMemo(() => validateSettingsScopeSearch(currentSearch), [currentSearch]);
   const navItems = SETTINGS_NAV_ITEMS.filter(
     (item) => item.to !== "/settings/projects" || isSettingsOverviewVisible(scopeSearch),

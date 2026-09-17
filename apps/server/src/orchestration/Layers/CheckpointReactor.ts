@@ -483,16 +483,21 @@ const make = Effect.gen(function* () {
       return;
     }
 
-    const local = yield* vcsStatusBroadcaster.refreshLocalStatus(sessionRuntime.value.cwd).pipe(
-      Effect.catch((error) =>
-        Effect.logWarning("failed to refresh local git status after turn completion", {
-          threadId: event.threadId,
-          turnId: event.turnId ?? null,
-          cwd: sessionRuntime.value.cwd,
-          detail: error.message,
-        }).pipe(Effect.as(null)),
-      ),
-    );
+    // fork: agent writes can preserve the aggregate summary (stage/unstage).
+    // Checkpoint refs live under refs/t3/checkpoints, invisible to ref lists;
+    // agent branch changes reach clients through the status fingerprint.
+    const local = yield* vcsStatusBroadcaster
+      .refreshLocalStatus(sessionRuntime.value.cwd, ["worktree"])
+      .pipe(
+        Effect.catch((error) =>
+          Effect.logWarning("failed to refresh local git status after turn completion", {
+            threadId: event.threadId,
+            turnId: event.turnId ?? null,
+            cwd: sessionRuntime.value.cwd,
+            detail: error.message,
+          }).pipe(Effect.as(null)),
+        ),
+      );
     if (local !== null) {
       yield* followWorktreeBranchDrift({
         threadId: event.threadId,

@@ -259,7 +259,7 @@ describe("desktop update UI helpers", () => {
         availableVersion: "1.1.0",
         downloadedVersion: "1.1.1",
       }),
-    ).toContain("Install update 1.1.1 and restart T3 Code?");
+    ).toContain("Install update 1.1.1 and restart 2code?");
   });
 
   it("falls back to generic install confirmation copy when no version is available", () => {
@@ -268,18 +268,37 @@ describe("desktop update UI helpers", () => {
         availableVersion: null,
         downloadedVersion: null,
       }),
-    ).toContain("Install update and restart T3 Code?");
+    ).toContain("Install update and restart 2code?");
   });
 
-  it("keeps the same install confirmation copy across desktop platforms", () => {
-    expect(
-      getDesktopUpdateInstallConfirmationMessage({
+  it("warns Windows users that a silent installation can take several minutes", () => {
+    const message = getDesktopUpdateInstallConfirmationMessage(
+      {
         availableVersion: "1.1.0",
         downloadedVersion: "1.1.0",
-      }),
-    ).toBe(
-      "Install update 1.1.0 and restart T3 Code?\n\nAny running tasks will be interrupted. Make sure you're ready before continuing.",
+      },
+      "Win32",
     );
+
+    expect(message).toContain("Install update 1.1.0 and restart 2code?");
+    expect(message).toContain("may remain closed for several minutes");
+    expect(message).toContain("no installer window may appear");
+    expect(message).toContain("will reopen automatically");
+  });
+
+  it("keeps the additional silent installation warning Windows-specific", () => {
+    const message = getDesktopUpdateInstallConfirmationMessage(
+      {
+        availableVersion: "1.1.0",
+        downloadedVersion: "1.1.0",
+      },
+      "MacIntel",
+    );
+
+    expect(message).toBe(
+      "Install update 1.1.0 and restart 2code?\n\nAny running tasks will be interrupted. Make sure you're ready before continuing.",
+    );
+    expect(message).not.toContain("may remain closed for several minutes");
   });
 });
 

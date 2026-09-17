@@ -4,6 +4,9 @@ T3 Code uses Claude Code's login and configuration. Start with the default provi
 for one account; [provider setup](./install.md#providers) covers installation and
 shared provider settings.
 
+To use GPT/Codex models as Claude Code subagents through the Haiku slot, see
+[Claude Code → Codex Model Routing](./claude-codex-model-routing.md).
+
 ## Separate accounts or configurations
 
 Use a separate Claude config directory for each account. This also works for named
@@ -36,6 +39,24 @@ state. Claude does not have Codex's shared-home and shadow-home arrangement.
 
 For presets that differ only in API keys or endpoints, use the instance's
 **Environment variables**. Variable assignments do not belong in **Launch arguments**.
+
+## Claude Plan Usage
+
+For a Claude.ai subscription, the sidebar shows the usage windows reported by Claude Code, such as
+the current session window, the all-model weekly window, and any model-specific weekly window. Each
+row includes its used percentage and reset countdown. Usage at 80% or above is highlighted.
+
+Use the refresh button in the usage header to update that Claude instance. T3 Code also refreshes
+the data with its normal provider health check. A short server-side cache prevents repeated clicks
+or multiple connected clients from spawning redundant Claude Code status processes.
+
+The shared **Usage** group starts expanded. Select its header to collapse it; T3 Code remembers the
+choice locally across the normal and Session Grid sidebars.
+
+Multiple Claude instances are shown separately. The data comes from the environment running Claude
+Code, so it also works when the sidebar is connected remotely. Claude Code does not expose plan
+limits for API-key, Bedrock, Vertex, or other non-Claude.ai sessions; the usage block stays hidden for
+those instances.
 
 Claude Code's verbose mode can stay enabled when you use Claude for text generation, including
 thread titles, branch names, commit messages, and pull request descriptions. On a remote connection,

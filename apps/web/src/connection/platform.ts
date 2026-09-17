@@ -117,16 +117,20 @@ const wakeupsLayer = Wakeups.layer({
 });
 
 function clientMetadata() {
-  return clientPresentationMetadata({
-    appVersion: APP_VERSION,
-    hosted: isHostedStaticApp(),
-    identity: {
-      userAgent: navigator.userAgent,
-      platform: navigator.platform,
-      maxTouchPoints: navigator.maxTouchPoints,
-    },
-    desktopBridge: window.desktopBridge,
-  });
+  const desktop = window.desktopBridge !== undefined;
+  return {
+    ...clientPresentationMetadata({
+      appVersion: APP_VERSION,
+      hosted: isHostedStaticApp(),
+      identity: {
+        userAgent: navigator.userAgent,
+        platform: navigator.platform,
+        maxTouchPoints: navigator.maxTouchPoints,
+      },
+      desktopBridge: window.desktopBridge,
+    }),
+    label: desktop ? "2code Desktop" : "2code Web",
+  };
 }
 
 function sshPreparationError(cause: unknown) {

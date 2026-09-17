@@ -80,7 +80,7 @@ export function resolveVersionMismatch(
   return {
     clientVersion: normalizedClientVersion,
     serverVersion: normalizedServerVersion,
-    hint: "Version mismatch. Try syncing the client and server to the same T3 Code version.",
+    hint: "Version mismatch. Try syncing the client and server to the same 2code version.",
   };
 }
 
@@ -119,8 +119,12 @@ export function manualServerUpdateCommand(targetVersion: string): string {
   return `npx t3@${targetVersion}`;
 }
 
+/** One sentence telling the user how to resolve version skew for a server,
+    matched to the update path it offers. */
 export function serverUpdateGuidance(capability: ServerSelfUpdateCapability): string {
-  return capability === "desktop-managed" ? "Update the desktop app" : "Update to stay in sync";
+  return capability === "desktop-managed"
+    ? "Update the 2code desktop app"
+    : "Update to stay in sync";
 }
 
 export function buildVersionMismatchDismissalKey(

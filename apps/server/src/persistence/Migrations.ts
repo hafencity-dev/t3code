@@ -9,6 +9,8 @@
  */
 
 import * as Migrator from "effect/unstable/sql/Migrator";
+
+import { reconcileLegacy2codeMigrationLedger } from "./fork/reconcileLegacy2codeMigrations.ts"; // fork: 2code ledger
 import * as Effect from "effect/Effect";
 
 // Import all migrations statically
@@ -164,6 +166,7 @@ export interface RunMigrationsOptions {
 export const runMigrations = Effect.fn("runMigrations")(function* ({
   toMigrationInclusive,
 }: RunMigrationsOptions = {}) {
+  yield* reconcileLegacy2codeMigrationLedger(); // fork: 2code ledger
   const executedMigrations = yield* run({ loader: makeMigrationLoader(toMigrationInclusive) });
   const migrations = executedMigrations.map(([id, name]) => `${id}_${name}`);
   yield* migrations.length === 0

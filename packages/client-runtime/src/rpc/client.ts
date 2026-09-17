@@ -63,6 +63,8 @@ export type EnvironmentSubscriptionRpcTag =
 export type EnvironmentStreamCommandRpcTag =
   | typeof WS_METHODS.cloudInstallRelayClient
   | typeof WS_METHODS.serverUpdateServerWithProgress
+  // fork: f5 — same one-shot login lifecycle as provider sign-in.
+  | typeof WS_METHODS.claudeCodexBridgeStartSignIn
   | typeof WS_METHODS.gitRunStackedAction;
 
 export type EnvironmentStreamRpcTag =

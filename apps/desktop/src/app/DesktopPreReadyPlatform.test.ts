@@ -13,6 +13,7 @@ const {
   setDesktopNameMock,
   mkdirSyncMock,
   writeFileSyncMock,
+  readFileSyncMock,
 } = vi.hoisted(() => ({
   appendSwitchMock: vi.fn(),
   getSwitchValueMock: vi.fn(),
@@ -21,11 +22,14 @@ const {
   setDesktopNameMock: vi.fn(),
   mkdirSyncMock: vi.fn(),
   writeFileSyncMock: vi.fn(),
+  readFileSyncMock: vi.fn(() => "{}"),
 }));
 
 vi.mock("electron", () => ({
   app: {
     setDesktopName: setDesktopNameMock,
+    isPackaged: true,
+    getAppPath: () => "/app",
     getVersion: () => "0.0.37",
     commandLine: {
       appendSwitch: appendSwitchMock,
@@ -39,7 +43,7 @@ vi.mock("electron", () => ({
 }));
 
 vi.mock("node:fs", () => ({
-  readFileSync: () => "{}",
+  readFileSync: readFileSyncMock,
   mkdirSync: mkdirSyncMock,
   writeFileSync: writeFileSyncMock,
 }));
@@ -55,6 +59,7 @@ describe("DesktopPreReadyPlatform", () => {
     setDesktopNameMock.mockReset();
     mkdirSyncMock.mockReset();
     writeFileSyncMock.mockReset();
+    readFileSyncMock.mockReset().mockReturnValue("{}");
   });
 
   it.effect("preserves an explicit Linux password-store switch", () => {
@@ -103,13 +108,27 @@ describe("DesktopPreReadyPlatform", () => {
             const identity = yield* Effect.promise(() => portalIdentity);
             assert.equal(identity.desktopName, "com.t3tools.T3Code.desktop");
             assert.include(identity.desktopEntry ?? "", 'Exec="/Applications/current.AppImage" %U');
-            assert.include(identity.desktopEntry ?? "", "Name=T3 Code (Alpha)");
+            assert.include(identity.desktopEntry ?? "", "Name=2code (Alpha)");
             assert.include(identity.desktopEntry ?? "", "MimeType=x-scheme-handler/t3code;");
           }),
         ).pipe(Effect.ensuring(Effect.sync(() => vi.unstubAllEnvs())));
       },
     );
   }
+
+  it.effect("uses production 2code branding for the early Linux desktop entry", () => {
+    readFileSyncMock.mockImplementation((...args: unknown[]) =>
+      args[0] === "/app/package.json" ? '{"t3codeDistribution":"2code-production"}' : "{}",
+    );
+    return Effect.gen(function* () {
+      yield* DesktopPreReadyPlatform.make;
+      assert.isTrue(
+        writeFileSyncMock.mock.calls.some(([, contents]) =>
+          String(contents).includes("Name=2code\n"),
+        ),
+      );
+    }).pipe(Effect.provideService(HostProcessPlatform, "linux"));
+  });
 
   it.effect("keeps startup available when the early desktop entry cannot be written", () => {
     getSwitchValueMock.mockReturnValue("");

@@ -1,4 +1,5 @@
 import {
+  CLAUDE_CODEX_ROUTED_SUB_PROVIDER,
   type ProviderInstanceId,
   type ServerProvider,
   ServerProvider as ServerProviderSchema,
@@ -25,7 +26,12 @@ const mergeProviderModels = (
   // while the cache was stale and must not come back.
   return [
     ...fallbackModels,
-    ...cachedModels.filter((model) => !model.isCustom && !fallbackSlugs.has(model.slug)),
+    ...cachedModels.filter(
+      (model) =>
+        !model.isCustom &&
+        !fallbackSlugs.has(model.slug) &&
+        model.subProvider !== CLAUDE_CODEX_ROUTED_SUB_PROVIDER,
+    ),
   ];
 };
 

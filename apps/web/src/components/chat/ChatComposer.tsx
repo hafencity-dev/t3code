@@ -249,6 +249,12 @@ import { resolveModelPickerSelectedModel } from "./ModelPickerContent";
 import { type ComposerCommandItem, ComposerCommandMenu } from "./ComposerCommandMenu";
 import { ComposerPendingApprovalActions } from "./ComposerPendingApprovalActions";
 import { CompactComposerControlsMenu } from "./CompactComposerControlsMenu";
+// fork: f5 GPT fast
+import {
+  ClaudeCodexFastModeControl,
+  ClaudeCodexFastModeMenuItem,
+  useClaudeCodexFastMode,
+} from "./ClaudeCodexFastModeControl";
 import { ComposerImageThumbnail } from "./ComposerImageThumbnail";
 import { ComposerPrimaryActions } from "./ComposerPrimaryActions";
 import { ComposerPendingApprovalPanel } from "./ComposerPendingApprovalPanel";
@@ -2586,6 +2592,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     [composerDraftTarget, promptRef, scheduleComposerFocus, setComposerDraftPrompt],
   );
 
+  // fork: f5 GPT fast — target this thread/draft's environment and selected instance.
+  const claudeCodexFastMode = useClaudeCodexFastMode(environmentId, selectedProviderEntry);
   const providerTraitsMenuContent = renderProviderTraitsMenuContent({
     provider: selectedProvider,
     instanceId: selectedInstanceId,
@@ -2598,6 +2606,15 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     onPromptChange: setPromptFromTraits,
     planModeEnabled: settings.planModeEnabled,
   });
+  // fork: f5 GPT fast — preserve null menu content when neither control is available.
+  const providerTraitsWithFastModeMenuContent = claudeCodexFastMode.available ? (
+    <>
+      {providerTraitsMenuContent}
+      <ClaudeCodexFastModeMenuItem {...claudeCodexFastMode} />
+    </>
+  ) : (
+    providerTraitsMenuContent
+  );
   const providerTraitsPickerInput = {
     provider: selectedProvider,
     instanceId: selectedInstanceId,
@@ -4902,7 +4919,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     hidden: composerControlsHidden || restingHiddenBlockCount > 1,
   });
   const restingBlockDefs = [
-    ...(providerTraitsPicker
+    ...(providerTraitsPicker || claudeCodexFastMode.available // fork: f5 GPT fast
       ? [
           {
             id: "traits",
@@ -4910,6 +4927,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
               <>
                 <ComposerControlSeparator size={composerControlsInStrip ? "xs" : "sm"} />
                 {composerControlsInStrip ? restingProviderTraitsPicker : providerTraitsPicker}
+                {/* fork: f5 GPT fast — shared wide and resting/collapsed controls. */}
+                <ClaudeCodexFastModeControl
+                  {...claudeCodexFastMode}
+                  size={composerControlsInStrip ? "xs" : "sm"}
+                  hidden={composerControlsHidden || restingHiddenBlockCount > 1}
+                />
               </>
             ),
           },
@@ -5048,7 +5071,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           interactionMode={interactionMode}
           runtimeMode={runtimeMode}
           showInteractionModeToggle={planModeUiEnabled}
-          traitsMenuContent={providerTraitsMenuContent}
+          traitsMenuContent={providerTraitsWithFastModeMenuContent} // fork: f5 GPT fast
           onToggleInteractionMode={toggleInteractionMode}
           onRuntimeModeChange={handleRuntimeModeChange}
         />
@@ -5093,7 +5116,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   planModeUiEnabled && hiddenRestingBlockIds.includes("mode")
                 }
                 traitsMenuContent={
-                  hiddenRestingBlockIds.includes("traits") ? providerTraitsMenuContent : undefined
+                  // fork: f5 GPT fast
+                  hiddenRestingBlockIds.includes("traits")
+                    ? providerTraitsWithFastModeMenuContent
+                    : undefined
                 }
                 onToggleInteractionMode={toggleInteractionMode}
                 onRuntimeModeChange={handleRuntimeModeChange}

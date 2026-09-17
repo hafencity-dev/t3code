@@ -20,9 +20,13 @@ import { resolveShortcutCommand } from "../keybindings";
 import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../terminalUiStateStore";
 import { isPreviewSupportedInRuntime } from "../previewStateStore";
 import { selectActiveRightPanel, useRightPanelStore } from "../rightPanelStore";
+import { useSourceControlStore } from "../sourceControlStore"; // fork: f4 source-control panel
 import { useThreadSelectionStore } from "../threadSelectionStore";
 import { stackedThreadToast, toastManager } from "~/components/ui/toast";
 import { primaryServerKeybindingsAtom } from "~/state/server";
+
+/** fork: f4 source-control surface — `Cmd/Ctrl+Shift+G`, matching 2code. */
+const SOURCE_CONTROL_PANEL_SHORTCUT_KEY = "g";
 
 function ChatRouteGlobalShortcuts() {
   const clearSelection = useThreadSelectionStore((state) => state.clearSelection);
@@ -76,6 +80,25 @@ function ChatRouteGlobalShortcuts() {
       if (event.key === "Escape" && selectedThreadKeysSize > 0) {
         event.preventDefault();
         clearSelection();
+        return;
+      }
+
+      // fork: f4 source-control surface — a fork-local shortcut, deliberately
+      // NOT a `KeybindingCommand` in contracts.
+      if (
+        (event.metaKey || event.ctrlKey) &&
+        event.shiftKey &&
+        event.key.toLowerCase() === SOURCE_CONTROL_PANEL_SHORTCUT_KEY
+      ) {
+        // Guard BEFORE preventDefault: with no resolved thread there is nothing
+        // to toggle, and swallowing the chord would eat the browser's own
+        // binding for it while doing nothing.
+        if (!routeThreadRef) {
+          return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        useSourceControlStore.getState().toggleOpen();
         return;
       }
 

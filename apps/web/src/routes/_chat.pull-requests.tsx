@@ -1584,12 +1584,16 @@ function PullRequestsRouteView() {
       terminalAvailable={false}
       terminalOpen={false}
       terminalShortcutLabel={null}
+      sourceControlAvailable={false}
+      sourceControlOpen={false}
+      sourceControlShortcutLabel="Ctrl+Shift+G"
       rightPanelAvailable={rightPanelAvailable}
       rightPanelOpen={rightPanelState.isOpen}
       rightPanelShortcutLabel={shortcutLabelForCommand(keybindings, "rightPanel.toggle")}
       rightPanelUnavailableLabel="Select a pull request first"
       liveAgentCount={0}
       onToggleTerminal={() => undefined}
+      onToggleSourceControl={() => undefined}
       onToggleRightPanel={toggleRightPanel}
     />
   );

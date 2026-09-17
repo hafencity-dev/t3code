@@ -3,6 +3,7 @@ import {
   type VcsListRefsInput,
   type VcsListRefsResult,
   type VcsStatusResult,
+  type VcsStatusStreamEvent,
   WS_METHODS,
 } from "@t3tools/contracts";
 import { applyGitStatusStreamEvent } from "@t3tools/shared/git";
@@ -24,14 +25,16 @@ import type { EnvironmentRegistry } from "../connection/registry.ts";
 import { EnvironmentSupervisor } from "../connection/supervisor.ts";
 import { safeErrorLogAttributes } from "../errors/safeLog.ts";
 import { EnvironmentCacheStore } from "../platform/persistence.ts";
-import { request, subscribe, type EnvironmentRpcInput } from "../rpc/client.ts";
+import { request, subscribeDynamicWithSession, type EnvironmentRpcInput } from "../rpc/client.ts";
+import {
+  invalidateRepository,
+  observeRepositoryChange,
+  serverPushesRevisions,
+  type RepositoryCapabilityLookup,
+} from "./repositoryInvalidation.ts";
 import { followStreamInEnvironment } from "./runtime.ts";
 import { vcsCommandConcurrency, vcsCommandScheduler } from "./vcsCommandScheduler.ts";
-import {
-  invalidateCachedVcsRefs,
-  vcsRefsCacheStateAtom,
-  withVcsRefsPersistenceLock,
-} from "./vcsRefInvalidation.ts";
+import { vcsRefsCacheStateAtom, withVcsRefsPersistenceLock } from "./vcsRefInvalidation.ts";
 
 const OFFLINE_BRANCH_LIST_LIMIT = 100;
 const VCS_REFS_IDLE_TTL_MS = 30_000;
@@ -43,6 +46,46 @@ const VCS_REFS_RETRY_SCHEDULE = Schedule.exponential("1 second").pipe(
     Effect.succeed(Duration.min(duration, Duration.seconds(30))),
   ),
 );
+
+/** fork: project session grid — expose remote readiness without changing the wire contract.
+ *
+ * Client-only status metadata. The wire stream deliberately sends local Git
+ * state before its slower remote/PR state, so a merged `pr: null` value is not
+ * sufficient to distinguish "not loaded yet" from "loaded, no PR".
+ */
+export type VcsStatusQueryResult = VcsStatusResult & {
+  readonly remoteStatusResolved: boolean;
+};
+
+function sourceControlProviderMatches(
+  left: VcsStatusResult["sourceControlProvider"],
+  right: VcsStatusResult["sourceControlProvider"],
+): boolean {
+  if (left === undefined || right === undefined) return left === right;
+  return left.kind === right.kind && left.name === right.name && left.baseUrl === right.baseUrl;
+}
+
+export function applyVcsStatusQueryEvent(
+  current: VcsStatusQueryResult | null,
+  event: VcsStatusStreamEvent,
+): VcsStatusQueryResult {
+  const status = applyGitStatusStreamEvent(current, event);
+  const localStatusStillMatchesRemote =
+    event._tag === "localUpdated" &&
+    current !== null &&
+    current.isRepo === event.local.isRepo &&
+    current.hasPrimaryRemote === event.local.hasPrimaryRemote &&
+    current.isDefaultRef === event.local.isDefaultRef &&
+    current.refName === event.local.refName &&
+    sourceControlProviderMatches(current.sourceControlProvider, event.local.sourceControlProvider);
+  const remoteStatusResolved =
+    event._tag === "remoteUpdated"
+      ? true
+      : event._tag === "snapshot"
+        ? event.remote !== null || !event.local.isRepo
+        : !event.local.isRepo || (localStatusStillMatchesRemote && current.remoteStatusResolved);
+  return { ...status, remoteStatusResolved };
+}
 
 function canUseVcsRefsCache(input: VcsListRefsInput): boolean {
   return (
@@ -242,7 +285,49 @@ function cachedVcsRefsChanges(
 
 export function createVcsEnvironmentAtoms<R, E>(
   runtime: Atom.AtomRuntime<EnvironmentRegistry | EnvironmentCacheStore | R, E>,
+  // fork: repository invalidation — servers that push revisions make the
+  // post-command invalidation below redundant.
+  options: { readonly capabilities?: RepositoryCapabilityLookup } = {},
 ) {
+  const statusSubscription = (label: string, idleTtlMs?: number) =>
+    createEnvironmentSubscriptionAtomFamily(runtime, {
+      label,
+      ...(idleTtlMs === undefined ? {} : { idleTtlMs }),
+      subscribe: (input: EnvironmentRpcInput<typeof WS_METHODS.subscribeVcsStatus>) =>
+        Stream.unwrap(
+          Effect.gen(function* () {
+            const registry = yield* AtomRegistry.AtomRegistry;
+            const supervisor = yield* EnvironmentSupervisor;
+            const target = { environmentId: supervisor.target.environmentId, cwd: input.cwd };
+            return subscribeDynamicWithSession(WS_METHODS.subscribeVcsStatus, () =>
+              Effect.succeed(input),
+            ).pipe(
+              Stream.mapEffect(
+                Effect.fn("VcsStatus.observeRepositoryChange")(function* ([session, event]) {
+                  const liveSession = yield* SubscriptionRef.get(supervisor.session);
+                  if (Option.isNone(liveSession) || liveSession.value !== session)
+                    return Option.none<VcsStatusStreamEvent>();
+                  const change = observeRepositoryChange(registry, target, session, event);
+                  if (change !== null) {
+                    yield* invalidateRepository(registry, target, change.domains, change.refsKey);
+                  }
+                  return Option.some(event);
+                }),
+              ),
+              Stream.filterMap((event) =>
+                Option.match(event, { onNone: () => Result.failVoid, onSome: Result.succeed }),
+              ),
+              Stream.mapAccum(
+                () => null as VcsStatusQueryResult | null,
+                (current, event) => {
+                  const next = applyVcsStatusQueryEvent(current, event);
+                  return [next, [next]] as const;
+                },
+              ),
+            );
+          }),
+        ),
+    });
   /**
    * One flat family on purpose: families hold entries via WeakRef, so a nested
    * per-environment family can be collected between lookups, dropping every
@@ -273,27 +358,19 @@ export function createVcsEnvironmentAtoms<R, E>(
     target: { readonly environmentId: EnvironmentId; readonly input: { readonly cwd: string } },
     registry: AtomRegistry.AtomRegistry,
   ) =>
-    invalidateCachedVcsRefs(registry, {
-      environmentId: target.environmentId,
-      cwd: target.input.cwd,
-    });
+    serverPushesRevisions(options.capabilities, registry, target.environmentId)
+      ? Effect.void
+      : invalidateRepository(registry, {
+          environmentId: target.environmentId,
+          cwd: target.input.cwd,
+        });
 
   return {
     listRefs,
-    status: createEnvironmentSubscriptionAtomFamily(runtime, {
-      label: "environment-data:vcs:status",
-      idleTtlMs: VCS_STATUS_IDLE_TTL_MS,
-      subscribe: (input: EnvironmentRpcInput<typeof WS_METHODS.subscribeVcsStatus>) =>
-        subscribe(WS_METHODS.subscribeVcsStatus, input).pipe(
-          Stream.mapAccum(
-            () => null as VcsStatusResult | null,
-            (current, event) => {
-              const next = applyGitStatusStreamEvent(current, event);
-              return [next, [next]] as const;
-            },
-          ),
-        ),
-    }),
+    status: statusSubscription("environment-data:vcs:status", VCS_STATUS_IDLE_TTL_MS),
+    // fork: project session grid — historical batches must release their
+    // server pollers immediately instead of inheriting the UI cache's 5m TTL.
+    reconciliationStatus: statusSubscription("environment-data:vcs:reconciliation-status", 0),
     pull: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:vcs:pull",
       tag: WS_METHODS.vcsPull,

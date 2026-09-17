@@ -22,7 +22,7 @@ import {
 } from "./versionSkew";
 
 const MISMATCH_HINT =
-  "Version mismatch. Try syncing the client and server to the same T3 Code version.";
+  "Version mismatch. Try syncing the client and server to the same 2code version.";
 
 describe("versionSkew", () => {
   beforeEach(() => {
@@ -216,6 +216,6 @@ describe("versionSkew", () => {
 
   it("matches version-drift guidance to the advertised update path", () => {
     expect(serverUpdateGuidance("respawn")).toBe("Update to stay in sync");
-    expect(serverUpdateGuidance("desktop-managed")).toBe("Update the desktop app");
+    expect(serverUpdateGuidance("desktop-managed")).toBe("Update the 2code desktop app");
   });
 });

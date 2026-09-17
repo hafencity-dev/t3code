@@ -152,6 +152,14 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   /** Server can stream self-update progress before acknowledging the
       restart. Clients fall back to server.updateServer when absent. */
   serverSelfUpdateProgress: Schema.optionalKey(Schema.Boolean),
+  /** Server can manage the local Codex compatibility bridge used to remap
+      Claude Code's Haiku subagent slot. */
+  claudeCodexRouting: Schema.optionalKey(Schema.Boolean), // fork: f5
+  claudeCodexFastMode: Schema.optionalKey(Schema.Boolean), // fork: f5
+  /** Server publishes repository mutation revisions to connected clients. */
+  workingCopyRevision: Schema.optionalKey(Schema.Boolean), // fork: remote Git
+  /** Server requires and validates immutable stash identities for mutations. */
+  workingCopyStashIdentity: Schema.optionalKey(Schema.Boolean), // fork: remote Git
   /** Server can durably mark running provider turns before a self-update and
       continue them after the replacement process starts. */
   serverUpdateThreadContinuation: Schema.optionalKey(Schema.Boolean),

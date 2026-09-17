@@ -1,4 +1,10 @@
-import { Maximize2Icon, Minimize2Icon, PanelBottomIcon, PanelRightIcon } from "lucide-react";
+import {
+  GitBranchIcon,
+  Maximize2Icon,
+  Minimize2Icon,
+  PanelBottomIcon,
+  PanelRightIcon,
+} from "lucide-react";
 import { memo } from "react";
 
 import { Toggle } from "../ui/toggle";
@@ -9,6 +15,9 @@ interface PanelLayoutControlsProps {
   terminalAvailable: boolean;
   terminalOpen: boolean;
   terminalShortcutLabel: string | null;
+  sourceControlAvailable: boolean;
+  sourceControlOpen: boolean;
+  sourceControlShortcutLabel: string;
   rightPanelAvailable: boolean;
   rightPanelOpen: boolean;
   rightPanelShortcutLabel: string | null;
@@ -16,6 +25,7 @@ interface PanelLayoutControlsProps {
   /** Running + waiting subagents in this thread; badges the right panel toggle. */
   liveAgentCount: number;
   onToggleTerminal: () => void;
+  onToggleSourceControl: () => void;
   onToggleRightPanel: () => void;
 }
 
@@ -24,12 +34,16 @@ export const PanelLayoutControls = memo(function PanelLayoutControls({
   terminalAvailable,
   terminalOpen,
   terminalShortcutLabel,
+  sourceControlAvailable,
+  sourceControlOpen,
+  sourceControlShortcutLabel,
   rightPanelAvailable,
   rightPanelOpen,
   rightPanelShortcutLabel,
   rightPanelUnavailableLabel = "Right panel is unavailable",
   liveAgentCount,
   onToggleTerminal,
+  onToggleSourceControl,
   onToggleRightPanel,
 }: PanelLayoutControlsProps) {
   return (
@@ -93,6 +107,28 @@ export const PanelLayoutControls = memo(function PanelLayoutControls({
                   : ""
               }`
             : rightPanelUnavailableLabel}
+        </TooltipPopup>
+      </Tooltip>
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <Toggle
+              className="shrink-0 [-webkit-app-region:no-drag]"
+              pressed={sourceControlOpen}
+              onPressedChange={onToggleSourceControl}
+              aria-label="Toggle source control"
+              variant="ghost"
+              size="sm"
+              disabled={!sourceControlAvailable}
+            >
+              <GitBranchIcon className="size-3.5" />
+            </Toggle>
+          }
+        />
+        <TooltipPopup side="bottom">
+          {sourceControlAvailable
+            ? `Toggle source control (${sourceControlShortcutLabel})`
+            : "Source control is unavailable"}
         </TooltipPopup>
       </Tooltip>
     </div>

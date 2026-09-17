@@ -9,6 +9,8 @@
  */
 
 import * as NodeUtil from "node:util";
+// fork: transport GPT effort independently of Claude SDK effort enums.
+import { claudeCodexTransportModel } from "../claudeCodex/ClaudeCodexEffort.ts";
 import {
   type CanUseTool,
   query,
@@ -60,6 +62,11 @@ import {
   type UserInputQuestion,
 } from "@t3tools/contracts";
 import {
+  effectiveClaudeCodexModel,
+  resolveClaudeCodexRoutingPrompt,
+} from "@t3tools/shared/claudeCodexRouting";
+import { HostProcessArchitecture, HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import {
   applyClaudePromptEffortPrefix,
   getModelSelectionBooleanOptionValue,
   getModelSelectionStringOptionValue,
@@ -91,6 +98,7 @@ import { ServerConfig } from "../../config.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import { resolveClaudeSdkExecutablePath } from "../Drivers/ClaudeExecutable.ts";
 import { claudeSignedOutMessage, makeClaudeEnvironment } from "../Drivers/ClaudeHome.ts";
+import { getClaudeCodexBridge, type ClaudeCodexBridge } from "../claudeCodex/ClaudeCodexBridge.ts"; // fork: f5
 import { planClaudeSkillDispatch } from "../Drivers/ClaudeSkillDispatch.ts";
 import { discoverClaudeSkills } from "../Drivers/ClaudeSkills.ts";
 import { buildRuntimeInstructions } from "../RuntimeInstructions.ts";
@@ -474,6 +482,8 @@ export interface ClaudeAdapterLiveOptions {
   readonly forkSession?: typeof forkSession;
   readonly nativeEventLogPath?: string;
   readonly nativeEventLogger?: EventNdjsonLogger;
+  /** Test seam for the environment-owned Claude/Codex bridge. */
+  readonly codexBridge?: Pick<ClaudeCodexBridge, "hybridEnvironment">;
   readonly modelCatalog?: Effect.Effect<ClaudeModelCatalog>;
   /** Scoped-bucket names the driver's status probe last saw; see `claudeUsageLimits`. */
   readonly scopedLimitNames?: Ref.Ref<ClaudeScopedLimitNames>;
@@ -2084,6 +2094,23 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     claudeSettings.binaryPath,
     claudeEnvironment,
   );
+  // fork: f5 — bridge construction is lazy and inert unless this exact Claude
+  // instance opts in. The singleton is keyed by T3 state dir so web, desktop,
+  // and remote clients all configure the environment that runs the provider.
+  let claudeCodexBridge: ClaudeAdapterLiveOptions["codexBridge"];
+  if (claudeSettings.codexRouting?.enabled === true) {
+    if (options?.codexBridge) {
+      claudeCodexBridge = options.codexBridge;
+    } else {
+      const hostPlatform = yield* HostProcessPlatform;
+      const hostArchitecture = yield* HostProcessArchitecture;
+      claudeCodexBridge = getClaudeCodexBridge(
+        serverConfig.stateDir,
+        hostPlatform,
+        hostArchitecture,
+      );
+    }
+  }
   const nativeEventLogger =
     options?.nativeEventLogger ??
     (options?.nativeEventLogPath !== undefined
@@ -4841,7 +4868,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       const modelSelection = selectedModel
         ? {
             ...selectedModel,
-            model: resolveClaudeModelSlug(modelCatalog, selectedModel.model),
+            model: resolveClaudeModelSlug(
+              modelCatalog,
+              claudeCodexBridge
+                ? effectiveClaudeCodexModel(selectedModel.model)
+                : selectedModel.model,
+            ),
           }
         : undefined;
       const caps = getClaudeCatalogModelCapabilities(modelCatalog, modelSelection?.model);
@@ -4849,6 +4881,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       const apiModelId = modelSelection
         ? resolveClaudeCatalogApiModelId(modelCatalog, modelSelection)
         : undefined;
+      const transportModelId =
+        claudeCodexBridge && apiModelId && modelSelection
+          ? claudeCodexTransportModel(apiModelId, modelSelection)
+          : apiModelId;
       const initialContextWindow = selectedClaudeContextWindow(modelCatalog, modelSelection);
       const rawEffort = getModelSelectionStringOptionValue(modelSelection, "effort");
       const effort =
@@ -4902,6 +4938,32 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         extraArgs["thinking-display"] = "summarized";
       }
       const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
+      const codexRoutingRuntime = claudeCodexBridge
+        ? yield* Effect.tryPromise({
+            try: () =>
+              claudeCodexBridge.hybridEnvironment(
+                claudeSettings.codexRouting?.model,
+                claudeEnvironment.ANTHROPIC_BASE_URL,
+                claudeSettings.codexRouting?.requestTimeoutSeconds, // fork: bounded bridge requests
+              ),
+            catch: (cause) =>
+              new ProviderAdapterProcessError({
+                provider: PROVIDER,
+                threadId,
+                detail:
+                  "Could not start the Codex bridge for Claude's Haiku subagent slot. Open Settings → Model routing and connect Codex.",
+                cause,
+              }),
+          })
+        : undefined;
+      const routingInstructions = resolveClaudeCodexRoutingPrompt(
+        claudeSettings.codexRouting,
+        codexRoutingRuntime?.model,
+        apiModelId,
+      );
+      // fork: f5 — the managed routing prompt rides the session-level system
+      // prompt append, next to the runtime instructions.
+      const sessionInstructions = routingInstructions;
       // The attachments dir grant lets the agent Read/copy pasted images at
       // the paths ProviderService injects into the turn text, without an
       // approval prompt. It is a leaf directory holding only attachment
@@ -4912,13 +4974,15 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       ];
       const queryOptions: ClaudeQueryOptions = {
         ...(input.cwd ? { cwd: input.cwd } : {}),
-        ...(apiModelId ? { model: apiModelId } : {}),
+        ...(transportModelId ? { model: transportModelId } : {}),
         pathToClaudeCodeExecutable: claudeBinaryPath,
         systemPrompt: {
           type: "preset",
           preset: "claude_code",
           // Model and effort can change after this session-level prompt is set.
-          append: buildRuntimeInstructions({ harness: "Claude Code" }),
+          append: [buildRuntimeInstructions({ harness: "Claude Code" }), sessionInstructions]
+            .filter(Boolean)
+            .join("\n\n"),
         },
         settingSources: [...CLAUDE_SETTING_SOURCES],
         // `ultracode` is a Claude Code setting, not an API effort level. It is
@@ -4947,7 +5011,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         canUseTool,
         onUserDialog,
         supportedDialogKinds: ["resume_return"],
-        env: McpProviderSession.withAgentDeviceEnvironment(claudeEnvironment, mcpSession),
+        env: McpProviderSession.withAgentDeviceEnvironment(
+          codexRoutingRuntime
+            ? { ...claudeEnvironment, ...codexRoutingRuntime.environment }
+            : claudeEnvironment,
+          mcpSession,
+        ),
         additionalDirectories,
         ...(Object.keys(extraArgs).length > 0 ? { extraArgs } : {}),
         ...(mcpSession
@@ -4988,6 +5057,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         "claude.query.settings_json": encodeJsonStringForDiagnostics(settings) ?? "",
         "claude.query.extra_args_json": encodeJsonStringForDiagnostics(extraArgs) ?? "",
         "claude.query.path_to_executable": claudeBinaryPath,
+        "claude.query.codex_haiku_slot": codexRoutingRuntime !== undefined,
+        "claude.query.codex_haiku_model": codexRoutingRuntime?.model ?? "",
       });
 
       const queryRuntime = yield* Effect.try({
@@ -5038,7 +5109,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         streamFiber: undefined,
         startedAt,
         basePermissionMode: permissionMode,
-        currentApiModelId: apiModelId,
+        currentApiModelId: transportModelId,
         currentEffort: effectiveEffort ?? undefined,
         resumeSessionId: sessionId,
         pendingApprovals,
@@ -5144,7 +5215,15 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         ? input.modelSelection
         : undefined;
     const modelSelection = selectedModel
-      ? { ...selectedModel, model: resolveClaudeModelSlug(modelCatalog, selectedModel.model) }
+      ? {
+          ...selectedModel,
+          model: resolveClaudeModelSlug(
+            modelCatalog,
+            claudeCodexBridge
+              ? effectiveClaudeCodexModel(selectedModel.model)
+              : selectedModel.model,
+          ),
+        }
       : undefined;
     if (modelSelection) {
       context.startInput = { ...context.startInput, modelSelection };
@@ -5162,7 +5241,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     }
 
     if (modelSelection?.model) {
-      const apiModelId = resolveClaudeCatalogApiModelId(modelCatalog, modelSelection);
+      const resolvedApiModelId = resolveClaudeCatalogApiModelId(modelCatalog, modelSelection);
+      // fork: setModel carries changed effort on the next request.
+      const apiModelId = claudeCodexBridge
+        ? claudeCodexTransportModel(resolvedApiModelId, modelSelection)
+        : resolvedApiModelId;
       if (context.currentApiModelId !== apiModelId) {
         yield* Effect.tryPromise({
           try: () => context.query.setModel(apiModelId),

@@ -7,6 +7,9 @@ import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+
+import * as Exit from "effect/Exit"; // fork: repository invalidation
+
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -79,8 +82,13 @@ import {
   WORKTREE_SETUP_ACTIVITY_KIND,
   worktreeSetupActivityId,
   type WorktreeSetupSnapshot,
+  ClaudeCodexBridgeError,
+  type ClaudeCodexBridgeSignInEvent,
+  type VcsInvalidationDomain, // fork: repository invalidation
+  GitCommandError, // fork: repository invalidation
 } from "@t3tools/contracts";
 import { resolveServerBackgroundActivitySettings } from "@t3tools/shared/backgroundActivitySettings";
+import { HostProcessArchitecture, HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { HttpRouter, HttpServerRequest, HttpServerRespondable } from "effect/unstable/http";
 import { RpcSerialization, RpcServer } from "effect/unstable/rpc";
 
@@ -111,6 +119,7 @@ import * as ProviderRegistry from "./provider/Services/ProviderRegistry.ts";
 import * as ProviderService from "./provider/Services/ProviderService.ts";
 import * as ProviderSessionDirectory from "./provider/Services/ProviderSessionDirectory.ts";
 import * as ProviderMaintenanceRunner from "./provider/providerMaintenanceRunner.ts";
+import { getClaudeCodexBridge } from "./provider/claudeCodex/ClaudeCodexBridge.ts"; // fork: f5
 import { ProviderAuthService } from "./provider/Services/ProviderAuthService.ts";
 import { ProviderInstanceRegistry } from "./provider/Services/ProviderInstanceRegistry.ts";
 import { makeProviderInstallation } from "./provider/providerInstallation.ts";
@@ -127,6 +136,9 @@ import * as PreviewManager from "./preview/Manager.ts";
 import { issueAssetUrl } from "./assets/AssetAccess.ts";
 import { deletePendingAttachment, issueAttachmentUploadUrl } from "./assets/AttachmentUpload.ts";
 import * as PortScanner from "./preview/PortScanner.ts";
+// fork: f4 source-control panel — the 28 `workingCopy.*` handlers live outside this file
+import { WorkingCopyService } from "./vcs/workingCopy/WorkingCopyService.ts";
+import { makeWorkingCopyRpcHandlers } from "./vcs/workingCopy/workingCopyRpcHandlers.ts";
 import * as WorkspaceEntries from "./workspace/WorkspaceEntries.ts";
 import * as WorkspaceFileSystem from "./workspace/WorkspaceFileSystem.ts";
 import { readWorkflowScript } from "./orchestration/workflowScriptQuery.ts";
@@ -175,6 +187,9 @@ import * as PairingGrantStore from "./auth/PairingGrantStore.ts";
 import * as SessionStore from "./auth/SessionStore.ts";
 import { failEnvironmentAuthInvalid, failEnvironmentInternal } from "./auth/http.ts";
 import * as RelayClient from "@t3tools/shared/relayClient";
+// fork: repository invalidation — a failed git process may have changed the repository.
+const isGitCommandError = Schema.is(GitCommandError);
+
 const isOrchestrationDispatchCommandError = Schema.is(OrchestrationDispatchCommandError);
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
@@ -553,6 +568,7 @@ const makeWsRpcLayer = (
       const review = yield* ReviewService.ReviewService;
       const vcsProvisioning = yield* VcsProvisioningService.VcsProvisioningService;
       const vcsStatusBroadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
+      const workingCopy = yield* WorkingCopyService; // fork: f4 source-control panel
       const terminalManager = yield* TerminalManager.TerminalManager;
       const previewManager = yield* PreviewManager.PreviewManager;
       const deviceService = yield* DeviceService.DeviceService;
@@ -568,6 +584,13 @@ const makeWsRpcLayer = (
       const providerInstallation = yield* makeProviderInstallation();
       const serverUpdate = yield* ServerSelfUpdate.ServerSelfUpdate;
       const config = yield* ServerConfig.ServerConfig;
+      const hostPlatform = yield* HostProcessPlatform;
+      const hostArchitecture = yield* HostProcessArchitecture;
+      const claudeCodexBridge = getClaudeCodexBridge(
+        config.stateDir,
+        hostPlatform,
+        hostArchitecture,
+      ); // fork: f5
       const lifecycleEvents = yield* ServerLifecycleEvents.ServerLifecycleEvents;
       const serverSettings = yield* ServerSettings.ServerSettingsService;
       const startup = yield* ServerRuntimeStartup.ServerRuntimeStartup;
@@ -1823,12 +1846,35 @@ const makeWsRpcLayer = (
           };
         });
 
-      const refreshGitStatus = (cwd: string) =>
+      // fork: mutation revisions are published off the RPC's critical path; the
+      // remote/PR refresh follows and cannot suppress the local notification.
+      const refreshGitStatus = (cwd: string, domains?: ReadonlyArray<VcsInvalidationDomain>) =>
         vcsStatusBroadcaster
-          .refreshStatus(cwd)
-          .pipe(Effect.ignoreCause({ log: true }), Effect.forkDetach, Effect.asVoid);
+          .notifyMutation(cwd, domains)
+          .pipe(
+            Effect.andThen(vcsStatusBroadcaster.refreshStatus(cwd)),
+            Effect.ignoreCause({ log: true }),
+            Effect.forkDetach,
+            Effect.asVoid,
+          );
+      // A failure before git ran (cwd validation, driver resolution) changed
+      // nothing, so only successes and failed git processes notify.
+      const notifyGitExit = (cwd: string) => (exit: Exit.Exit<unknown, unknown>) => {
+        if (Exit.isSuccess(exit)) return refreshGitStatus(cwd);
+        const error = Cause.squash(exit.cause);
+        return isGitCommandError(error) && error.exitCode !== undefined
+          ? refreshGitStatus(cwd)
+          : Effect.void;
+      };
+      const notifyGitMutation =
+        (cwd: string) =>
+        <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E, R> =>
+          effect.pipe(Effect.onExit((exit) => notifyGitExit(cwd)(exit)));
 
       return WsRpcGroup.of({
+        // fork: f4 source-control panel — one spread, handlers defined in
+        // `vcs/workingCopy/workingCopyRpcHandlers.ts`.
+        ...makeWorkingCopyRpcHandlers({ workingCopy, observeRpcEffect, refreshGitStatus }),
         [ORCHESTRATION_WS_METHODS.dispatchCommand]: (command) =>
           observeRpcEffect(
             ORCHESTRATION_WS_METHODS.dispatchCommand,
@@ -2638,6 +2684,87 @@ const makeWsRpcLayer = (
           observeRpcEffect(WS_METHODS.serverGetBackgroundPolicy, backgroundPolicy.snapshot, {
             "rpc.aggregate": "server",
           }),
+        // fork: f5 — environment-owned Claude Code → Codex bridge. Device
+        // sign-in is streamed so closing the client dialog cancels the child.
+        [WS_METHODS.claudeCodexBridgeGetStatus]: (_input) =>
+          observeRpcEffect(
+            WS_METHODS.claudeCodexBridgeGetStatus,
+            Effect.try({
+              try: () => claudeCodexBridge.status(),
+              catch: (cause) =>
+                new ClaudeCodexBridgeError({
+                  operation: "status",
+                  detail: cause instanceof Error ? cause.message : String(cause),
+                }),
+            }),
+            { "rpc.aggregate": "provider" },
+          ),
+        [WS_METHODS.claudeCodexBridgeInstall]: (_input) =>
+          observeRpcEffect(
+            WS_METHODS.claudeCodexBridgeInstall,
+            Effect.tryPromise({
+              try: () => claudeCodexBridge.install(),
+              catch: (cause) =>
+                new ClaudeCodexBridgeError({
+                  operation: "install",
+                  detail: cause instanceof Error ? cause.message : String(cause),
+                }),
+            }),
+            { "rpc.aggregate": "provider" },
+          ),
+        [WS_METHODS.claudeCodexBridgeStartSignIn]: (_input) =>
+          observeRpcStream(
+            WS_METHODS.claudeCodexBridgeStartSignIn,
+            Stream.callback<ClaudeCodexBridgeSignInEvent>((queue) =>
+              Effect.gen(function* () {
+                const abortController = new AbortController();
+                yield* Effect.addFinalizer(() => Effect.sync(() => abortController.abort()));
+                const context = yield* Effect.context<never>();
+                const runFork = Effect.runForkWith(context);
+                const emit = (event: ClaudeCodexBridgeSignInEvent) => {
+                  runFork(Queue.offer(queue, event));
+                };
+                yield* Effect.tryPromise(() =>
+                  claudeCodexBridge.signIn(emit, abortController.signal),
+                ).pipe(
+                  Effect.catch((cause) =>
+                    Queue.offer(queue, {
+                      _tag: "failed" as const,
+                      message: cause instanceof Error ? cause.message : String(cause),
+                    }),
+                  ),
+                );
+                yield* Queue.end(queue);
+              }).pipe(Effect.forkScoped),
+            ),
+            { "rpc.aggregate": "provider" },
+          ),
+        [WS_METHODS.claudeCodexBridgeSignOut]: (_input) =>
+          observeRpcEffect(
+            WS_METHODS.claudeCodexBridgeSignOut,
+            Effect.try({
+              try: () => claudeCodexBridge.signOut(),
+              catch: (cause) =>
+                new ClaudeCodexBridgeError({
+                  operation: "sign-out",
+                  detail: cause instanceof Error ? cause.message : String(cause),
+                }),
+            }),
+            { "rpc.aggregate": "provider" },
+          ),
+        [WS_METHODS.claudeCodexBridgeGetModels]: ({ refresh }) =>
+          observeRpcEffect(
+            WS_METHODS.claudeCodexBridgeGetModels,
+            Effect.tryPromise({
+              try: () => claudeCodexBridge.models(refresh === true),
+              catch: (cause) =>
+                new ClaudeCodexBridgeError({
+                  operation: "models",
+                  detail: cause instanceof Error ? cause.message : String(cause),
+                }),
+            }),
+            { "rpc.aggregate": "provider" },
+          ),
         [WS_METHODS.cloudGetRelayClientStatus]: (_input) =>
           observeRpcEffect(WS_METHODS.cloudGetRelayClientStatus, relayClient.resolve, {
             "rpc.aggregate": "cloud",
@@ -2945,9 +3072,7 @@ const makeWsRpcLayer = (
         [WS_METHODS.sourceControlPublishRepository]: (input) =>
           observeRpcEffect(
             WS_METHODS.sourceControlPublishRepository,
-            sourceControlRepositories
-              .publishRepository(input)
-              .pipe(Effect.tap(() => refreshGitStatus(input.cwd))),
+            sourceControlRepositories.publishRepository(input).pipe(notifyGitMutation(input.cwd)),
             {
               "rpc.aggregate": "source-control",
             },
@@ -3207,13 +3332,7 @@ const makeWsRpcLayer = (
         [WS_METHODS.vcsPull]: (input) =>
           observeRpcEffect(
             WS_METHODS.vcsPull,
-            gitWorkflow.pullCurrentBranch(input.cwd).pipe(
-              Effect.matchCauseEffect({
-                onFailure: (cause) => Effect.failCause(cause),
-                onSuccess: (result) =>
-                  refreshGitStatus(input.cwd).pipe(Effect.ignore({ log: true }), Effect.as(result)),
-              }),
-            ),
+            gitWorkflow.pullCurrentBranch(input.cwd).pipe(notifyGitMutation(input.cwd)),
             { "rpc.aggregate": "git" },
           ),
         [WS_METHODS.gitRunStackedAction]: (input) =>
@@ -3228,6 +3347,7 @@ const makeWsRpcLayer = (
                   },
                 })
                 .pipe(
+                  Effect.onExit((exit) => notifyGitExit(input.cwd)(exit)),
                   Effect.matchCauseEffect({
                     onFailure: (cause) => Queue.failCause(queue, cause),
                     onSuccess: (result) =>
@@ -3267,9 +3387,7 @@ const makeWsRpcLayer = (
         [WS_METHODS.gitPreparePullRequestThread]: (input) =>
           observeRpcEffect(
             WS_METHODS.gitPreparePullRequestThread,
-            gitWorkflow
-              .preparePullRequestThread(input)
-              .pipe(Effect.tap(() => refreshGitStatus(input.cwd))),
+            gitWorkflow.preparePullRequestThread(input).pipe(notifyGitMutation(input.cwd)),
             { "rpc.aggregate": "git" },
           ),
         [WS_METHODS.vcsListRefs]: (input) =>
@@ -3279,33 +3397,31 @@ const makeWsRpcLayer = (
         [WS_METHODS.vcsCreateWorktree]: (input) =>
           observeRpcEffect(
             WS_METHODS.vcsCreateWorktree,
-            gitWorkflow.createWorktree(input).pipe(Effect.tap(() => refreshGitStatus(input.cwd))),
+            gitWorkflow.createWorktree(input).pipe(notifyGitMutation(input.cwd)),
             { "rpc.aggregate": "vcs" },
           ),
         [WS_METHODS.vcsRemoveWorktree]: (input) =>
           observeRpcEffect(
             WS_METHODS.vcsRemoveWorktree,
-            gitWorkflow.removeWorktree(input).pipe(Effect.tap(() => refreshGitStatus(input.cwd))),
+            gitWorkflow.removeWorktree(input).pipe(notifyGitMutation(input.cwd)),
             { "rpc.aggregate": "vcs" },
           ),
         [WS_METHODS.vcsCreateRef]: (input) =>
           observeRpcEffect(
             WS_METHODS.vcsCreateRef,
-            gitWorkflow.createRef(input).pipe(Effect.tap(() => refreshGitStatus(input.cwd))),
+            gitWorkflow.createRef(input).pipe(notifyGitMutation(input.cwd)),
             { "rpc.aggregate": "vcs" },
           ),
         [WS_METHODS.vcsSwitchRef]: (input) =>
           observeRpcEffect(
             WS_METHODS.vcsSwitchRef,
-            gitWorkflow.switchRef(input).pipe(Effect.tap(() => refreshGitStatus(input.cwd))),
+            gitWorkflow.switchRef(input).pipe(notifyGitMutation(input.cwd)),
             { "rpc.aggregate": "vcs" },
           ),
         [WS_METHODS.vcsInit]: (input) =>
           observeRpcEffect(
             WS_METHODS.vcsInit,
-            vcsProvisioning
-              .initRepository(input)
-              .pipe(Effect.tap(() => refreshGitStatus(input.cwd))),
+            vcsProvisioning.initRepository(input).pipe(notifyGitMutation(input.cwd)),
             { "rpc.aggregate": "vcs" },
           ),
         [WS_METHODS.reviewGetDiffPreview]: (input) =>

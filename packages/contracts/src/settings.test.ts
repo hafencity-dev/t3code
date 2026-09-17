@@ -691,6 +691,10 @@ describe("ServerSettings.providerInstances (slice-2 invariant)", () => {
     // Legacy `providers` struct is still hydrated with its per-driver defaults
     // so existing call sites keep working through the migration.
     expect(decoded.providers.codex.enabled).toBe(true);
+    expect(decoded.providers.claudeAgent.enabled).toBe(true);
+    expect(decoded.providers.cursor.enabled).toBe(false);
+    expect(decoded.providers.grok.enabled).toBe(false);
+    expect(decoded.providers.opencode.enabled).toBe(false);
   });
 
   it("decodes a multi-instance map mixing first-party and fork drivers", () => {
@@ -736,8 +740,138 @@ describe("ServerSettings.providerInstances (slice-2 invariant)", () => {
   });
 });
 
+describe("Claude Code Codex routing", () => {
+  it("accepts disabling the routing deadline and preserves explicit limits", () => {
+    expect(
+      decodeClaudeSettings({ codexRouting: {} }).codexRouting?.requestTimeoutSeconds,
+    ).toBeUndefined();
+    for (const requestTimeoutSeconds of [0, 60, 1800, 7200]) {
+      const settings = decodeClaudeSettings({ codexRouting: { requestTimeoutSeconds } });
+      expect(settings.codexRouting?.requestTimeoutSeconds).toBe(requestTimeoutSeconds);
+      expect(
+        decodeServerSettingsPatch({
+          providers: { claudeAgent: { codexRouting: { requestTimeoutSeconds } } },
+        }).providers?.claudeAgent?.codexRouting?.requestTimeoutSeconds,
+      ).toBe(requestTimeoutSeconds);
+    }
+    for (const requestTimeoutSeconds of [-1, 1, 59, 7201, 1.5, "1800"]) {
+      expect(() => decodeClaudeSettings({ codexRouting: { requestTimeoutSeconds } })).toThrow();
+      expect(() =>
+        decodeServerSettingsPatch({
+          providers: { claudeAgent: { codexRouting: { requestTimeoutSeconds } } },
+        }),
+      ).toThrow();
+    }
+  });
+  it("defaults global GPT fast mode to false", () => {
+    expect(decodeServerSettings({}).claudeCodexFastModeEnabled).toBe(false);
+    expect(DEFAULT_SERVER_SETTINGS.claudeCodexFastModeEnabled).toBe(false);
+  });
+
+  it("accepts global GPT fast mode patches in both directions", () => {
+    for (const enabled of [true, false]) {
+      expect(decodeServerSettingsPatch({ claudeCodexFastModeEnabled: enabled })).toEqual({
+        claudeCodexFastModeEnabled: enabled,
+      });
+      expect(
+        decodeServerSettings({ claudeCodexFastModeEnabled: enabled }).claudeCodexFastModeEnabled,
+      ).toBe(enabled);
+    }
+    expect(decodeServerSettingsPatch({})).not.toHaveProperty("claudeCodexFastModeEnabled");
+    expect(() => decodeServerSettingsPatch({ claudeCodexFastModeEnabled: "true" })).toThrow();
+  });
+
+  it("is absent and inactive for legacy Claude settings", () => {
+    expect(decodeServerSettings({}).providers.claudeAgent.codexRouting).toBeUndefined();
+  });
+
+  it("hydrates safe defaults when the per-instance routing block is enabled", () => {
+    const routing = decodeServerSettings({
+      providers: { claudeAgent: { codexRouting: { enabled: true } } },
+    }).providers.claudeAgent.codexRouting;
+    expect(routing).toEqual({
+      enabled: true,
+      model: "",
+      modelPreferences: {
+        claudeSubagentModel: "opus",
+        claudeSubagentModels: {},
+        exploration: "codex",
+        implementation: "codex",
+        verification: "adaptive",
+        planning: "claude",
+        design: "claude",
+        review: "claude",
+        secondOpinion: "plans-and-reviews",
+      },
+      promptMode: "managed",
+      customPrompt: "",
+      additionalInstructions: "",
+    });
+  });
+
+  it("hydrates partial model preferences without losing the balanced defaults", () => {
+    const routing = decodeServerSettings({
+      providers: {
+        claudeAgent: {
+          codexRouting: {
+            enabled: true,
+            modelPreferences: {
+              claudeSubagentModel: "fable",
+              claudeSubagentModels: { implementation: "sonnet" },
+              implementation: "claude",
+              secondOpinion: "reviews",
+            },
+          },
+        },
+      },
+    }).providers.claudeAgent.codexRouting;
+    expect(routing?.modelPreferences).toEqual({
+      claudeSubagentModel: "fable",
+      claudeSubagentModels: { implementation: "sonnet" },
+      exploration: "codex",
+      implementation: "claude",
+      verification: "adaptive",
+      planning: "claude",
+      design: "claude",
+      review: "claude",
+      secondOpinion: "reviews",
+    });
+  });
+
+  it("rejects unknown managed prompt preferences in persisted settings and patches", () => {
+    expect(() =>
+      decodeServerSettings({
+        providers: { claudeAgent: { codexRouting: { promptMode: "automatic" } } },
+      }),
+    ).toThrow();
+    expect(() =>
+      decodeServerSettingsPatch({
+        providers: { claudeAgent: { codexRouting: { promptMode: "automatic" } } },
+      }),
+    ).toThrow();
+    expect(() =>
+      decodeServerSettings({
+        providers: {
+          claudeAgent: {
+            codexRouting: { modelPreferences: { claudeSubagentModel: "haiku" } },
+          },
+        },
+      }),
+    ).toThrow();
+    expect(() =>
+      decodeServerSettings({
+        providers: {
+          claudeAgent: {
+            codexRouting: { modelPreferences: { claudeSubagentModels: { planning: "haiku" } } },
+          },
+        },
+      }),
+    ).toThrow();
+  });
+});
+
 describe("provider enabled defaults", () => {
-  it("enables only the stable bindings by default", () => {
+  it("enables only Claude and Codex by default", () => {
     const decoded = decodeServerSettings({});
     expect(decoded.providers.codex.enabled).toBe(true);
     expect(decoded.providers.claudeAgent.enabled).toBe(true);

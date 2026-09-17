@@ -35,6 +35,7 @@ import {
 import { resolveClaudeSdkExecutablePath } from "../Drivers/ClaudeExecutable.ts";
 import { makeClaudeEnvironment } from "../Drivers/ClaudeHome.ts";
 import { discoverClaudeSkills } from "../Drivers/ClaudeSkills.ts";
+import { withClaudeCodexRoutedModel } from "../claudeCodex/ClaudeCodexModelCatalog.ts"; // fork: f5
 import { makeUnavailableUsageLimits } from "../providerUsageLimits.ts";
 import {
   type ClaudeScopedLimitNames,
@@ -322,8 +323,9 @@ function waitForAbortSignal(signal: AbortSignal): Promise<void> {
  * We pass a never-yielding AsyncIterable as the prompt so that no user
  * message is ever written to the subprocess stdin. This means the Claude
  * Code subprocess completes its local initialization IPC (returning
- * account info and slash commands) but never starts an API request to
- * Anthropic. We read the init data and then abort the subprocess.
+ * account info and slash commands) but never starts a model inference request.
+ * For claude.ai subscriptions we also read the structured `/usage` payload,
+ * then abort the subprocess.
  *
  * This is used as a fallback when `claude auth status` does not include
  * subscription type information.
@@ -433,10 +435,13 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
 > {
   const resolvedEnvironment = environment ?? process.env;
   const checkedAt = DateTime.formatIso(yield* DateTime.now);
-  const allModels = providerModelsFromSettings(
-    modelCatalog.models.map((entry) => entry.model),
-    claudeSettings.customModels,
-    DEFAULT_CLAUDE_MODEL_CAPABILITIES,
+  const allModels = withClaudeCodexRoutedModel(
+    providerModelsFromSettings(
+      modelCatalog.models.map((entry) => entry.model),
+      claudeSettings.customModels,
+      DEFAULT_CLAUDE_MODEL_CAPABILITIES,
+    ),
+    claudeSettings,
   );
 
   if (!claudeSettings.enabled) {
@@ -450,7 +455,7 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
         version: null,
         status: "warning",
         auth: { status: "unknown" },
-        message: "Claude is disabled in T3 Code settings.",
+        message: "Claude is disabled in 2code settings.",
       },
     });
   }
@@ -523,10 +528,13 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
     });
   }
 
-  const models = providerModelsFromSettings(
-    resolveClaudeModelsForVersion(modelCatalog, parsedVersion),
-    claudeSettings.customModels,
-    DEFAULT_CLAUDE_MODEL_CAPABILITIES,
+  const models = withClaudeCodexRoutedModel(
+    providerModelsFromSettings(
+      resolveClaudeModelsForVersion(modelCatalog, parsedVersion),
+      claudeSettings.customModels,
+      DEFAULT_CLAUDE_MODEL_CAPABILITIES,
+    ),
+    claudeSettings,
   );
   const versionUpgradeMessage = formatClaudeVersionUpgradeMessage(modelCatalog, parsedVersion);
 
@@ -598,10 +606,13 @@ export const makePendingClaudeProvider = (
 ): Effect.Effect<ServerProviderDraft> =>
   Effect.gen(function* () {
     const checkedAt = yield* nowIso;
-    const models = providerModelsFromSettings(
-      modelCatalog.models.map((entry) => entry.model),
-      claudeSettings.customModels,
-      DEFAULT_CLAUDE_MODEL_CAPABILITIES,
+    const models = withClaudeCodexRoutedModel(
+      providerModelsFromSettings(
+        modelCatalog.models.map((entry) => entry.model),
+        claudeSettings.customModels,
+        DEFAULT_CLAUDE_MODEL_CAPABILITIES,
+      ),
+      claudeSettings,
     );
 
     if (!claudeSettings.enabled) {
@@ -615,7 +626,7 @@ export const makePendingClaudeProvider = (
           version: null,
           status: "warning",
           auth: { status: "unknown" },
-          message: "Claude is disabled in T3 Code settings.",
+          message: "Claude is disabled in 2code settings.",
         },
       });
     }
