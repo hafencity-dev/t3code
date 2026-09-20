@@ -108,12 +108,14 @@ describe("native Git files-backend identity transaction proof", () => {
     const b = await r.push("b");
     await r.push("c");
     const reference = await repo();
-    for (const label of ["a", "b", "c"]) await reference.push(label);
+    const referenceA = await reference.push("a");
+    const referenceB = await reference.push("b");
+    await reference.push("c");
     const logOf = (common: string) =>
       NodeFSP.readFile(NodePath.join(common, "logs/refs/stash"), "utf8");
-    const normalize = (log: string) =>
+    const normalize = (log: string, first: string, second: string) =>
       log
-        .replace(/[0-9a-f]{40}/g, (oid) => (oid === a.commit ? "A" : oid === b.commit ? "B" : "?"))
+        .replace(/[0-9a-f]{40}/g, (oid) => (oid === first ? "A" : oid === second ? "B" : "?"))
         .replace(/\d{10} [+-]\d{4}/g, "T");
     const before = await logOf(r.common);
     // Oldest entry dropped: native zeroes the next line's old OID.
@@ -126,8 +128,11 @@ describe("native Git files-backend identity transaction proof", () => {
     git(reference.cwd, "stash", "drop", "stash@{2}");
     const ours = await logOf(r.common);
     expect(ours.split("\n")[0]?.startsWith("0".repeat(40) + " " + b.commit)).toBe(true);
-    expect(normalize(ours).replace(/[^AB?T\n ]/g, "")).toBe(
-      normalize(await logOf(reference.common)).replace(/[^AB?T\n ]/g, ""),
+    expect(normalize(ours, a.commit, b.commit).replace(/[^AB?T\n ]/g, "")).toBe(
+      normalize(await logOf(reference.common), referenceA.commit, referenceB.commit).replace(
+        /[^AB?T\n ]/g,
+        "",
+      ),
     );
     expect(ours).not.toBe(before);
     expect(git(r.cwd, "stash", "list", "--format=%gs")).toBe("On main: c\nOn main: b");
@@ -374,7 +379,7 @@ describe("native Git files-backend identity transaction proof", () => {
     const common = await NodeFSP.realpath(
       NodePath.resolve(linked, git(linked, "rev-parse", "--git-common-dir")),
     );
-    expect(common).toBe(r.common);
+    expect(common).toBe(await NodeFSP.realpath(r.common));
     const tx = await acquireFilesStashTransaction(common, 40, target(entry));
     try {
       await tx.drop();
