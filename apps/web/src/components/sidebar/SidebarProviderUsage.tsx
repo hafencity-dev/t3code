@@ -96,7 +96,7 @@ function PoolBlock({ pool, now }: { readonly pool: LimitPool; readonly now: numb
           <span className="shrink-0 text-sidebar-foreground/50">×{pool.accounts.length}</span>
         ) : null}
       </div>
-      <div className="grid grid-cols-2 gap-x-3 gap-y-1">
+      <div className="grid grid-cols-1 gap-y-1">
         {pool.windows.map((window) => (
           <PoolWindowRow key={`${window.kind}:${window.id}`} window={window} now={now} />
         ))}
