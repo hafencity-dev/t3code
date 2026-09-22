@@ -183,7 +183,7 @@ export const SidebarProviderUsage = memo(function SidebarProviderUsage() {
           onClick={() => void refresh()}
           className="flex size-6 shrink-0 items-center justify-center rounded-sm text-sidebar-foreground/60 hover:bg-sidebar-accent hover:text-sidebar-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-40"
         >
-          <RefreshIcon className="size-3" refreshing={refreshing} />
+          <RefreshIcon size="xs" refreshing={refreshing} />
         </button>
       </div>
       {expanded ? (
