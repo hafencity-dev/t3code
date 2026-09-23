@@ -166,17 +166,20 @@ export interface ClaudeKeychain {
   write(service: string, account: string, value: string): Promise<void>;
 }
 const SECURITY_STDIN_LIMIT = 4032;
+/** Sanity cap far above real Claude payloads and well below macOS ARG_MAX. */
+const SECURITY_HEX_LIMIT = 256 * 1024;
 const SECURITY_TIMEOUT_MS = 5_000;
 const keychainTooLarge = () =>
   new ClaudeCredentialSwitchError("Claude credentials are too large for safe Keychain storage.");
+const keychainHex = (value: string) => Buffer.from(value, "utf8").toString("hex");
 function securityWord(value: string) {
   // security's interactive tokenizer accepts double-quoted words and backslash escapes.
   if (/[\r\n\0]/u.test(value))
     throw new ClaudeCredentialSwitchError("Invalid keychain command value.");
   return `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
 }
-function securityWriteCommand(service: string, account: string, value: string) {
-  return `add-generic-password -U -a ${securityWord(account)} -s ${securityWord(service)} -X ${securityWord(Buffer.from(value, "utf8").toString("hex"))}\n`;
+function securityWriteCommand(service: string, account: string, hex: string) {
+  return `add-generic-password -U -a ${securityWord(account)} -s ${securityWord(service)} -X ${securityWord(hex)}\n`;
 }
 /** Every `security` call is bounded; a hung child is killed and reaped before locks release. */
 export function createSystemClaudeKeychain(
@@ -214,10 +217,27 @@ export function createSystemClaudeKeychain(
       }),
     write: (service, account, value) =>
       new Promise((resolve, reject) => {
-        const command = securityWriteCommand(service, account, value);
-        // Claude uses the same stdin limit, then falls back to argv. Never expose secrets in argv.
-        if (command.length > SECURITY_STDIN_LIMIT) {
+        const writeFailed = () =>
+          new ClaudeCredentialSwitchError("Unable to write Claude credentials to macOS Keychain.");
+        const hex = keychainHex(value);
+        if (hex.length > SECURITY_HEX_LIMIT) {
           reject(keychainTooLarge());
+          return;
+        }
+        const command = securityWriteCommand(service, account, hex);
+        if (command.length > SECURITY_STDIN_LIMIT) {
+          // Mirrors Claude Code's own keychain writer: past the `security -i` stdin limit it
+          // passes the hex payload in argv, briefly visible to local process listings exactly
+          // as on every Claude refresh. Never log argv; execFile's error embeds the command line.
+          NodeChildProcess.execFile(
+            executable,
+            ["add-generic-password", "-U", "-a", account, "-s", service, "-X", hex],
+            { timeout: timeoutMs, killSignal: "SIGKILL" },
+            (error) => {
+              if (error) reject(writeFailed());
+              else resolve();
+            },
+          ).stdin?.end();
           return;
         }
         const child = NodeChildProcess.spawn(executable, ["-i"], {
@@ -235,11 +255,7 @@ export function createSystemClaudeKeychain(
         });
         const fail = () => {
           clearTimeout(timer);
-          reject(
-            new ClaudeCredentialSwitchError(
-              "Unable to write Claude credentials to macOS Keychain.",
-            ),
-          );
+          reject(writeFailed());
         };
         child.on("error", fail);
         child.stdin.on("error", fail);
@@ -259,12 +275,8 @@ export function createClaudeKeychainCredentialAdapter(
 ): ClaudeCredentialAdapter {
   return {
     validate(value) {
-      // The longest service name is the hashed one; size does not depend on which store.
-      const service = claudeCredentialKeychainService("configured-directory-placeholder");
-      if (
-        securityWriteCommand(service, account, JSON.stringify(value)).length > SECURITY_STDIN_LIMIT
-      )
-        throw keychainTooLarge();
+      // Oversized stdin commands fall back to argv; only the sanity cap refuses a payload.
+      if (keychainHex(JSON.stringify(value)).length > SECURITY_HEX_LIMIT) throw keychainTooLarge();
     },
     async read({ configDir }) {
       try {
@@ -282,7 +294,7 @@ export function createClaudeKeychainCredentialAdapter(
         const service = claudeCredentialKeychainService(configDir);
         const serialized = JSON.stringify(value);
         await keychain.write(service, account, serialized);
-        // Interactive security can exit zero even when its command failed.
+        // Interactive security can exit zero even when its command failed; verify both paths.
         if ((await keychain.read(service, account)) !== serialized) {
           throw new ClaudeCredentialSwitchError("Keychain credential write could not be verified.");
         }
@@ -634,8 +646,8 @@ export async function switchClaudeCredentials(
           "Claude source store already holds another credential lineage; recovery left untouched.",
         );
       }
-      // Storage limits are checked for every payload the transaction will write, before
-      // the journal makes any of them mandatory.
+      // The storage sanity cap is checked for every payload the transaction will write,
+      // before the journal makes any of them mandatory.
       const { claudeAiOauth: _checkedOut, ...targetRest } = targetCredentials;
       const sourceFingerprint = fingerprint(activeToken);
       for (const payload of [

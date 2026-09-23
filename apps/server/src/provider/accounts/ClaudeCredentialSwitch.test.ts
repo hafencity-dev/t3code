@@ -78,6 +78,7 @@ describe("ClaudeCredentialSwitch", () => {
   });
   afterEach(async () => {
     vi.unstubAllEnvs();
+    vi.restoreAllMocks();
     await NodeFSP.rm(root, { recursive: true, force: true });
   });
 
@@ -600,15 +601,89 @@ describe("ClaudeCredentialSwitch", () => {
     ).toBeUndefined();
   });
 
-  it("rejects oversized keychain payloads and bounds hung security calls", async () => {
-    const adapter = createClaudeKeychainCredentialAdapter(
+  it("refuses payloads above the keychain sanity cap before writing the journal", async () => {
+    const keychainAdapter = createClaudeKeychainCredentialAdapter(
       { read: async () => undefined, write: async () => undefined },
       "test-user",
     );
-    expect(() => adapter.validate!({ claudeAiOauth: oauth("a") })).not.toThrow();
-    expect(() => adapter.validate!({ claudeAiOauth: { accessToken: "x".repeat(3_000) } })).toThrow(
+    // Large mcpOAuth-style payloads well past the stdin limit are accepted.
+    expect(() =>
+      keychainAdapter.validate!({ claudeAiOauth: { accessToken: "x".repeat(20_000) } }),
+    ).not.toThrow();
+    await write(NodePath.join(input.targetStore, ".credentials.json"), {
+      claudeAiOauth: { ...oauth("b"), padding: "x".repeat(200_000) },
+    });
+    const writes = vi.fn(claudeFileCredentialAdapter.write);
+    await expect(
+      switchClaudeCredentials(input, {
+        credentials: {
+          ...claudeFileCredentialAdapter,
+          write: writes,
+          validate: keychainAdapter.validate!,
+        },
+      }),
+    ).rejects.toThrow("too large for safe Keychain storage");
+    expect(writes).not.toHaveBeenCalled();
+    await expect(NodeFSP.stat(journalPath())).rejects.toMatchObject({ code: "ENOENT" });
+    expect(
+      (await read(NodePath.join(input.activeHome, ".credentials.json"))).claudeAiOauth,
+    ).toEqual(oauth("a"));
+  });
+
+  it("writes small keychain payloads over stdin and large ones over argv", async () => {
+    const argsLog = NodePath.join(root, "args.log");
+    const stdinLog = NodePath.join(root, "stdin.log");
+    const script = NodePath.join(root, "security");
+    await NodeFSP.writeFile(
+      script,
+      `#!/bin/sh\nprintf '%s\\n' "$@" > '${argsLog}'\ncat > '${stdinLog}'\n`,
+      { mode: 0o755 },
+    );
+    const keychain = createSystemClaudeKeychain({ executable: script, timeoutMs: 2_000 });
+    const logged = [
+      vi.spyOn(console, "log"),
+      vi.spyOn(console, "info"),
+      vi.spyOn(console, "warn"),
+      vi.spyOn(console, "error"),
+      vi.spyOn(console, "debug"),
+    ];
+
+    await keychain.write("svc", "acct", '{"small":true}');
+    expect(await NodeFSP.readFile(argsLog, "utf8")).toBe("-i\n");
+    const smallHex = Buffer.from('{"small":true}', "utf8").toString("hex");
+    expect(await NodeFSP.readFile(stdinLog, "utf8")).toBe(
+      `add-generic-password -U -a "acct" -s "svc" -X "${smallHex}"\n`,
+    );
+
+    const large = JSON.stringify({ secret: "s".repeat(5_000) });
+    const largeHex = Buffer.from(large, "utf8").toString("hex");
+    await keychain.write("svc", "acct", large);
+    expect((await NodeFSP.readFile(argsLog, "utf8")).split("\n").slice(0, -1)).toEqual([
+      "add-generic-password",
+      "-U",
+      "-a",
+      "acct",
+      "-s",
+      "svc",
+      "-X",
+      largeHex,
+    ]);
+    expect(await NodeFSP.readFile(stdinLog, "utf8")).toBe("");
+
+    await NodeFSP.writeFile(script, "#!/bin/sh\necho failed >&2\nexit 1\n", { mode: 0o755 });
+    const failure = await keychain.write("svc", "acct", large).catch((error: Error) => error);
+    expect(failure).toBeInstanceOf(ClaudeCredentialSwitchError);
+    expect((failure as Error).message).toBe(
+      "Unable to write Claude credentials to macOS Keychain.",
+    );
+    expect((failure as Error).message).not.toContain(largeHex);
+    for (const spy of logged) expect(spy).not.toHaveBeenCalled();
+    await expect(keychain.write("svc", "acct", "x".repeat(200_000))).rejects.toThrow(
       "too large for safe Keychain storage",
     );
+  });
+
+  it("bounds hung security calls", async () => {
     const script = NodePath.join(root, "security");
     await NodeFSP.writeFile(script, "#!/bin/sh\nexec sleep 30\n", { mode: 0o755 });
     const keychain = createSystemClaudeKeychain({ executable: script, timeoutMs: 200 });
@@ -617,6 +692,9 @@ describe("ClaudeCredentialSwitch", () => {
       "Unable to read Claude credentials from macOS Keychain.",
     );
     await expect(keychain.write("svc", "acct", "{}")).rejects.toThrow(
+      "Unable to write Claude credentials to macOS Keychain.",
+    );
+    await expect(keychain.write("svc", "acct", "x".repeat(5_000))).rejects.toThrow(
       "Unable to write Claude credentials to macOS Keychain.",
     );
     expect(Date.now() - started).toBeLessThan(5_000);
@@ -675,6 +753,29 @@ describe("ClaudeCredentialSwitch", () => {
       "test-user",
     );
     await expect(credentials.write({ home: root }, { claudeAiOauth: oauth("a") })).rejects.toThrow(
+      "Unable to write Claude credentials to macOS Keychain.",
+    );
+  });
+
+  it("verifies large keychain writes by reading them back", async () => {
+    const stored = new Map<string, string>();
+    const credentials = createClaudeKeychainCredentialAdapter(
+      {
+        read: async (service) => stored.get(service),
+        write: async (service, _account, value) => {
+          stored.set(service, value);
+        },
+      },
+      "test-user",
+    );
+    const large = { claudeAiOauth: oauth("a"), mcpOAuth: { token: "m".repeat(10_000) } };
+    await credentials.write({ home: root }, large);
+    expect(await credentials.read({ home: root })).toEqual(large);
+    const corrupt = createClaudeKeychainCredentialAdapter(
+      { read: async () => "{}", write: async () => undefined },
+      "test-user",
+    );
+    await expect(corrupt.write({ home: root }, large)).rejects.toThrow(
       "Unable to write Claude credentials to macOS Keychain.",
     );
   });
