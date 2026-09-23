@@ -10,7 +10,7 @@ import * as Schema from "effect/Schema";
 
 import { TrimmedNonEmptyString, TrimmedString } from "./baseSchemas.ts";
 
-export const CLAUDE_CODEX_BRIDGE_VERSION = "7.2.154";
+export const CLAUDE_CODEX_BRIDGE_VERSION = "7.3.15";
 
 /** Stable catalog marker for the single Codex model exposed through a Claude instance. */
 export const CLAUDE_CODEX_ROUTED_SUB_PROVIDER = "via Codex";

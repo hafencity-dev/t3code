@@ -51,37 +51,37 @@ const MODEL_CACHE_TTL_MS = 5 * 60_000;
 const MAX_MODEL_RESPONSE_BYTES = 1024 * 1024;
 const FALLBACK_MODELS = [
   "gpt-6-astra",
-  "gpt-5.6-sol",
+  "gpt-6-sol",
+  "gpt-6-luna",
+  "gpt-5.6-terra",
+  "gpt-5.6-luna",
   "gpt-5.5",
-  "gpt-5.4",
-  "gpt-5.1-codex",
-  "gpt-5.1-codex-mini",
 ] as const;
 
 const ARTIFACTS: Readonly<Record<string, { readonly file: string; readonly sha256: string }>> = {
   "darwin-arm64": {
-    file: "CLIProxyAPI_7.2.154_darwin_aarch64.tar.gz",
-    sha256: "90645a2d71bf7247e06b517757b498d0d0306afa9c48173aae7e2a230df2d546",
+    file: "CLIProxyAPI_7.3.15_darwin_aarch64.tar.gz",
+    sha256: "c1e49c148a94c476dc43a6a0eed28bca34239d5153ebb7792048d8c18f3b92f0",
   },
   "darwin-x64": {
-    file: "CLIProxyAPI_7.2.154_darwin_amd64.tar.gz",
-    sha256: "62171996db7a9a2aa4ff00c68ba8255d7721790e34c6260f915631a9d44576e2",
+    file: "CLIProxyAPI_7.3.15_darwin_amd64.tar.gz",
+    sha256: "1dd2f2f5d57c2c9172eb51837d07f1f014d02ab1093215401a00c61d942bb972",
   },
   "linux-arm64": {
-    file: "CLIProxyAPI_7.2.154_linux_aarch64.tar.gz",
-    sha256: "3a0cd18d64e3b9990ca72136dbb1da97eedddade00ee6768e8b49fab1de6925e",
+    file: "CLIProxyAPI_7.3.15_linux_aarch64.tar.gz",
+    sha256: "0b147342517b2f0f0cb80a4630e4f863cdd531fa0e90986f30a437c81ba82e75",
   },
   "linux-x64": {
-    file: "CLIProxyAPI_7.2.154_linux_amd64.tar.gz",
-    sha256: "2a2256ceff048d5fa813aa54e8daa43e870b40e698d5cd21efad46e25aa5a1f9",
+    file: "CLIProxyAPI_7.3.15_linux_amd64.tar.gz",
+    sha256: "801c3a23061d57a830e67fcd033fda26e96c2bfe93e1b2e34e4428ed7defc7e5",
   },
   "win32-arm64": {
-    file: "CLIProxyAPI_7.2.154_windows_aarch64.zip",
-    sha256: "4d5166b256f13e814d087c98a8526ff42a5f83f63411025a679b31495a54cd19",
+    file: "CLIProxyAPI_7.3.15_windows_aarch64.zip",
+    sha256: "de4db7058bf4f9fcbf2097ed693a1c28a2e9364949ee16a57cccac0fd0a6a12f",
   },
   "win32-x64": {
-    file: "CLIProxyAPI_7.2.154_windows_amd64.zip",
-    sha256: "e50bd9362edb89d0816329f17372f00f1a68b8f72991cca41d39b4528c234563",
+    file: "CLIProxyAPI_7.3.15_windows_amd64.zip",
+    sha256: "2722eccdabdbca935cfbd41e99b00a8017e91e45296e34b30004932c176b01b2",
   },
 };
 
