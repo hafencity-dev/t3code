@@ -73,7 +73,7 @@ describe("provider account usage admission", () => {
   );
 
   it.effect(
-    "enforces normal five-minute TTL even against force and honors legacy persisted TTL",
+    "keeps the five-minute TTL for automatic checks but lets a manual refresh through after 60s",
     () =>
       Effect.gen(function* () {
         let calls = 0;
@@ -84,14 +84,36 @@ describe("provider account usage admission", () => {
         expect(calls).toBe(0);
         yield* TestClock.adjust(5 * minute);
         const value = yield* cache.refresh({ id, active: false });
-        expect(value?.nextAllowedAt).toBe(10 * minute);
-        yield* TestClock.adjust(minute);
+        expect(value?.nextAllowedAt).toBe(6 * minute);
+        yield* TestClock.adjust(minute - 1);
         yield* cache.refresh(refresh);
         expect(calls).toBe(1);
-        yield* TestClock.adjust(4 * minute);
+        yield* TestClock.adjust(1);
         yield* cache.refresh({ id, active: false });
+        expect(calls).toBe(1);
+        yield* cache.refresh(refresh);
         expect(calls).toBe(2);
       }),
+  );
+
+  it.effect("ignores a legacy five-minute floor persisted after a successful check", () =>
+    Effect.gen(function* () {
+      let calls = 0;
+      const cache = makeAccountUsageCache({
+        probe: () => measuredNow.pipe(Effect.tap(() => Effect.sync(() => calls++))),
+      });
+      const legacy: AccountUsage = {
+        ...good,
+        lastAttemptAt: 0,
+        consecutiveFailures: 0,
+        nextAllowedAt: 5 * minute,
+      };
+      yield* TestClock.adjust(minute);
+      yield* cache.refresh({ id, active: false, previous: legacy });
+      expect(calls).toBe(0);
+      yield* cache.refresh({ ...refresh, previous: legacy });
+      expect(calls).toBe(1);
+    }),
   );
 
   for (const [label, error] of [

@@ -45,6 +45,7 @@ import { makeProviderAccountsRpcHandlers } from "./providerAccountsRpcHandlers.t
 import type { AccountUsage, probeAccountUsage } from "./ProviderAccountUsage.ts";
 
 type Probe = typeof probeAccountUsage;
+const idleProbe = () => Effect.never;
 
 const codexId = ProviderInstanceId.make("codex");
 const claudeId = ProviderInstanceId.make("claudeAgent");
@@ -242,7 +243,8 @@ describe("ProviderAccountsService", () => {
           options.login || options.probe
             ? ProviderAccountsService.layerWithLogin(
                 options.login ?? ((loginOptions) => new ProviderAccountLogin(loginOptions)),
-                options.probe,
+                // Completed logins probe in the background; never spawn a real CLI for it.
+                options.probe ?? (idleProbe as unknown as Probe),
               )
             : ProviderAccountsService.layer,
         ),
@@ -849,6 +851,57 @@ describe("ProviderAccountsService", () => {
       }),
       true,
       {
+        login: (options) => {
+          callbacks = options;
+          return new ProviderAccountLogin(options);
+        },
+      },
+    );
+  });
+
+  it.effect("probes a signed-in account once after login, within the shared budget", () => {
+    let callbacks: ProviderAccountLoginOptions;
+    let calls = 0;
+    const probe: Probe = (() =>
+      Effect.sync(() => {
+        calls++;
+        return {
+          checkedAt,
+          status: "ready",
+          usage: {
+            checkedAt,
+            windows: [{ id: "s", label: "5h", kind: "session", usedPercent: 42 }],
+          },
+        } satisfies AccountUsage;
+      })) as unknown as Probe;
+    return run(
+      Effect.gen(function* () {
+        const service = yield* ProviderAccountsService;
+        const events = yield* Stream.toQueue(service.autoSwitchEvents, { capacity: "unbounded" });
+        const prepared = yield* Effect.promise(() =>
+          callbacks.prepare({ driver: "codex", accountId: seeded!.id }),
+        );
+        // Login publishes once on completion and once more after its background probe.
+        const signIn = Effect.gen(function* () {
+          yield* Effect.promise(() =>
+            callbacks.complete(prepared, { email: "other@example.test" }),
+          );
+          expect(yield* Queue.take(events)).toEqual({ _tag: "changed", driver: "codex" });
+          expect(yield* Queue.take(events)).toEqual({ _tag: "changed", driver: "codex" });
+        });
+        yield* signIn;
+        expect(calls).toBe(1);
+        const account = (yield* service.list()).groups
+          .flatMap((group) => group.accounts)
+          .find((entry) => entry.id === seeded!.id)!;
+        expect(account.usage?.windows[0]?.usedPercent).toBe(42);
+        // Each sign-in bypasses the per-account floor, but the 6-per-5-minute budget holds.
+        for (let attempt = 0; attempt < 6; attempt++) yield* signIn;
+        expect(calls).toBe(6);
+      }),
+      true,
+      {
+        probe,
         login: (options) => {
           callbacks = options;
           return new ProviderAccountLogin(options);

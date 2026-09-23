@@ -11,6 +11,7 @@ import {
   accountTone,
   accountUsageWindows,
   accountUsageDisplay,
+  autoRefreshAccountId,
   isUsageRefreshCoolingDown,
   bestAccountId,
   remainingPercent,
@@ -308,6 +309,14 @@ describe("usage backoff display", () => {
     expect(isUsageRefreshCoolingDown(now, now + 59_999)).toBe(true);
     expect(isUsageRefreshCoolingDown(now, now + 60_000)).toBe(false);
     expect(isUsageRefreshCoolingDown(now, now + 120_000)).toBe(false);
+    // Only a manual refresh records a timestamp; accounts never refreshed by hand are free.
+    expect(isUsageRefreshCoolingDown(undefined, now)).toBe(false);
+  });
+  it("labels the post-success server floor as a cooldown, not a retry", () => {
+    const saved = account("work", 40, {
+      usageRefresh: { nextAllowedAt: "2026-09-23T12:39:00Z", rateLimited: false },
+    });
+    expect(accountUsageDisplay(saved, now).retryLabel).toBe("Refreshable in 4m");
   });
 });
 
@@ -362,5 +371,68 @@ describe("account switch modes", () => {
       }),
     ).toBeUndefined();
     expect(pendingAutoSwitchAccount({ ...group, accounts: [] })).toBeUndefined();
+  });
+});
+
+describe("automatic usage refresh", () => {
+  const now = Date.parse("2026-09-23T12:35:00Z");
+  const measured = (id: string, checkedAt: string, overrides: Partial<ProviderAccount> = {}) =>
+    account(id, undefined, { usage: { checkedAt, windows: [window(40)] }, ...overrides });
+
+  it("prefers a ready account that was never measured, such as one just added", () => {
+    expect(
+      autoRefreshAccountId(
+        [measured("old", "2026-09-23T11:00:00Z"), account("new"), account("other-new")],
+        now,
+      ),
+    ).toBe("new");
+  });
+  it("otherwise picks only the stalest measurement older than five minutes", () => {
+    expect(
+      autoRefreshAccountId(
+        [
+          measured("stale", "2026-09-23T12:20:00Z"),
+          measured("stalest", "2026-09-23T12:00:00Z"),
+          measured("fresh", "2026-09-23T12:31:00Z"),
+        ],
+        now,
+      ),
+    ).toBe("stalest");
+    expect(autoRefreshAccountId([measured("fresh", "2026-09-23T12:30:00Z")], now)).toBeNull();
+  });
+  it("skips active, not-ready, unsupported and server-gated accounts", () => {
+    expect(
+      autoRefreshAccountId(
+        [
+          account("active", undefined, { active: true }),
+          account("signed-out", undefined, { status: "signedOut" }),
+          account("pending", undefined, { status: "pending" }),
+          account("gated", undefined, {
+            usageRefresh: { nextAllowedAt: "2026-09-23T12:36:00Z" },
+          }),
+          account("unsupported", undefined, {
+            usage: {
+              checkedAt: "2026-09-23T11:00:00Z",
+              windows: [],
+              unavailable: { reason: "unsupported" },
+            },
+          }),
+        ],
+        now,
+      ),
+    ).toBeNull();
+    expect(
+      autoRefreshAccountId(
+        [
+          measured("backing-off", "2026-09-23T11:00:00Z", {
+            usageRefresh: { nextAllowedAt: "2026-09-23T12:50:00Z", rateLimited: true },
+          }),
+          measured("allowed", "2026-09-23T12:00:00Z", {
+            usageRefresh: { nextAllowedAt: "2026-09-23T12:05:00Z" },
+          }),
+        ],
+        now,
+      ),
+    ).toBe("allowed");
   });
 });

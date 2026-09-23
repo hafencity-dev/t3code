@@ -89,10 +89,40 @@ export function shouldShowAccountBadge(
   return group.accounts.length > 1 || (active !== undefined && accountTone(active) !== "secondary");
 }
 
+/** Client cooldown after a manual per-account refresh; automatic refreshes never start one. */
 export const USAGE_REFRESH_COOLDOWN_MS = 60_000;
+/** Matches the server's probe TTL: younger measurements are not worth an automatic probe. */
+export const USAGE_STALE_MS = 5 * 60_000;
 
-export function isUsageRefreshCoolingDown(lastRefreshedAt: number | null, now: number) {
-  return lastRefreshedAt !== null && now - lastRefreshedAt < USAGE_REFRESH_COOLDOWN_MS;
+export function isUsageRefreshCoolingDown(lastRefreshedAt: number | null | undefined, now: number) {
+  return lastRefreshedAt != null && now - lastRefreshedAt < USAGE_REFRESH_COOLDOWN_MS;
+}
+
+/**
+ * Picks at most one inactive account for the dialog's automatic refresh, so it never
+ * bulk-probes: a ready account that was never measured first, otherwise the stalest
+ * measurement older than the TTL. Accounts the server is backing off are skipped.
+ */
+export function autoRefreshAccountId(
+  accounts: readonly ProviderAccount[],
+  now: number,
+): ProviderAccountId | null {
+  const candidates = accounts.filter(
+    (account) =>
+      !account.active &&
+      account.status === "ready" &&
+      account.usage?.unavailable?.reason !== "unsupported" &&
+      !(Date.parse(account.usageRefresh?.nextAllowedAt ?? "") > now),
+  );
+  const unmeasured = candidates.find((account) => !account.usage);
+  if (unmeasured) return unmeasured.id;
+  let stalest: ProviderAccount | undefined;
+  for (const account of candidates) {
+    const checkedAt = Date.parse(account.usage!.checkedAt);
+    if (now - checkedAt <= USAGE_STALE_MS) continue;
+    if (!stalest || checkedAt < Date.parse(stalest.usage!.checkedAt)) stalest = account;
+  }
+  return stalest?.id ?? null;
 }
 
 /** Failed probes retain their last good bars; backoff never implies fresh quota. */
@@ -105,11 +135,16 @@ export function accountUsageDisplay(account: ProviderAccount, now: number) {
     windows.length > 0 ? (minutes === 0 ? "Checked just now" : `Checked ${minutes} min ago`) : null;
   const nextAllowedAt = account.usageRefresh?.nextAllowedAt;
   const retryMinutes = nextAllowedAt ? Math.ceil((Date.parse(nextAllowedAt) - now) / 60_000) : 0;
+  // After a successful probe the server floor is a refresh cooldown, not a retry.
+  const failed =
+    account.usageRefresh?.rateLimited || !usage || usage.unavailable?.reason === "probeFailed";
   const retryLabel =
     retryMinutes > 0
       ? account.usageRefresh?.rateLimited
         ? `Usage rate-limited · retrying in ${retryMinutes}m`
-        : `Retrying in ${retryMinutes}m`
+        : failed
+          ? `Retrying in ${retryMinutes}m`
+          : `Refreshable in ${retryMinutes}m`
       : null;
   return { windows, checkedLabel, retryLabel };
 }

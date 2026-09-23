@@ -668,6 +668,19 @@ const make = (
               if (observed?.id === account.accountId && observed.checkedAt)
                 staleSnapshots.set(account.driver, observed.checkedAt);
               yield* changed(account.driver);
+              // A fresh sign-in has no usage yet: probe it once in the background. `force`
+              // skips the per-account TTL but the shared budget still gates the attempt.
+              if (!message)
+                yield* refreshUsage({
+                  accountIds: [ProviderAccountId.make(account.accountId)],
+                  force: true,
+                }).pipe(
+                  Effect.andThen(changed(account.driver)),
+                  Effect.catchCause((cause) =>
+                    Effect.logWarning("Usage probe after account sign-in failed", cause),
+                  ),
+                  Effect.forkIn(scope),
+                );
               return message ? { message } : undefined;
             }),
           ),

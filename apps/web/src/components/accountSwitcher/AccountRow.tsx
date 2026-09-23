@@ -11,6 +11,7 @@ import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Menu, MenuTrigger, MenuPopup, MenuItem, MenuSeparator } from "../ui/menu";
+import { RefreshIcon } from "../ui/refresh-icon";
 import { Spinner } from "../ui/spinner";
 import { toastManager } from "../ui/toast";
 import { Tooltip, TooltipTrigger, TooltipPopup } from "../ui/tooltip";
@@ -25,6 +26,9 @@ export function AccountRow({
   switchMode,
   now,
   best,
+  refreshing,
+  coolingDown,
+  onRefreshUsage,
   onSignIn,
 }: {
   account: ProviderAccount;
@@ -32,6 +36,10 @@ export function AccountRow({
   switchMode: ProviderAccountGroup["switchMode"];
   now: number;
   best: boolean;
+  refreshing: boolean;
+  coolingDown: boolean;
+  /** Omitted when this account's usage cannot be refreshed. */
+  onRefreshUsage?: () => void;
   onSignIn: (account: ProviderAccount) => void;
 }) {
   const [renaming, setRenaming] = useState(false);
@@ -119,8 +127,28 @@ export function AccountRow({
             <p className="truncate text-xs text-muted-foreground">{account.email}</p>
           ) : null}
         </div>
-        <div className="w-44 max-w-full shrink-0">
-          <AccountUsage account={account} now={now} />
+        <div className="flex max-w-full shrink-0 items-start gap-1">
+          <div className="w-44 min-w-0">
+            <AccountUsage account={account} now={now} />
+          </div>
+          {onRefreshUsage ? (
+            <Tooltip>
+              <TooltipTrigger render={<span />}>
+                <Button
+                  variant="ghost"
+                  size="icon-xs"
+                  aria-label={`Refresh usage for ${account.label}`}
+                  disabled={refreshing || coolingDown}
+                  onClick={onRefreshUsage}
+                >
+                  <RefreshIcon refreshing={refreshing} />
+                </Button>
+              </TooltipTrigger>
+              <TooltipPopup>
+                {coolingDown ? "Usage was refreshed moments ago" : "Refresh usage"}
+              </TooltipPopup>
+            </Tooltip>
+          ) : null}
         </div>
         <div className="flex items-start gap-1">
           {!account.active && account.status === "ready" ? (

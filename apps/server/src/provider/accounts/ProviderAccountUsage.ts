@@ -210,9 +210,11 @@ export const makeAccountUsageCache = <E, R>(dependencies: {
       ? recent[recent.length - MAX_ATTEMPTS]!.at + ACCOUNT_USAGE_TTL_MS
       : 0;
   };
+  // Manual refreshes wait only for the 60s floor and failure backoff; the TTL gates the rest.
+  // A success's stored nextAllowedAt is ignored so older 5-minute values never block them.
   const accountAt = (prior: AccountUsage | undefined, force = false) =>
     Math.max(
-      prior?.nextAllowedAt ?? 0,
+      prior?.lastFailureKind ? (prior.nextAllowedAt ?? 0) : 0,
       prior?.lastAttemptAt === undefined ? 0 : prior.lastAttemptAt + MANUAL_FLOOR_MS,
       !force && prior && (prior.usage || prior.status === "signedOut") && !prior.lastFailureKind
         ? Date.parse(prior.checkedAt) + ACCOUNT_USAGE_TTL_MS
@@ -260,7 +262,7 @@ export const makeAccountUsageCache = <E, R>(dependencies: {
               ...measurement,
               lastAttemptAt: attempt.at,
               consecutiveFailures: 0,
-              nextAllowedAt: attempt.at + (input.force ? MANUAL_FLOOR_MS : ACCOUNT_USAGE_TTL_MS),
+              nextAllowedAt: attempt.at + MANUAL_FLOOR_MS,
             };
           }),
           Effect.catch((error) =>

@@ -2,15 +2,19 @@ import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
-import type {
-  EnvironmentId,
-  ProviderAccount,
-  ProviderAccountDriver,
-  ProviderAccountGroup,
-  ProviderAccountAutoSwitchEvent,
+import {
+  defaultInstanceIdForDriver,
+  ProviderDriverKind,
+  type EnvironmentId,
+  type ProviderAccount,
+  type ProviderAccountDriver,
+  type ProviderAccountGroup,
+  type ProviderAccountAutoSwitchEvent,
+  type ProviderAccountId,
 } from "@t3tools/contracts";
 import { PlusIcon, TriangleAlertIcon } from "lucide-react";
 import { useEffect, useEffectEvent, useId, useRef, useState } from "react";
+import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { ClaudeAI, OpenAI } from "../Icons";
 import { Alert, AlertDescription } from "../ui/alert";
@@ -25,11 +29,9 @@ import {
   DialogPopup,
   DialogTitle,
 } from "../ui/dialog";
-import { RefreshIcon } from "../ui/refresh-icon";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Spinner } from "../ui/spinner";
 import { toastManager } from "../ui/toast";
-import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { AutoSwitchSettings } from "./AutoSwitchSettings";
 import { AccountRow } from "./AccountRow";
 import { AddAccountPanel } from "./AddAccountPanel";
@@ -37,9 +39,11 @@ import {
   ACCOUNT_DRIVERS,
   ACCOUNT_DRIVER_LABELS,
   ACCOUNT_SWITCH_NOTES,
+  autoRefreshAccountId,
   bestAccountId,
   sortedAccounts,
   isUsageRefreshCoolingDown,
+  USAGE_REFRESH_COOLDOWN_MS,
 } from "./accounts.logic";
 import { providerAccountsEnvironment } from "./state";
 
@@ -70,25 +74,42 @@ export function AccountSwitcherDialog({
     account?: ProviderAccount;
   } | null>(null);
   const [now, setNow] = useState(() => Date.now());
-  const [refreshing, setRefreshing] = useState(false);
-  const [lastRefreshedAt, setLastRefreshedAt] = useState<number | null>(null);
-  const coolingDown = isUsageRefreshCoolingDown(lastRefreshedAt, now);
-  const refreshPending = useRef(false);
+  // Refresh is per account so a click never probes every saved account at once.
+  const [manualRefreshedAt, setManualRefreshedAt] = useState<
+    ReadonlyMap<ProviderAccountId, number>
+  >(() => new Map());
+  const [refreshingIds, setRefreshingIds] = useState<ReadonlySet<ProviderAccountId>>(
+    () => new Set(),
+  );
+  const pendingIds = useRef(new Set<ProviderAccountId>());
+  const autoPending = useRef(false);
+  const nextAutoAt = useRef(0);
   const refreshUsage = useAtomCommand(providerAccountsEnvironment.refreshUsage, {
     reportFailure: false,
   });
+  const refreshProviders = useAtomCommand(serverEnvironment.refreshProviders, {
+    reportFailure: false,
+  });
   const deviceLabelId = useId();
-  const refresh = async (force = false) => {
-    if (
-      !environmentId ||
-      refreshPending.current ||
-      isUsageRefreshCoolingDown(lastRefreshedAt, Date.now())
-    )
-      return;
-    refreshPending.current = true;
-    setRefreshing(true);
+  const allAccounts = groups.flatMap((group) => group.accounts);
+  const refreshAccount = async (account: ProviderAccount) => {
+    // The row disables its button during the cooldown; the clock ticks when it expires.
+    if (!environmentId || pendingIds.current.has(account.id)) return;
+    pendingIds.current.add(account.id);
+    setRefreshingIds(new Set(pendingIds.current));
     try {
-      const result = await refreshUsage({ environmentId, input: { force } });
+      // The active account's usage is the live provider snapshot, not a saved-store probe.
+      const result = account.active
+        ? await refreshProviders({
+            environmentId,
+            input: {
+              instanceId: defaultInstanceIdForDriver(ProviderDriverKind.make(account.driver)),
+            },
+          })
+        : await refreshUsage({
+            environmentId,
+            input: { accountIds: [account.id], force: true },
+          });
       if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
         const failure = squashAtomCommandFailure(result);
         toastManager.add({
@@ -98,30 +119,61 @@ export function AccountSwitcherDialog({
         });
       }
     } finally {
-      refreshPending.current = false;
-      setRefreshing(false);
+      pendingIds.current.delete(account.id);
+      setRefreshingIds(new Set(pendingIds.current));
       const completedAt = Date.now();
-      setLastRefreshedAt(completedAt);
+      setManualRefreshedAt((previous) => new Map(previous).set(account.id, completedAt));
       setNow(completedAt);
     }
   };
-  const refreshOnOpen = useEffectEvent(() => {
-    void refresh();
+  // Background refresh probes at most one stale inactive account; the server gate decides.
+  const autoRefresh = useEffectEvent((at: number) => {
+    if (!environmentId || autoPending.current) return;
+    const accountId = autoRefreshAccountId(allAccounts, at);
+    if (!accountId || pendingIds.current.has(accountId)) return;
+    autoPending.current = true;
+    void refreshUsage({ environmentId, input: { accountIds: [accountId] } }).finally(() => {
+      autoPending.current = false;
+    });
   });
+  // Opening the dialog, or a ready account appearing without usage, refreshes right away.
+  const openTrigger =
+    allAccounts.length === 0
+      ? null
+      : allAccounts
+          .filter((account) => !account.active && account.status === "ready" && !account.usage)
+          .map((account) => account.id)
+          .join();
   useEffect(() => {
-    refreshOnOpen();
-  }, []);
+    if (openTrigger !== null) autoRefresh(Date.now());
+  }, [openTrigger]);
   useEffect(() => {
-    // One clock timer: align its next tick to cooldown expiry, then resume minute ticks.
-    const nextTickAt = (lastRefreshedAt ?? Date.now()) + CLOCK_INTERVAL_MS;
+    // One clock timer: minute ticks drive labels and the background refresh; an earlier
+    // tick is inserted only when a manual refresh cooldown expires.
     let timer: ReturnType<typeof setTimeout>;
-    const tick = () => {
-      setNow(Date.now());
-      timer = setTimeout(tick, CLOCK_INTERVAL_MS);
+    const schedule = () => {
+      const current = Date.now();
+      if (nextAutoAt.current === 0) nextAutoAt.current = current + CLOCK_INTERVAL_MS;
+      const cooldownEnds = [...manualRefreshedAt.values()]
+        .map((at) => at + USAGE_REFRESH_COOLDOWN_MS)
+        .filter((end) => end > current);
+      timer = setTimeout(
+        tick,
+        Math.max(0, Math.min(nextAutoAt.current, ...cooldownEnds) - current),
+      );
     };
-    timer = setTimeout(tick, Math.max(0, nextTickAt - Date.now()));
+    const tick = () => {
+      const current = Date.now();
+      setNow(current);
+      if (current >= nextAutoAt.current) {
+        nextAutoAt.current = current + CLOCK_INTERVAL_MS;
+        autoRefresh(current);
+      }
+      schedule();
+    };
+    schedule();
     return () => clearTimeout(timer);
-  }, [lastRefreshedAt]);
+  }, [manualRefreshedAt]);
   const checkedAt = Math.max(
     0,
     ...groups.flatMap((group) =>
@@ -149,31 +201,13 @@ export function AccountSwitcherDialog({
               Switch the account new turns use. Threads keep their history and continue on the new
               account.
             </DialogDescription>
-            <div className="flex flex-wrap items-center gap-2">
-              <Tooltip>
-                <TooltipTrigger render={<span />}>
-                  <Button
-                    variant="ghost-muted"
-                    size="xs"
-                    disabled={!environmentId || refreshing || coolingDown}
-                    onClick={() => void refresh(true)}
-                  >
-                    <RefreshIcon refreshing={refreshing} />
-                    Refresh usage
-                  </Button>
-                </TooltipTrigger>
-                <TooltipPopup>
-                  {coolingDown ? "Usage was refreshed moments ago" : "Refresh usage"}
-                </TooltipPopup>
-              </Tooltip>
-              <span className="text-xs text-muted-foreground">
-                {!checkedAt
-                  ? "Never checked"
-                  : minutes === 0
-                    ? "Checked just now"
-                    : `Checked ${minutes} min ago`}
-              </span>
-            </div>
+            <span className="text-xs text-muted-foreground">
+              {!checkedAt
+                ? "Never checked"
+                : minutes === 0
+                  ? "Checked just now"
+                  : `Checked ${minutes} min ago`}
+            </span>
           </DialogHeader>
           <DialogPanel>
             {devices.length > 1 ? (
@@ -284,6 +318,14 @@ export function AccountSwitcherDialog({
                               environmentId={environmentId}
                               now={now}
                               best={best === account.id}
+                              refreshing={refreshingIds.has(account.id)}
+                              coolingDown={isUsageRefreshCoolingDown(
+                                manualRefreshedAt.get(account.id),
+                                now,
+                              )}
+                              {...(account.active || account.status === "ready"
+                                ? { onRefreshUsage: () => void refreshAccount(account) }
+                                : {})}
                               onSignIn={(account) =>
                                 setLogin({ driver, account, switchMode: group.switchMode })
                               }
