@@ -4,24 +4,37 @@ import {
   ProviderInstanceId,
   ProviderDriverKind,
   type ProviderAccount,
+  type ProviderAccountGroup,
   type ServerProvider,
   type ServerProviderUsageWindow,
 } from "@t3tools/contracts";
 import {
+  accountFreshness,
+  accountPrimaryAction,
+  accountStatusMessage,
+  accountSubtitle,
   accountTone,
-  accountUsageWindows,
-  accountUsageDisplay,
+  accountUsageCell,
   autoRefreshAccountId,
+  autoSwitchStatus,
   isUsageRefreshCoolingDown,
   bestAccountId,
+  formatAgo,
+  orderedAccounts,
+  plural,
+  readyAccountCount,
   remainingPercent,
-  sortedAccounts,
+  removeBlockedReason,
+  shortPlanLabel,
   providerAccountsUsageKey,
   shouldShowAccountBadge,
+  stopTurnsCopy,
+  switchBlockedReason,
   accountSwitchInput,
   accountSwitchSuccess,
   accountSwitchBusyTurnCount,
   pendingAutoSwitchAccount,
+  usageResetLabel,
 } from "./accounts.logic";
 
 const window = (usedPercent: number): ServerProviderUsageWindow => ({
@@ -50,40 +63,35 @@ function account(
 }
 
 describe("account choices", () => {
-  it("keeps active first, ranks known quotas ahead of unknown, and breaks ties by label", () => {
+  it("keeps Default first and otherwise the server order, whatever the usage", () => {
     const accounts = [
-      account("unknown"),
-      account("z", 20),
-      account("active", 99, { active: true }),
+      account("z", 90),
+      account("default", 10, { kind: "default", active: true }),
       account("a", 20),
-      account("empty", undefined, { usage: { checkedAt: "2026-09-23T12:00:00Z", windows: [] } }),
     ];
-    expect(sortedAccounts(accounts).map((account) => account.label)).toEqual([
-      "active",
-      "a",
-      "z",
-      "empty",
-      "unknown",
-    ]);
-    expect(accounts[0]?.label).toBe("unknown");
+    expect(orderedAccounts(accounts).map((entry) => entry.label)).toEqual(["default", "z", "a"]);
   });
-  it("ranks fractional usage before the label tie-breaker", () => {
-    expect(
-      sortedAccounts([account("a", 20.4), account("z", 20.1)]).map((account) => account.label),
-    ).toEqual(["z", "a"]);
-  });
-  it("displays the tightest weekly window and session in that order", () => {
+  it("picks the tightest window per column and lists every window of that kind", () => {
     const weekly = { ...window(80), id: "weekly-opus", kind: "weekly" as const };
     const session = window(30);
-    expect(
-      accountUsageWindows([
-        { ...weekly, id: "weekly", usedPercent: 20 },
-        weekly,
-        { ...window(10), id: "monthly", kind: "monthly" },
-        session,
-      ]),
-    ).toEqual([session, weekly]);
-    expect(accountUsageWindows([])).toEqual([]);
+    const monthly = { ...window(10), id: "monthly", kind: "monthly" as const };
+    const windows = [{ ...weekly, id: "weekly", usedPercent: 20 }, weekly, monthly, session];
+    expect(accountUsageCell(windows, "session")).toEqual({ tightest: session, all: [session] });
+    expect(accountUsageCell(windows, "weekly").tightest).toBe(weekly);
+    expect(accountUsageCell(windows, "weekly").all).toHaveLength(2);
+    // Monthly stands in for weekly only when no weekly window exists.
+    expect(accountUsageCell([monthly], "weekly").tightest).toBe(monthly);
+    expect(accountUsageCell([monthly], "session")).toEqual({ tightest: undefined, all: [] });
+  });
+  it("labels resets, and marks a passed reset as just reset", () => {
+    const now = Date.parse("2026-09-23T12:00:00Z");
+    expect(usageResetLabel(window(10), now)).toBeNull();
+    expect(usageResetLabel({ ...window(10), resetsAt: "2026-09-23T15:30:00Z" }, now)).toBe(
+      "in 3h 30m",
+    );
+    expect(usageResetLabel({ ...window(10), resetsAt: "2026-09-23T11:00:00Z" }, now)).toBe(
+      "Just reset",
+    );
   });
   it("uses the tightest window, not an average", () => {
     const tight = account("tight", 0, {
@@ -244,79 +252,327 @@ describe("sidebar account badges", () => {
   });
 });
 
-describe("usage backoff display", () => {
+describe("freshness", () => {
   const now = Date.parse("2026-09-23T12:35:00Z");
-  it("retains last good bars and their age while a rate-limited probe backs off", () => {
-    const saved = account("work", 40, {
+  const idle = { refreshing: false };
+  it("merges into the status message for rows that aren't ready or are duplicates", () => {
+    expect(accountFreshness(account("a", 10, { status: "signedOut" }), now, idle)).toBeNull();
+    expect(
+      accountFreshness(account("a", 10, { duplicateOf: ProviderAccountId.make("b") }), now, idle),
+    ).toBeNull();
+  });
+  it("shows unsupported usage as a dash with the refresh button disabled", () => {
+    const unsupported = account("api", undefined, {
+      active: true,
+      usage: {
+        checkedAt: "2026-09-23T12:00:00Z",
+        windows: [],
+        unavailable: { reason: "unsupported" },
+      },
+    });
+    expect(accountFreshness(unsupported, now, { refreshing: true })).toMatchObject({
+      text: "—",
+      canRefresh: false,
+      refreshTooltip: "Usage isn't reported for this login",
+    });
+  });
+  it("shows checking while any request for the row is in flight", () => {
+    expect(accountFreshness(account("a", 10), now, { refreshing: true })).toMatchObject({
+      text: "Checking…",
+      refreshing: true,
+      canRefresh: false,
+    });
+  });
+  it("never lets a leftover backoff contradict the active account's live numbers", () => {
+    const active = account("active", 40, {
+      active: true,
+      usage: { checkedAt: "2026-09-23T12:34:30Z", windows: [window(40)] },
+      usageRefresh: { nextAllowedAt: "2026-09-23T12:47:00Z", rateLimited: true },
+    });
+    expect(accountFreshness(active, now, idle)).toMatchObject({
+      text: "Just now",
+      narrowText: "Checked just now",
+      tone: "muted",
+      tooltip: "Updated with every turn on the active account.",
+      canRefresh: true,
+    });
+    expect(
+      accountFreshness(active, now, { refreshing: false, cooldownUntil: now + 90_000 }),
+    ).toMatchObject({ canRefresh: false, refreshTooltip: "You can refresh again in 2m" });
+    expect(accountFreshness(account("active", undefined, { active: true }), now, idle)?.text).toBe(
+      "Not checked",
+    );
+  });
+  it("reports a rate limit with the age of the retained numbers", () => {
+    const limited = account("work", 40, {
       usage: {
         checkedAt: "2026-09-23T12:00:00Z",
         windows: [window(40)],
         unavailable: { reason: "probeFailed" },
       },
-      usageRefresh: { nextAllowedAt: "2026-09-23T12:47:00Z", rateLimited: true },
+      usageRefresh: { nextAllowedAt: "2026-09-23T12:39:30Z", rateLimited: true },
     });
-    expect(accountUsageDisplay(saved, now)).toEqual({
-      windows: [window(40)],
-      checkedLabel: "Checked 35 min ago",
-      retryLabel: "Usage rate-limited · retrying in 12m",
+    expect(accountFreshness(limited, now, idle)).toEqual({
+      text: "Retry in 5m",
+      narrowText: "Retry in 5m",
+      tone: "warning",
+      icon: "alert",
+      refreshing: false,
+      tooltip: "Codex is rate-limiting usage checks. Showing numbers from 35m ago.",
+      canRefresh: false,
+      refreshTooltip: "Checks resume in 5m",
     });
-    expect(remainingPercent(saved)).toBeNull();
-  });
-  it("shows ordinary failure backoff even without any previous measurement", () => {
     expect(
-      accountUsageDisplay(
-        account("new", undefined, { usageRefresh: { nextAllowedAt: "2026-09-23T12:39:00Z" } }),
+      accountFreshness(
+        account("new", undefined, {
+          usageRefresh: { nextAllowedAt: "2026-09-23T12:39:00Z", rateLimited: true },
+        }),
         now,
-      ),
-    ).toEqual({
-      windows: [],
-      checkedLabel: null,
-      retryLabel: "Retrying in 4m",
+        idle,
+      )?.tooltip,
+    ).toBe("Codex is rate-limiting usage checks. No numbers yet.");
+  });
+  it("tells a failed check that is backing off from one that can retry now", () => {
+    const failed = (nextAllowedAt?: string) =>
+      account("work", 40, {
+        usage: {
+          checkedAt: "2026-09-23T12:00:00Z",
+          windows: [window(40)],
+          unavailable: { reason: "probeFailed" },
+        },
+        ...(nextAllowedAt ? { usageRefresh: { nextAllowedAt } } : {}),
+      });
+    expect(accountFreshness(failed("2026-09-23T12:36:00Z"), now, idle)).toMatchObject({
+      text: "Retry in 1m",
+      tooltip: "The last check failed. Showing numbers from 35m ago.",
+      canRefresh: false,
+    });
+    expect(accountFreshness(failed(), now, idle)).toMatchObject({
+      text: "Check failed",
+      tone: "warning",
+      canRefresh: true,
+      refreshTooltip: "Try again",
+    });
+    // The deadline passing turns the wait into a retry.
+    expect(accountFreshness(failed("2026-09-23T12:36:00Z"), now + 60_000, idle)?.text).toBe(
+      "Check failed",
+    );
+  });
+  it("offers a first check for accounts never measured", () => {
+    expect(accountFreshness(account("new"), now, idle)).toMatchObject({
+      text: "Not checked",
+      tooltip: "Usage hasn't been checked yet.",
+      canRefresh: true,
+      refreshTooltip: "Check usage",
     });
   });
-  it("rounds remaining retry time up and removes it when the deadline arrives", () => {
-    const saved = account("work", 40, {
-      usageRefresh: { nextAllowedAt: "2026-09-23T12:35:01Z", rateLimited: true },
+  it("only disables the button after a successful probe; never shows retry text", () => {
+    const fresh = account("work", 40, {
+      usage: { checkedAt: "2026-09-23T12:32:00Z", windows: [window(40)] },
+      usageRefresh: { nextAllowedAt: "2026-09-23T12:37:00Z", rateLimited: false },
     });
-    expect(accountUsageDisplay(saved, now).retryLabel).toBe("Usage rate-limited · retrying in 1m");
-    expect(accountUsageDisplay(saved, now + 1_000).retryLabel).toBeNull();
-    expect(accountUsageDisplay(saved, now + 60_000).retryLabel).toBeNull();
-    expect(accountUsageDisplay(account("work", 40), now).retryLabel).toBeNull();
+    const state = accountFreshness(fresh, now, idle);
+    expect(state).toMatchObject({
+      text: "3m ago",
+      narrowText: "Checked 3m ago",
+      tone: "muted",
+      canRefresh: false,
+      refreshTooltip: "You can refresh again in 2m",
+    });
+    expect(state?.text).not.toContain("Retry");
+    expect(accountFreshness(fresh, now + 3 * 60_000, idle)).toMatchObject({
+      text: "6m ago",
+      canRefresh: true,
+      refreshTooltip: "Refresh usage",
+    });
+    // The client cooldown after a manual refresh disables it the same way.
+    expect(
+      accountFreshness(account("work", 40), now, { refreshing: false, cooldownUntil: now + 1 })
+        ?.canRefresh,
+    ).toBe(false);
   });
-  it("does not display bars or a measurement age for unsupported usage", () => {
-    const saved = account("unsupported", undefined, {
-      usage: {
-        checkedAt: "2026-09-23T12:00:00Z",
-        windows: [window(40)],
-        unavailable: { reason: "unsupported" },
-      },
-    });
-    expect(accountUsageDisplay(saved, now)).toEqual({
-      windows: [],
-      checkedLabel: null,
-      retryLabel: null,
-    });
-  });
-  it("updates measurement age from the supplied dialog clock", () => {
-    const saved = account("work", 40);
-    expect(accountUsageDisplay(saved, now - 35 * 60_000).checkedLabel).toBe("Checked just now");
-    expect(accountUsageDisplay(saved, now - 36 * 60_000).checkedLabel).toBe("Checked just now");
-    expect(accountUsageDisplay(saved, now + 60_000).checkedLabel).toBe("Checked 36 min ago");
+  it("formats ages in the fixed steps", () => {
+    expect(formatAgo(59_999)).toBe("Just now");
+    expect(formatAgo(59_999, true)).toBe("just now");
+    expect(formatAgo(3 * 60_000)).toBe("3m ago");
+    expect(formatAgo(2 * 3_600_000 + 1)).toBe("2h ago");
+    expect(formatAgo(3 * 86_400_000)).toBe("3d ago");
+    expect(formatAgo(-5_000)).toBe("Just now");
   });
   it("blocks refresh for 60 seconds after completion, then permits it", () => {
     expect(isUsageRefreshCoolingDown(null, now)).toBe(false);
     expect(isUsageRefreshCoolingDown(now, now)).toBe(true);
     expect(isUsageRefreshCoolingDown(now, now + 59_999)).toBe(true);
     expect(isUsageRefreshCoolingDown(now, now + 60_000)).toBe(false);
-    expect(isUsageRefreshCoolingDown(now, now + 120_000)).toBe(false);
-    // Only a manual refresh records a timestamp; accounts never refreshed by hand are free.
     expect(isUsageRefreshCoolingDown(undefined, now)).toBe(false);
   });
-  it("labels the post-success server floor as a cooldown, not a retry", () => {
-    const saved = account("work", 40, {
-      usageRefresh: { nextAllowedAt: "2026-09-23T12:39:00Z", rateLimited: false },
+});
+
+describe("copy helpers", () => {
+  it("pluralises through one helper", () => {
+    expect(plural(1, "running turn")).toBe("1 running turn");
+    expect(plural(2, "running turn")).toBe("2 running turns");
+    expect(plural(0, "child", "children")).toBe("0 children");
+  });
+  it("shortens plan names and falls back to the raw string", () => {
+    expect(shortPlanLabel("Claude Max Subscription")).toBe("Max");
+    expect(shortPlanLabel("ChatGPT Pro 20x Subscription")).toBe("Pro 20x");
+    expect(shortPlanLabel("chatgpt plus plan")).toBe("plus");
+    expect(shortPlanLabel("Team")).toBe("Team");
+    expect(shortPlanLabel("Claude Subscription")).toBe("Subscription");
+  });
+  it("describes stopping one or several running turns", () => {
+    expect(stopTurnsCopy("Work", 1)).toEqual({
+      title: "Stop 1 running turn?",
+      description:
+        "Switching Codex to Work restarts it. The running turn stops now. Its thread keeps its history and can continue on Work.",
     });
-    expect(accountUsageDisplay(saved, now).retryLabel).toBe("Refreshable in 4m");
+    expect(stopTurnsCopy("Work", 2).title).toBe("Stop 2 running turns?");
+    expect(stopTurnsCopy("Work", 2).description).toContain("The 2 running turns stop now.");
+  });
+  it("falls back to a description of the login when there is no distinct email", () => {
+    expect(accountSubtitle(account("a", undefined, { email: "a@x.dev" }))).toBe("a@x.dev");
+    expect(accountSubtitle(account("Default", undefined, { kind: "default" }))).toBe(
+      "Original login",
+    );
+    expect(accountSubtitle(account("ext", undefined, { kind: "external" }))).toBe(
+      "Set in Settings",
+    );
+    expect(accountSubtitle(account("a@x.dev", undefined, { email: "a@x.dev" }))).toBe(
+      "No email reported",
+    );
+  });
+});
+
+describe("row state", () => {
+  const keeper = account("keeper", 20, { kind: "default" });
+  const duplicate = (overrides: Partial<ProviderAccount> = {}) =>
+    account("copy", 20, { duplicateOf: keeper.id, email: "same@x.dev", ...overrides });
+  it("uses the first matching status message", () => {
+    expect(accountStatusMessage(duplicate({ status: "signedOut" }), "Default")).toEqual({
+      icon: "copy",
+      tone: "warning",
+      text: "Same account as Default.",
+    });
+    expect(accountStatusMessage(account("a", 0, { status: "signedOut" }), "")?.text).toBe(
+      "Signed out. Sign in to use this account.",
+    );
+    expect(accountStatusMessage(account("a", 0, { status: "error" }), "")?.text).toBe(
+      "Login expired. Sign in again to use this account.",
+    );
+    expect(
+      accountStatusMessage(account("a", 0, { status: "error", message: "Wrong account" }), ""),
+    ).toMatchObject({ tone: "error", text: "Wrong account" });
+    expect(accountStatusMessage(account("a", 0, { status: "pending" }), "")?.text).toBe(
+      "Sign-in wasn't finished.",
+    );
+    expect(accountStatusMessage(account("a", 0), "")).toBeNull();
+  });
+  it("picks the primary action in precedence order", () => {
+    const group = { accounts: [keeper, duplicate()] };
+    expect(accountPrimaryAction(duplicate(), group, "self").kind).toBe("switching");
+    expect(accountPrimaryAction(duplicate(), group, "idle").kind).toBe("remove");
+    expect(accountPrimaryAction(account("a", 0, { status: "error" }), group, "idle").kind).toBe(
+      "signIn",
+    );
+    expect(
+      accountPrimaryAction(account("a", 0, { status: "signedOut", active: true }), group, "idle")
+        .kind,
+    ).toBe("signIn");
+    expect(accountPrimaryAction(account("a", 0, { active: true }), group, "idle").kind).toBe(
+      "active",
+    );
+    expect(accountPrimaryAction(account("a", 0), group, "other").kind).toBe("switch");
+  });
+  it("removes an active Claude duplicate, but an active Codex duplicate switches first", () => {
+    const claude = duplicate({ active: true, driver: "claudeAgent" });
+    const codex = duplicate({ active: true });
+    expect(accountPrimaryAction(claude, { accounts: [keeper, claude] }, "idle").kind).toBe(
+      "remove",
+    );
+    expect(removeBlockedReason(claude, false)).toBeUndefined();
+    expect(accountPrimaryAction(codex, { accounts: [keeper, codex] }, "idle")).toEqual({
+      kind: "switchToKeeper",
+      keeper,
+    });
+    expect(removeBlockedReason(codex, false)).toBe("Switch to another account first.");
+  });
+  it("explains why remove and switch are blocked", () => {
+    expect(removeBlockedReason(account("d", 0, { kind: "default", active: true }), true)).toBe(
+      "The original login can't be removed.",
+    );
+    expect(removeBlockedReason(account("a", 0, { active: true }), true)).toBe(
+      "Switch to another account first.",
+    );
+    expect(removeBlockedReason(account("a", 0), true)).toBe("Wait for the sign-in to finish.");
+    expect(removeBlockedReason(account("a", 0), false)).toBeUndefined();
+    expect(switchBlockedReason({ warning: "Config changed" }, "other")).toBe(
+      "Switching is paused. See the warning above.",
+    );
+    expect(switchBlockedReason({}, "other")).toBe("Another switch is in progress.");
+    expect(switchBlockedReason({}, "idle")).toBeUndefined();
+  });
+  it("never recommends or probes a duplicate and counts it once", () => {
+    const active = account("active", 90, { active: true });
+    const copy = account("copy", 10, { duplicateOf: active.id });
+    expect(bestAccountId([active, copy])).toBeNull();
+    expect(
+      autoRefreshAccountId([account("copy", undefined, { duplicateOf: active.id })], 0),
+    ).toBeNull();
+    expect(readyAccountCount([active, copy, account("out", 0, { status: "signedOut" })])).toBe(1);
+  });
+});
+
+describe("auto-switch status", () => {
+  const target = account("work", 20);
+  const active = account("home", 80, { active: true });
+  const group = (
+    autoSwitch: Partial<ProviderAccountGroup["autoSwitch"]>,
+    switchMode: ProviderAccountGroup["switchMode"] = "restart",
+  ) => ({
+    switchMode,
+    accounts: [active, target],
+    autoSwitch: { enabled: true, thresholdPercent: 10, state: "watching" as const, ...autoSwitch },
+  });
+  it("explains the feature while off, per switch mode", () => {
+    expect(autoSwitchStatus(group({ enabled: false, state: "off" }), undefined)).toEqual({
+      text: "Switches before the active account runs out. Waits for running turns to finish.",
+    });
+    expect(autoSwitchStatus(group({ enabled: false, state: "off" }, "hot")).text).toBe(
+      "Switches before the active account runs out. Running sessions keep going.",
+    );
+  });
+  it("names the pending target and its running turns", () => {
+    const pending = group({ state: "pending", pendingTargetAccountId: target.id });
+    expect(autoSwitchStatus(pending)).toMatchObject({
+      badge: { label: "Waiting for turns", variant: "warning" },
+      target,
+      text: "Switches to work when running turns finish.",
+    });
+    const event = {
+      _tag: "pending" as const,
+      driver: "codex" as const,
+      toAccountId: target.id,
+      toLabel: "work",
+      runningTurnCount: 1,
+      reason: "Low",
+    };
+    expect(autoSwitchStatus(pending, event).text).toBe(
+      "Switches to work when 1 running turn finishes.",
+    );
+    expect(autoSwitchStatus(pending, { ...event, runningTurnCount: 2 }).text).toBe(
+      "Switches to work when 2 running turns finish.",
+    );
+  });
+  it("prefers the server message, otherwise names the watched account", () => {
+    expect(autoSwitchStatus(group({ state: "paused", message: "Paused for 2h" }))).toMatchObject({
+      badge: { label: "Paused" },
+      text: "Paused for 2h",
+    });
+    expect(autoSwitchStatus(group({}))).toMatchObject({
+      badge: { label: "On", variant: "success" },
+      text: "Watching home.",
+    });
   });
 });
 
@@ -345,10 +601,14 @@ describe("account switch modes", () => {
   });
   it("explains that Claude's running sessions continue after a hot switch", () => {
     expect(accountSwitchSuccess("hot", "Work")).toEqual({
-      title: "Switched Claude to Work",
-      description: "Running sessions continue on the new account from their next request.",
+      title: "Switched Claude Code to Work",
+      description:
+        "Running sessions use it from their next request. On macOS this can take up to 30 seconds.",
     });
-    expect(accountSwitchSuccess("restart", "Work")).toEqual({ title: "Switched to Work" });
+    expect(accountSwitchSuccess("restart", "Work")).toEqual({
+      title: "Switched Codex to Work",
+      description: "Codex restarted on the new account.",
+    });
   });
   it("only exposes pending auto-switch targets for restart groups", () => {
     const target = account("work", 20);

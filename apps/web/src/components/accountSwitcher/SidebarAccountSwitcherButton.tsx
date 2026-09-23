@@ -19,8 +19,8 @@ import { AccountSwitcherDialog } from "./AccountSwitcherDialog";
 import {
   ACCOUNT_DRIVERS,
   ACCOUNT_DRIVER_LABELS,
-  HOT_SWITCH_DESCRIPTION,
   accountTone,
+  autoSwitchToastTitle,
   remainingPercent,
   providerAccountsUsageKey,
   shouldShowAccountBadge,
@@ -38,6 +38,7 @@ export function SidebarAccountSwitcherButton() {
     >
   >(new Map());
   const lastAutoSwitch = useRef(new Map<string, string>());
+  const connectedLabels = useRef(new Map<EnvironmentId, string>());
   const onAutoEvent = useCallback(
     (environmentId: EnvironmentId, event: ProviderAccountAutoSwitchEvent) => {
       // `changed` only invalidates the list in client-runtime. Future tags are not notifications.
@@ -48,13 +49,16 @@ export function SidebarAccountSwitcherButton() {
         // Retain deduplication across disconnect/reconnect subscription remounts.
         if (lastAutoSwitch.current.get(scope) === key) return;
         lastAutoSwitch.current.set(scope, key);
+        // More than one device: name the one that switched.
+        const connected = connectedLabels.current;
         toastManager.add({
           type: "success",
-          title: `Switched ${event.driver === "claudeAgent" ? "Claude" : "Codex"} to ${event.toLabel}`,
-          description:
-            event.driver === "claudeAgent"
-              ? `${HOT_SWITCH_DESCRIPTION} ${event.reason}`
-              : event.reason,
+          title: autoSwitchToastTitle(
+            event.driver,
+            event.toLabel,
+            connected.size > 1 ? connected.get(environmentId) : undefined,
+          ),
+          description: event.reason,
         });
       }
       setAutoEvents((previous) =>
@@ -70,11 +74,30 @@ export function SidebarAccountSwitcherButton() {
     ([, presentation]) =>
       presentation.connection.phase === "connected" && presentation.serverConfig !== null,
   );
-  const selected = connected.find(([id]) => id === selectedDevice) ?? connected[0];
+  const connectedKey = JSON.stringify(
+    connected.map(([id, presentation]) => [id, presentation.entry.target.label]),
+  );
+  useEffect(() => {
+    connectedLabels.current = new Map(JSON.parse(connectedKey) as [EnvironmentId, string][]);
+  }, [connectedKey]);
+  // A device the user picked that went offline stays selected until it reconnects.
+  const offline =
+    selectedDevice && !connected.some(([id]) => id === selectedDevice)
+      ? presentations.get(selectedDevice)
+      : undefined;
+  const selected = offline
+    ? undefined
+    : (connected.find(([id]) => id === selectedDevice) ?? connected[0]);
   const environmentId = selected?.[0] ?? null;
   const query = useEnvironmentQuery(
     environmentId ? providerAccountsEnvironment.list({ environmentId, input: {} }) : null,
   );
+  const devices = connected.map(([id, presentation]) => ({
+    id,
+    label: presentation.entry.target.label,
+  }));
+  if (offline && selectedDevice)
+    devices.push({ id: selectedDevice, label: offline.entry.target.label });
   const providers = selected?.[1].serverConfig?.providers ?? [];
   const usageKey = providerAccountsUsageKey(providers);
   const observedUsage = useRef<{ environmentId: EnvironmentId | null; key: string } | null>(null);
@@ -155,12 +178,10 @@ export function SidebarAccountSwitcherButton() {
       <Dialog open={open} onOpenChange={setOpen}>
         {open ? (
           <AccountSwitcherDialog
-            key={environmentId ?? "disconnected"}
-            environmentId={environmentId}
-            devices={connected.map(([id, presentation]) => ({
-              id,
-              label: presentation.entry.target.label,
-            }))}
+            key={(offline ? selectedDevice : environmentId) ?? "disconnected"}
+            environmentId={offline ? selectedDevice : environmentId}
+            offlineDeviceLabel={offline?.entry.target.label}
+            devices={devices}
             onDeviceChange={setSelectedDevice}
             groups={groups}
             autoEvents={environmentId ? autoEvents.get(environmentId) : undefined}

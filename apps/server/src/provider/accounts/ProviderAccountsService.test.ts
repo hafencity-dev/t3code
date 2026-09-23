@@ -760,6 +760,99 @@ describe("ProviderAccountsService", () => {
     });
   }
 
+  it.effect(
+    "re-login of Default or of an account's own identity is never rejected as a duplicate",
+    () => {
+      let callbacks: ProviderAccountLoginOptions;
+      const codexAccounts = (snapshot: ProviderAccountsSnapshot) =>
+        snapshot.groups.find((group) => group.driver === "codex")!.accounts;
+      return run(
+        Effect.gen(function* () {
+          const service = yield* ProviderAccountsService;
+          const initial = codexAccounts(yield* service.list());
+          const defaultId = initial.find((account) => account.kind === "default")!.id;
+          yield* service.switchAccount({ accountId: seeded!.id });
+          // Default signs in as the identity already saved for Other: Default must stay repairable.
+          const relogin = yield* Effect.promise(() =>
+            callbacks.prepare({ driver: "codex", accountId: defaultId }),
+          );
+          const outcome = yield* Effect.promise(() =>
+            callbacks.complete(relogin, { email: "Other@Example.test" }),
+          );
+          expect(outcome).toBeUndefined();
+          const afterDefault = codexAccounts(yield* service.list());
+          const repaired = afterDefault.find((account) => account.id === defaultId)!;
+          expect(repaired).toMatchObject({ status: "ready", email: "Other@Example.test" });
+          expect(repaired.message).toBeUndefined();
+          // The other copy is the one flagged, so it can be removed.
+          expect(afterDefault.find((account) => account.id === seeded!.id)).toMatchObject({
+            duplicateOf: defaultId,
+          });
+          // The flagged copy signing in again as its own identity is not rejected either.
+          const own = yield* Effect.promise(() =>
+            callbacks.prepare({ driver: "codex", accountId: seeded!.id }),
+          );
+          expect(
+            yield* Effect.promise(() => callbacks.complete(own, { email: "other@example.test" })),
+          ).toBeUndefined();
+          const copy = codexAccounts(yield* service.list()).find(
+            (account) => account.id === seeded!.id,
+          )!;
+          expect(copy).toMatchObject({ status: "ready", duplicateOf: defaultId });
+          expect(copy.message).toBeUndefined();
+        }),
+        true,
+        {
+          login: (options) => {
+            callbacks = options;
+            return new ProviderAccountLogin(options);
+          },
+        },
+      );
+    },
+  );
+
+  it.effect("labels a new login without a name with its email and keeps list order", () => {
+    let callbacks: ProviderAccountLoginOptions;
+    const codexAccounts = (snapshot: ProviderAccountsSnapshot) =>
+      snapshot.groups.find((group) => group.driver === "codex")!.accounts;
+    return run(
+      Effect.gen(function* () {
+        const service = yield* ProviderAccountsService;
+        const unnamed = yield* Effect.promise(() => callbacks.prepare({ driver: "codex" }));
+        expect(unnamed.unnamed).toBe(true);
+        yield* Effect.promise(() => callbacks.complete(unnamed, { email: "new@example.test" }));
+        const named = yield* Effect.promise(() =>
+          callbacks.prepare({ driver: "codex", label: "Work" }),
+        );
+        expect(named.unnamed).toBeUndefined();
+        yield* Effect.promise(() => callbacks.complete(named, { email: "work@example.test" }));
+        const accounts = codexAccounts(yield* service.list());
+        expect(accounts.map((account) => account.label)).toEqual([
+          "Default",
+          "Other",
+          "new@example.test",
+          "Work",
+        ]);
+        // Renaming never moves an account to the end of the list.
+        yield* service.rename({ accountId: seeded!.id, label: "Renamed" });
+        expect(codexAccounts(yield* service.list()).map((account) => account.label)).toEqual([
+          "Default",
+          "Renamed",
+          "new@example.test",
+          "Work",
+        ]);
+      }),
+      true,
+      {
+        login: (options) => {
+          callbacks = options;
+          return new ProviderAccountLogin(options);
+        },
+      },
+    );
+  });
+
   it.effect("pending managed re-login can finish with a previously unknown identity", () => {
     let callbacks: ProviderAccountLoginOptions;
     return run(

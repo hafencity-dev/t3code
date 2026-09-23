@@ -20,6 +20,8 @@ export interface PreparedProviderAccountLogin {
   readonly driver: ProviderAccountLoginInput["driver"];
   readonly homePath: string;
   readonly existing: boolean;
+  /** A new account created without a name; completion labels it with the signed-in email. */
+  readonly unnamed?: boolean;
   readonly claudeActive?: boolean;
   readonly binaryPath?: string;
   readonly environment?: NodeJS.ProcessEnv;

@@ -6,9 +6,14 @@ Save several Claude Code and Codex accounts and switch between them when one run
 ## Add an account
 
 1. Open **Accounts** and select **Add account** next to Claude Code or Codex.
-2. Select **Start sign-in**.
+2. Optionally enter a name, then select **Start sign-in**. Without a name, the account is listed
+   by its email address.
 3. Codex: open the link (or scan the QR code) and enter the device code. Claude Code: open the
    link, sign in, and paste the code shown in the browser back into the dialog.
+
+A login that is already saved is rejected. If your browser is still signed in to claude.ai or
+chatgpt.com with another saved account, sign out there first or use a private window. A copy saved
+before this check shows **Same account as …** with **Remove**.
 
 Your existing login appears as **Default**. Each saved account keeps its own login on the T3
 environment that runs the provider. Logins never leave that machine, so this also works from the
@@ -16,6 +21,12 @@ web, desktop, and remote clients.
 
 Codex device login must be allowed for your ChatGPT account or workspace. Codex must store its
 credentials in `auth.json`; the keyring credential store is not supported.
+
+## Manage accounts
+
+Rename an account, sign in to it again, or remove it from its **⋯** menu. Signing in again is how
+you repair an expired or signed-out login. The original login (**Default**) can't be removed. To
+remove the account in use, switch to another one first.
 
 ## Switch
 
@@ -47,9 +58,9 @@ switch.
 ## Usage checks
 
 The active account's usage updates with every turn. Other accounts are checked when you open the
-dialog and their numbers are older than five minutes, or when you select **Refresh usage**. Checks
-are rate limited; after a failure or a provider rate limit the dialog shows when it will retry and
-keeps the last known numbers.
+dialog and their numbers are older than five minutes, or when you select the refresh button next
+to an account. Checks are rate limited; after a failure or a provider rate limit the dialog shows
+when it will retry and keeps the last known numbers.
 
 ## Limits
 

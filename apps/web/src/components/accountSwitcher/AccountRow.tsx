@@ -2,60 +2,141 @@ import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
-import type { EnvironmentId, ProviderAccountGroup, ProviderAccount } from "@t3tools/contracts";
-import { EllipsisIcon, TriangleAlertIcon } from "lucide-react";
-import { useState } from "react";
+import type {
+  EnvironmentId,
+  ProviderAccount,
+  ProviderAccountGroup,
+  ProviderAccountId,
+} from "@t3tools/contracts";
+import {
+  CheckIcon,
+  ClockIcon,
+  CopyIcon,
+  LogOutIcon,
+  Trash2Icon,
+  TriangleAlertIcon,
+} from "lucide-react";
+import { useEffect, useRef, useState, type Ref } from "react";
+import { cn } from "../../lib/utils";
 import { useAtomCommand } from "../../state/use-atom-command";
-import { Alert, AlertDescription } from "../ui/alert";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
-import { Menu, MenuTrigger, MenuPopup, MenuItem, MenuSeparator } from "../ui/menu";
-import { RefreshIcon } from "../ui/refresh-icon";
-import { Spinner } from "../ui/spinner";
 import { toastManager } from "../ui/toast";
-import { Tooltip, TooltipTrigger, TooltipPopup } from "../ui/tooltip";
-import { AccountUsage } from "./UsageBar";
-import { RemoveAccountDialog } from "./RemoveAccountDialog";
-import { SwitchAccountAction } from "./SwitchAccountAction";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
+import { AccountActionsMenu } from "./AccountActionsMenu";
+import { AccountFreshnessCell } from "./AccountFreshnessCell";
+import { AccountUsageCell } from "./AccountUsageCell";
+import {
+  accountPrimaryAction,
+  accountStatusMessage,
+  accountSubtitle,
+  removeBlockedReason,
+  shortPlanLabel,
+  switchBlockedReason,
+  type AccountFreshness,
+  type AccountStatusMessage,
+  type SwitchState,
+} from "./accounts.logic";
 import { providerAccountsEnvironment } from "./state";
+import { SwitchAccountAction } from "./SwitchAccountAction";
 
-export function AccountRow({
+/**
+ * Shared by the column header, account rows and hint rows so every value keeps its column.
+ * Narrow sections (< 44rem) stack usage and freshness under the identity instead.
+ */
+export const ACCOUNT_ROW_GRID =
+  "grid items-center gap-x-4 px-3 py-2.5 grid-cols-[0.5rem_minmax(0,1fr)_8rem_8rem_7rem_8.5rem] @max-[44rem]/accounts:grid-cols-[0.5rem_minmax(0,1fr)_auto] @max-[44rem]/accounts:gap-y-2";
+
+// Narrow placement keeps DOM order (refresh → primary → menu) while actions sit on row 1.
+const NARROW_DOT = "@max-[44rem]/accounts:col-start-1 @max-[44rem]/accounts:row-start-1";
+const NARROW_IDENTITY = "@max-[44rem]/accounts:col-start-2 @max-[44rem]/accounts:row-start-1";
+const NARROW_USAGE =
+  "contents @max-[44rem]/accounts:col-span-2 @max-[44rem]/accounts:col-start-2 @max-[44rem]/accounts:row-start-2 @max-[44rem]/accounts:grid @max-[44rem]/accounts:grid-cols-2 @max-[44rem]/accounts:gap-3";
+const NARROW_CHECKED =
+  "@max-[44rem]/accounts:col-span-2 @max-[44rem]/accounts:col-start-2 @max-[44rem]/accounts:row-start-3";
+const NARROW_ACTIONS = "@max-[44rem]/accounts:col-start-3 @max-[44rem]/accounts:row-start-1";
+const NARROW_MESSAGE =
+  "@max-[44rem]/accounts:col-span-2 @max-[44rem]/accounts:col-start-2 @max-[44rem]/accounts:row-span-2 @max-[44rem]/accounts:row-start-2";
+
+const STATUS_ICONS = {
+  copy: CopyIcon,
+  signedOut: LogOutIcon,
+  alert: TriangleAlertIcon,
+  clock: ClockIcon,
+} as const;
+const STATUS_TONES = {
+  warning: "text-warning-foreground",
+  error: "text-destructive-foreground",
+  muted: "text-muted-foreground",
+} as const;
+
+function StatusMessage({
+  message,
+  className,
+}: {
+  message: AccountStatusMessage;
+  className: string;
+}) {
+  const Icon = STATUS_ICONS[message.icon];
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <div
+            className={cn(
+              "flex min-w-0 items-start gap-1.5 text-xs",
+              STATUS_TONES[message.tone],
+              className,
+            )}
+          />
+        }
+      >
+        <Icon aria-hidden className="mt-px size-3.5 shrink-0" />
+        <span className="line-clamp-2">{message.text}</span>
+      </TooltipTrigger>
+      <TooltipPopup>{message.text}</TooltipPopup>
+    </Tooltip>
+  );
+}
+
+function RenameInput({
   account,
   environmentId,
-  switchMode,
-  now,
-  best,
-  refreshing,
-  coolingDown,
-  onRefreshUsage,
-  onSignIn,
+  onDone,
 }: {
   account: ProviderAccount;
   environmentId: EnvironmentId;
-  switchMode: ProviderAccountGroup["switchMode"];
-  now: number;
-  best: boolean;
-  refreshing: boolean;
-  coolingDown: boolean;
-  /** Omitted when this account's usage cannot be refreshed. */
-  onRefreshUsage?: () => void;
-  onSignIn: (account: ProviderAccount) => void;
+  onDone: () => void;
 }) {
-  const [renaming, setRenaming] = useState(false);
   const [name, setName] = useState(account.label);
   const [saving, setSaving] = useState(false);
-  const [removing, setRemoving] = useState(false);
-  const rename = useAtomCommand(providerAccountsEnvironment.rename, { reportFailure: false });
-  const save = async () => {
-    if (!name.trim() || saving) return;
-    setSaving(true);
-    const result = await rename({
-      environmentId,
-      input: { accountId: account.id, label: name.trim() },
+  const settled = useRef(false);
+  // Blur only counts once the input owns focus: the closing menu may briefly hold it.
+  const armed = useRef(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    const id = requestAnimationFrame(() => {
+      inputRef.current?.focus();
+      inputRef.current?.select();
+      armed.current = true;
     });
+    return () => cancelAnimationFrame(id);
+  }, []);
+  const rename = useAtomCommand(providerAccountsEnvironment.rename, { reportFailure: false });
+  const finish = () => {
+    settled.current = true;
+    onDone();
+  };
+  const save = async () => {
+    if (saving || settled.current) return;
+    const label = name.trim();
+    // An empty or unchanged value reverts to the old label.
+    if (!label || label === account.label) return finish();
+    setSaving(true);
+    const result = await rename({ environmentId, input: { accountId: account.id, label } });
     setSaving(false);
-    if (result._tag === "Success") setRenaming(false);
+    if (result._tag === "Success") finish();
     else if (!isAtomCommandInterrupted(result)) {
       const error = squashAtomCommandFailure(result);
       toastManager.add({
@@ -65,170 +146,218 @@ export function AccountRow({
       });
     }
   };
-  const removeItem = (
-    <MenuItem variant="destructive" disabled={account.active} onClick={() => setRemoving(true)}>
-      {account.kind === "external" ? "Forget…" : "Remove…"}
-    </MenuItem>
-  );
   return (
-    <div className="grid gap-3 rounded-lg border bg-card p-3">
-      <div className="flex flex-wrap items-start gap-3">
-        <div className="min-w-0 flex-1">
+    <form
+      className="min-w-0 flex-1"
+      onSubmit={(event) => {
+        event.preventDefault();
+        void save();
+      }}
+    >
+      <Input
+        size="sm"
+        aria-label="Account name"
+        maxLength={40}
+        value={name}
+        disabled={saving}
+        ref={inputRef}
+        onChange={(event) => setName(event.target.value)}
+        onBlur={() => {
+          if (armed.current) void save();
+        }}
+        onKeyDown={(event) => {
+          if (event.key !== "Escape") return;
+          // Escape closes the rename, never the dialog.
+          event.stopPropagation();
+          event.preventDefault();
+          finish();
+        }}
+      />
+    </form>
+  );
+}
+
+/** One account in the fixed grid. Every state replaces a cell's content, never adds lines. */
+export function AccountRow({
+  account,
+  group,
+  environmentId,
+  now,
+  freshness,
+  best,
+  keeperLabel,
+  renaming,
+  signingIn,
+  switchState,
+  menuTriggerRef,
+  onRenameStart,
+  onRenameEnd,
+  onSwitchStart,
+  onSwitchEnd,
+  onRefresh,
+  onSignIn,
+  onRemove,
+}: {
+  account: ProviderAccount;
+  group: ProviderAccountGroup;
+  environmentId: EnvironmentId;
+  now: number;
+  freshness: AccountFreshness | null;
+  best: boolean;
+  keeperLabel: string;
+  renaming: boolean;
+  signingIn: boolean;
+  switchState: SwitchState;
+  menuTriggerRef: Ref<HTMLButtonElement>;
+  onRenameStart: () => void;
+  onRenameEnd: () => void;
+  onSwitchStart: (accountId: ProviderAccountId) => void;
+  onSwitchEnd: () => void;
+  onRefresh: () => void;
+  onSignIn: () => void;
+  onRemove: () => void;
+}) {
+  const message = accountStatusMessage(account, keeperLabel);
+  const unsupported = account.usage?.unavailable?.reason === "unsupported";
+  const windows = account.usage?.windows ?? [];
+  const primary = accountPrimaryAction(account, group, switchState);
+  const switchReason = switchBlockedReason(group, switchState);
+  const subtitle = accountSubtitle(account);
+  const ariaLabel = [account.label, account.active ? "active" : null, message?.text]
+    .filter(Boolean)
+    .join(", ");
+  return (
+    <li
+      aria-label={ariaLabel}
+      data-active={account.active ? "" : undefined}
+      className={cn(ACCOUNT_ROW_GRID, "data-active:bg-muted/40")}
+    >
+      <span className={cn("flex items-center justify-center", NARROW_DOT)}>
+        {account.active ? (
+          <>
+            <span aria-hidden className="size-2 rounded-full bg-primary" />
+            <span className="sr-only">Active</span>
+          </>
+        ) : null}
+      </span>
+      <div className={cn("grid min-w-0", NARROW_IDENTITY)}>
+        <div className="flex h-5 min-w-0 items-center gap-1.5">
           {renaming ? (
-            <form
-              className="flex gap-1"
-              onSubmit={(event) => {
-                event.preventDefault();
-                void save();
-              }}
-            >
-              <Input
-                autoFocus
-                aria-label="Account name"
-                value={name}
-                disabled={saving}
-                onChange={(event) => setName(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Escape") {
-                    event.stopPropagation();
-                    setRenaming(false);
-                  }
-                }}
-              />
-              <Button size="xs" type="submit" disabled={saving || !name.trim()}>
-                {saving ? <Spinner /> : "Save"}
-              </Button>
-              <Button
-                size="xs"
-                variant="ghost"
-                disabled={saving}
-                onClick={() => setRenaming(false)}
-              >
-                Cancel
-              </Button>
-            </form>
+            <RenameInput account={account} environmentId={environmentId} onDone={onRenameEnd} />
           ) : (
-            <div className="flex flex-wrap items-center gap-1.5">
-              <span className="truncate font-medium">{account.label}</span>
-              {account.active ? <Badge size="sm">Active</Badge> : null}
-              {best ? (
-                <Badge size="sm" variant="success">
-                  Best option
-                </Badge>
-              ) : null}
+            <>
+              <span className="truncate text-sm font-medium">{account.label}</span>
               {account.plan ? (
-                <Badge size="sm" variant="secondary">
-                  {account.plan}
-                </Badge>
+                <Tooltip>
+                  <TooltipTrigger render={<Badge variant="outline" size="sm" />}>
+                    {shortPlanLabel(account.plan)}
+                  </TooltipTrigger>
+                  <TooltipPopup>{account.plan}</TooltipPopup>
+                </Tooltip>
               ) : null}
+              {best ? (
+                <Tooltip>
+                  <TooltipTrigger render={<Badge variant="success" size="sm" />}>
+                    Best option
+                  </TooltipTrigger>
+                  <TooltipPopup>Most headroom, and its weekly limit resets soonest</TooltipPopup>
+                </Tooltip>
+              ) : null}
+            </>
+          )}
+        </div>
+        <span className="truncate text-xs text-muted-foreground">{subtitle}</span>
+      </div>
+      {message ? (
+        <StatusMessage message={message} className={cn("col-span-3", NARROW_MESSAGE)} />
+      ) : (
+        <>
+          {unsupported ? (
+            <p
+              className={cn(
+                "col-span-2 truncate text-xs text-muted-foreground",
+                "@max-[44rem]/accounts:col-span-2 @max-[44rem]/accounts:col-start-2 @max-[44rem]/accounts:row-start-2",
+              )}
+            >
+              This login doesn't report usage limits.
+            </p>
+          ) : (
+            <div className={NARROW_USAGE}>
+              <AccountUsageCell kind="session" windows={windows} now={now} />
+              <AccountUsageCell kind="weekly" windows={windows} now={now} />
             </div>
           )}
-          {account.email && account.email !== account.label ? (
-            <p className="truncate text-xs text-muted-foreground">{account.email}</p>
-          ) : null}
-        </div>
-        <div className="flex max-w-full shrink-0 items-start gap-1">
-          <div className="w-44 min-w-0">
-            <AccountUsage account={account} now={now} />
+          <div className={cn("min-w-0", NARROW_CHECKED)}>
+            {freshness ? (
+              <AccountFreshnessCell
+                freshness={freshness}
+                label={account.label}
+                onRefresh={onRefresh}
+              />
+            ) : null}
           </div>
-          {onRefreshUsage ? (
-            <Tooltip>
-              <TooltipTrigger render={<span />}>
-                <Button
-                  variant="ghost"
-                  size="icon-xs"
-                  aria-label={`Refresh usage for ${account.label}`}
-                  disabled={refreshing || coolingDown}
-                  onClick={onRefreshUsage}
-                >
-                  <RefreshIcon refreshing={refreshing} />
-                </Button>
-              </TooltipTrigger>
-              <TooltipPopup>
-                {coolingDown ? "Usage was refreshed moments ago" : "Refresh usage"}
-              </TooltipPopup>
-            </Tooltip>
-          ) : null}
-        </div>
-        <div className="flex items-start gap-1">
-          {!account.active && account.status === "ready" ? (
+        </>
+      )}
+      <div className={cn("flex items-center justify-end gap-1", NARROW_ACTIONS)}>
+        <div className="flex w-24 justify-end">
+          {primary.kind === "switch" || primary.kind === "switching" ? (
             <SwitchAccountAction
-              switchMode={switchMode}
               environmentId={environmentId}
+              switchMode={group.switchMode}
               accountId={account.id}
               label={account.label}
+              fill
+              busy={primary.kind === "switching"}
+              disabledReason={switchReason}
+              onStart={onSwitchStart}
+              onEnd={onSwitchEnd}
             />
-          ) : null}
-          <Menu>
-            <MenuTrigger
-              render={
-                <Button
-                  variant="ghost-muted"
-                  size="icon-xs"
-                  aria-label={`More actions for ${account.label}`}
-                />
-              }
+          ) : primary.kind === "switchToKeeper" ? (
+            <SwitchAccountAction
+              environmentId={environmentId}
+              switchMode={group.switchMode}
+              accountId={primary.keeper.id}
+              label={primary.keeper.label}
+              fill
+              disabledReason={switchReason}
+              onStart={onSwitchStart}
+              onEnd={onSwitchEnd}
             >
-              <EllipsisIcon />
-            </MenuTrigger>
-            <MenuPopup align="end">
-              <MenuItem
-                onClick={() => {
-                  setName(account.label);
-                  setRenaming(true);
-                }}
-              >
-                Rename…
-              </MenuItem>
-              <MenuItem onClick={() => onSignIn(account)}>Sign in again</MenuItem>
-              {account.kind !== "default" ? (
-                <>
-                  <MenuSeparator />
-                  {account.active ? (
-                    <Tooltip>
-                      <TooltipTrigger render={<div />}>{removeItem}</TooltipTrigger>
-                      <TooltipPopup>Switch to another account first</TooltipPopup>
-                    </Tooltip>
-                  ) : (
-                    removeItem
-                  )}
-                </>
-              ) : null}
-            </MenuPopup>
-          </Menu>
-        </div>
-      </div>
-      {account.status === "error" || account.status === "signedOut" ? (
-        <div className="grid gap-2">
-          <Alert variant={account.status === "error" ? "error" : "warning"}>
-            <TriangleAlertIcon />
-            <AlertDescription>
-              {account.status === "error"
-                ? "Login expired. Sign in again to keep using this account."
-                : "Not signed in."}
-            </AlertDescription>
-          </Alert>
-          <div>
-            <Button variant="outline" size="xs" onClick={() => onSignIn(account)}>
-              Sign in again
+              {`Switch to ${primary.keeper.label}`}
+            </SwitchAccountAction>
+          ) : primary.kind === "remove" ? (
+            <Button
+              variant="destructive-outline"
+              size="xs"
+              className="w-full"
+              aria-label={`Remove ${account.label}, same account as ${keeperLabel}`}
+              disabled={signingIn}
+              onClick={onRemove}
+            >
+              <Trash2Icon />
+              Remove
             </Button>
-          </div>
+          ) : primary.kind === "signIn" ? (
+            <Button variant="outline" size="xs" className="w-full" onClick={onSignIn}>
+              Sign in
+            </Button>
+          ) : (
+            <Badge variant="success" size="control" className="w-full">
+              <CheckIcon />
+              Active
+            </Badge>
+          )}
         </div>
-      ) : account.status === "pending" ? (
-        <div className="flex items-center gap-2 text-xs text-muted-foreground">
-          Sign-in not finished{" "}
-          <Button variant="outline" size="xs" onClick={() => onSignIn(account)}>
-            Sign in
-          </Button>
-        </div>
-      ) : null}
-      {removing ? (
-        <RemoveAccountDialog
+        <AccountActionsMenu
           account={account}
-          environmentId={environmentId}
-          onClose={() => setRemoving(false)}
+          triggerRef={menuTriggerRef}
+          removeBlockedReason={removeBlockedReason(account, signingIn)}
+          editBlockedReason={switchState === "self" ? "Wait for the switch to finish." : undefined}
+          onRename={onRenameStart}
+          onSignIn={onSignIn}
+          onRemove={onRemove}
         />
-      ) : null}
-    </div>
+      </div>
+    </li>
   );
 }

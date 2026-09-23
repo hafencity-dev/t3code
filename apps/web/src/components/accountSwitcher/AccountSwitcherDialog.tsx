@@ -12,13 +12,11 @@ import {
   type ProviderAccountAutoSwitchEvent,
   type ProviderAccountId,
 } from "@t3tools/contracts";
-import { PlusIcon, TriangleAlertIcon } from "lucide-react";
-import { useEffect, useEffectEvent, useId, useRef, useState } from "react";
+import { MonitorIcon, TriangleAlertIcon, UnplugIcon } from "lucide-react";
+import { useEffect, useEffectEvent, useRef, useState } from "react";
 import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
-import { ClaudeAI, OpenAI } from "../Icons";
-import { Alert, AlertDescription } from "../ui/alert";
-import { Badge } from "../ui/badge";
+import { Alert, AlertAction, AlertDescription, AlertTitle } from "../ui/alert";
 import { Button } from "../ui/button";
 import {
   DialogClose,
@@ -29,26 +27,20 @@ import {
   DialogPopup,
   DialogTitle,
 } from "../ui/dialog";
+import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "../ui/empty";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Spinner } from "../ui/spinner";
 import { toastManager } from "../ui/toast";
-import { AutoSwitchSettings } from "./AutoSwitchSettings";
-import { AccountRow } from "./AccountRow";
-import { AddAccountPanel } from "./AddAccountPanel";
-import {
-  ACCOUNT_DRIVERS,
-  ACCOUNT_DRIVER_LABELS,
-  ACCOUNT_SWITCH_NOTES,
-  autoRefreshAccountId,
-  bestAccountId,
-  sortedAccounts,
-  isUsageRefreshCoolingDown,
-  USAGE_REFRESH_COOLDOWN_MS,
-} from "./accounts.logic";
+import { ACCOUNT_DRIVERS, autoRefreshAccountId, USAGE_REFRESH_COOLDOWN_MS } from "./accounts.logic";
+import { ProviderAccountsSection } from "./ProviderAccountsSection";
 import { providerAccountsEnvironment } from "./state";
 
 const CLOCK_INTERVAL_MS = 60_000;
 
+/**
+ * Mounted only while the dialog is open. Owns the single clock timer and the refresh
+ * bookkeeping; refreshes are always per account, never bulk.
+ */
 export function AccountSwitcherDialog({
   environmentId,
   devices,
@@ -58,6 +50,7 @@ export function AccountSwitcherDialog({
   loading,
   error,
   onRetry,
+  offlineDeviceLabel,
 }: {
   environmentId: EnvironmentId | null;
   devices: readonly { id: EnvironmentId; label: string }[];
@@ -67,17 +60,16 @@ export function AccountSwitcherDialog({
   loading: boolean;
   error: string | null;
   onRetry: () => void;
+  /** Set when the selected device went offline; only the selector stays usable. */
+  offlineDeviceLabel?: string | undefined;
 }) {
-  const [login, setLogin] = useState<{
-    driver: ProviderAccountDriver;
-    switchMode: ProviderAccountGroup["switchMode"];
-    account?: ProviderAccount;
-  } | null>(null);
+  const popupRef = useRef<HTMLDivElement>(null);
   const [now, setNow] = useState(() => Date.now());
   // Refresh is per account so a click never probes every saved account at once.
   const [manualRefreshedAt, setManualRefreshedAt] = useState<
     ReadonlyMap<ProviderAccountId, number>
   >(() => new Map());
+  // Manual and background refreshes both show `Checking…` on their row.
   const [refreshingIds, setRefreshingIds] = useState<ReadonlySet<ProviderAccountId>>(
     () => new Set(),
   );
@@ -90,13 +82,16 @@ export function AccountSwitcherDialog({
   const refreshProviders = useAtomCommand(serverEnvironment.refreshProviders, {
     reportFailure: false,
   });
-  const deviceLabelId = useId();
   const allAccounts = groups.flatMap((group) => group.accounts);
+  const track = (accountId: ProviderAccountId, pending: boolean) => {
+    if (pending) pendingIds.current.add(accountId);
+    else pendingIds.current.delete(accountId);
+    setRefreshingIds(new Set(pendingIds.current));
+  };
   const refreshAccount = async (account: ProviderAccount) => {
     // The row disables its button during the cooldown; the clock ticks when it expires.
     if (!environmentId || pendingIds.current.has(account.id)) return;
-    pendingIds.current.add(account.id);
-    setRefreshingIds(new Set(pendingIds.current));
+    track(account.id, true);
     try {
       // The active account's usage is the live provider snapshot, not a saved-store probe.
       const result = account.active
@@ -119,8 +114,7 @@ export function AccountSwitcherDialog({
         });
       }
     } finally {
-      pendingIds.current.delete(account.id);
-      setRefreshingIds(new Set(pendingIds.current));
+      track(account.id, false);
       const completedAt = Date.now();
       setManualRefreshedAt((previous) => new Map(previous).set(account.id, completedAt));
       setNow(completedAt);
@@ -132,8 +126,10 @@ export function AccountSwitcherDialog({
     const accountId = autoRefreshAccountId(allAccounts, at);
     if (!accountId || pendingIds.current.has(accountId)) return;
     autoPending.current = true;
+    track(accountId, true);
     void refreshUsage({ environmentId, input: { accountIds: [accountId] } }).finally(() => {
       autoPending.current = false;
+      track(accountId, false);
     });
   });
   // Opening the dialog, or a ready account appearing without usage, refreshes right away.
@@ -174,191 +170,110 @@ export function AccountSwitcherDialog({
     schedule();
     return () => clearTimeout(timer);
   }, [manualRefreshedAt]);
-  const checkedAt = Math.max(
-    0,
-    ...groups.flatMap((group) =>
-      group.accounts.flatMap((account) =>
-        account.usage ? [Date.parse(account.usage.checkedAt)] : [],
-      ),
-    ),
+  const cooldownUntil = new Map(
+    [...manualRefreshedAt].map(([id, at]) => [id, at + USAGE_REFRESH_COOLDOWN_MS] as const),
   );
-  const minutes = Math.max(0, Math.floor((now - checkedAt) / 60_000));
-  return (
-    <DialogPopup className="sm:max-w-xl">
-      {login && environmentId ? (
-        <AddAccountPanel
+  const device = devices.find((candidate) => candidate.id === environmentId);
+  const deviceLabel = device?.label ?? offlineDeviceLabel ?? "this device";
+  const body = offlineDeviceLabel ? (
+    <Empty size="compact">
+      <EmptyHeader>
+        <EmptyMedia variant="icon">
+          <UnplugIcon />
+        </EmptyMedia>
+        <EmptyTitle>{offlineDeviceLabel} is offline</EmptyTitle>
+        <EmptyDescription>Accounts appear again when it reconnects.</EmptyDescription>
+      </EmptyHeader>
+    </Empty>
+  ) : !environmentId ? (
+    <Empty size="compact">
+      <EmptyHeader>
+        <EmptyMedia variant="icon">
+          <UnplugIcon />
+        </EmptyMedia>
+        <EmptyTitle>No device connected</EmptyTitle>
+        <EmptyDescription>Connect to a T3 Code server to manage its accounts.</EmptyDescription>
+      </EmptyHeader>
+    </Empty>
+  ) : groups.length === 0 && error ? (
+    <Alert variant="error">
+      <TriangleAlertIcon />
+      <AlertTitle>Couldn't load accounts</AlertTitle>
+      <AlertDescription>{error}</AlertDescription>
+      <AlertAction>
+        <Button variant="outline" size="xs" onClick={onRetry}>
+          Try again
+        </Button>
+      </AlertAction>
+    </Alert>
+  ) : groups.length === 0 && loading ? (
+    <p className="flex items-center justify-center gap-2 py-8 text-sm text-muted-foreground">
+      <Spinner size="sm" />
+      Loading accounts…
+    </p>
+  ) : (
+    <div className="grid gap-6">
+      {ACCOUNT_DRIVERS.map((driver) => (
+        <ProviderAccountsSection
+          key={driver}
+          driver={driver}
+          group={groups.find((group) => group.driver === driver)}
           environmentId={environmentId}
-          driver={login.driver}
-          switchMode={login.switchMode}
-          {...(login.account ? { account: login.account } : {})}
-          onBack={() => setLogin(null)}
+          deviceLabel={deviceLabel}
+          now={now}
+          refreshingIds={refreshingIds}
+          cooldownUntil={cooldownUntil}
+          onRefresh={(account) => void refreshAccount(account)}
+          autoEvent={autoEvents?.[driver]}
         />
-      ) : (
-        <>
-          <DialogHeader>
-            <DialogTitle>Accounts</DialogTitle>
-            <DialogDescription>
-              Switch the account new turns use. Threads keep their history and continue on the new
-              account.
-            </DialogDescription>
-            <span className="text-xs text-muted-foreground">
-              {!checkedAt
-                ? "Never checked"
-                : minutes === 0
-                  ? "Checked just now"
-                  : `Checked ${minutes} min ago`}
-            </span>
-          </DialogHeader>
-          <DialogPanel>
-            {devices.length > 1 ? (
-              <div className="flex items-center gap-3">
-                <span id={deviceLabelId} className="text-sm">
-                  Device
-                </span>
-                <div className="min-w-0 flex-1">
-                  <Select
-                    value={environmentId}
-                    items={devices.map((device) => ({ value: device.id, label: device.label }))}
-                    onValueChange={(id) => {
-                      if (id) onDeviceChange(id);
-                    }}
-                  >
-                    <SelectTrigger aria-labelledby={deviceLabelId}>
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectPopup>
-                      {devices.map((device) => (
-                        <SelectItem key={device.id} value={device.id}>
-                          {device.label}
-                        </SelectItem>
-                      ))}
-                    </SelectPopup>
-                  </Select>
-                </div>
-              </div>
-            ) : null}
-            {!environmentId ? (
-              <Alert variant="warning">
-                <TriangleAlertIcon />
-                <AlertDescription>Connect to a device to manage accounts.</AlertDescription>
-              </Alert>
-            ) : (
-              <>
-                {error ? (
-                  <div className="grid gap-2">
-                    <Alert variant="error">
-                      <TriangleAlertIcon />
-                      <AlertDescription>{error}</AlertDescription>
-                    </Alert>
-                    <div>
-                      <Button variant="outline" size="xs" onClick={onRetry}>
-                        Try again
-                      </Button>
-                    </div>
-                  </div>
-                ) : null}
-                {loading ? (
-                  <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                    <Spinner size="sm" />
-                    Loading accounts…
-                  </div>
-                ) : null}
-                {ACCOUNT_DRIVERS.map((driver) => {
-                  const group = groups.find((group) => group.driver === driver);
-                  const accounts = group?.accounts ?? [];
-                  const warning = group?.warning;
-                  const best = bestAccountId(accounts);
-                  const Mark = driver === "claudeAgent" ? ClaudeAI : OpenAI;
-                  return (
-                    <section
-                      key={driver}
-                      className="grid gap-3"
-                      aria-label={ACCOUNT_DRIVER_LABELS[driver]}
-                    >
-                      <div className="flex flex-wrap items-center gap-2">
-                        <Mark className="size-4" />
-                        <h3 className="text-sm font-medium">{ACCOUNT_DRIVER_LABELS[driver]}</h3>
-                        <Badge variant="outline" size="sm">
-                          {accounts.length} accounts
-                        </Badge>
-                        <div className="ml-auto">
-                          <Button
-                            variant="outline"
-                            size="xs"
-                            disabled={!group}
-                            onClick={() => {
-                              if (group) setLogin({ driver, switchMode: group.switchMode });
-                            }}
-                          >
-                            <PlusIcon />
-                            Add account
-                          </Button>
-                        </div>
-                      </div>
-                      {group ? (
-                        <AutoSwitchSettings
-                          group={group}
-                          environmentId={environmentId}
-                          event={autoEvents?.[driver]}
-                          now={now}
-                        />
-                      ) : null}
-                      {warning ? (
-                        <Alert variant="warning">
-                          <TriangleAlertIcon />
-                          <AlertDescription>{warning}</AlertDescription>
-                        </Alert>
-                      ) : null}
-                      {group
-                        ? sortedAccounts(accounts).map((account) => (
-                            <AccountRow
-                              key={account.id}
-                              account={account}
-                              switchMode={group.switchMode}
-                              environmentId={environmentId}
-                              now={now}
-                              best={best === account.id}
-                              refreshing={refreshingIds.has(account.id)}
-                              coolingDown={isUsageRefreshCoolingDown(
-                                manualRefreshedAt.get(account.id),
-                                now,
-                              )}
-                              {...(account.active || account.status === "ready"
-                                ? { onRefreshUsage: () => void refreshAccount(account) }
-                                : {})}
-                              onSignIn={(account) =>
-                                setLogin({ driver, account, switchMode: group.switchMode })
-                              }
-                            />
-                          ))
-                        : null}
-                      {!loading && !error && accounts.length === 0 ? (
-                        <p className="text-sm text-muted-foreground">
-                          No {ACCOUNT_DRIVER_LABELS[driver]} accounts yet.
-                        </p>
-                      ) : null}
-                      {group ? (
-                        <p className="text-xs text-muted-foreground">
-                          {ACCOUNT_SWITCH_NOTES[group.switchMode]}
-                          {group.switchMode === "hot"
-                            ? " On macOS, this may take up to 30 seconds."
-                            : null}
-                        </p>
-                      ) : null}
-                    </section>
-                  );
-                })}
-              </>
-            )}
-          </DialogPanel>
-          <DialogFooter>
-            <p className="mr-auto text-xs text-muted-foreground">
-              Accounts are stored on this device.
-            </p>
-            <DialogClose render={<Button variant="outline" size="sm" />}>Done</DialogClose>
-          </DialogFooter>
-        </>
-      )}
+      ))}
+    </div>
+  );
+  return (
+    <DialogPopup ref={popupRef} initialFocus={popupRef} className="sm:max-w-4xl">
+      <DialogHeader>
+        <DialogTitle>Accounts</DialogTitle>
+        <div className="flex flex-wrap items-start gap-x-4 gap-y-2">
+          <DialogDescription className="min-w-0 flex-1">
+            Switch which account Claude Code and Codex use. Threads keep their history.
+          </DialogDescription>
+          {devices.length > 1 ? (
+            <div className="w-56 shrink-0 max-sm:w-full">
+              <Select
+                value={environmentId ?? devices[0]?.id ?? null}
+                items={devices.map((candidate) => ({
+                  value: candidate.id,
+                  label: candidate.label,
+                }))}
+                onValueChange={(id) => {
+                  if (id) onDeviceChange(id);
+                }}
+              >
+                <SelectTrigger size="sm" aria-label="Device">
+                  <MonitorIcon aria-hidden />
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectPopup>
+                  {devices.map((candidate) => (
+                    <SelectItem key={candidate.id} value={candidate.id}>
+                      {candidate.label}
+                    </SelectItem>
+                  ))}
+                </SelectPopup>
+              </Select>
+            </div>
+          ) : null}
+        </div>
+      </DialogHeader>
+      <DialogPanel>{body}</DialogPanel>
+      <DialogFooter>
+        {environmentId || offlineDeviceLabel ? (
+          <p className="mr-auto text-xs text-muted-foreground">
+            Logins are stored on {deviceLabel} and never leave it.
+          </p>
+        ) : null}
+        <DialogClose render={<Button variant="outline" size="sm" />}>Done</DialogClose>
+      </DialogFooter>
     </DialogPopup>
   );
 }

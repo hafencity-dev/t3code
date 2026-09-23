@@ -727,6 +727,7 @@ const make = (
                 driver: entry.driver,
                 homePath,
                 existing: Boolean(input.accountId) && entry.status !== "pending",
+                ...(!input.accountId && !input.label ? { unnamed: true } : {}),
                 binaryPath: state.settings.binaryPath,
                 environment,
                 ...(claudeActive ? { claudeActive: true } : {}),
@@ -758,14 +759,27 @@ const make = (
                   ? { accountUuid: written.accountUuid }
                   : {}),
               };
+              const accounts =
+                snapshot.groups.find((group) => group.driver === account.driver)?.accounts ?? [];
+              const self = accounts.find((entry) => entry.id === account.accountId);
+              const selfIdentity = identities.get(account.accountId) ?? {};
+              // Re-login stays repairable: Default can't be removed, and an account signing in
+              // as its own identity is never a new duplicate. The other copy gets `duplicateOf`.
+              // A conflict flagged by an earlier sign-in (error with message) is not "own".
+              const repairing =
+                account.existing &&
+                (self?.kind === "default" ||
+                  (!(self?.status === "error" && self.message) &&
+                    hasIdentity(selfIdentity) &&
+                    sameAccountIdentity(selfIdentity, signedIn)));
               // Every account of the driver counts, Default and the active one included.
-              const duplicate = snapshot.groups
-                .find((group) => group.driver === account.driver)
-                ?.accounts.find(
-                  (entry) =>
-                    entry.id !== account.accountId &&
-                    sameAccountIdentity(identities.get(entry.id) ?? {}, signedIn),
-                );
+              const duplicate = repairing
+                ? undefined
+                : accounts.find(
+                    (entry) =>
+                      entry.id !== account.accountId &&
+                      sameAccountIdentity(identities.get(entry.id) ?? {}, signedIn),
+                  );
               // A new sign-in is discarded by the caller; nothing is persisted for it.
               if (duplicate && !account.existing)
                 return {
@@ -782,6 +796,8 @@ const make = (
                   lastUsage: { ...identity, ...signedIn, checkedAt },
                 }),
               );
+              if (account.unnamed)
+                yield* io(() => registry.rename(account.accountId, identity.email));
               cache.forget(ProviderAccountId.make(account.accountId));
               const observed = observedAccounts.get(account.driver);
               if (observed?.id === account.accountId && observed.checkedAt)

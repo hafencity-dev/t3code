@@ -363,9 +363,12 @@ export async function createProviderAccountRegistry(input: { stateDir: string })
         if (!label.trim())
           throw new ProviderAccountRegistryGuardError("Account label must not be empty.");
         const entry = { ...find(id), label: label.trim() };
+        // Keep the account's position: the dialog lists accounts in creation order.
         await persist({
           ...stored,
-          accounts: [...stored.accounts.filter((item) => item.id !== id), entry],
+          accounts: stored.accounts.some((item) => item.id === id)
+            ? stored.accounts.map((item) => (item.id === id ? entry : item))
+            : [...stored.accounts, entry],
         });
         return structuredClone(entry);
       }),
