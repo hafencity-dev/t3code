@@ -61,6 +61,8 @@ import {
   recoverClaudeCredentialSwitch,
   claudeCredentialSwitchJournalPath,
   ClaudeCredentialSwitchError,
+  readClaudeConfigIdentity,
+  type ClaudeCredentialIdentity,
   type ClaudeCredentialSwitchResult,
 } from "./ClaudeCredentialSwitch.ts";
 
@@ -161,7 +163,8 @@ function accountFromEntry(
     ...(plan ? { plan } : {}),
     ...(usage ? { usage } : {}),
     ...(entry.message ? { message: entry.message } : {}),
-    ...(metadata?.nextAllowedAt !== undefined
+    // The active account's usage is live and never probed, so it has no probe backoff.
+    ...(!active && metadata?.nextAllowedAt !== undefined
       ? {
           usageRefresh: {
             nextAllowedAt: new Date(metadata.nextAllowedAt).toISOString(),
@@ -171,6 +174,68 @@ function accountFromEntry(
       : {}),
   };
 }
+
+/** Account uuid wins when both sides know it; otherwise emails compare case-insensitively. */
+function sameAccountIdentity(left: ClaudeCredentialIdentity, right: ClaudeCredentialIdentity) {
+  if (left.accountUuid && right.accountUuid) return left.accountUuid === right.accountUuid;
+  return Boolean(left.email && right.email?.toLowerCase() === left.email.toLowerCase());
+}
+const hasIdentity = (identity: ClaudeCredentialIdentity) =>
+  Boolean(identity.email || identity.accountUuid);
+
+/**
+ * Best known identity per account. The active Claude account prefers the active home's live
+ * config, unless the registry knows a different identity (a terminal login the next switch
+ * files away). The kept account of each identity is Default, then the oldest ready account.
+ */
+function accountIdentities(
+  entries: ReadonlyArray<ProviderAccountEntry>,
+  accounts: ReadonlyArray<ProviderAccount>,
+  live: ClaudeCredentialIdentity | undefined,
+) {
+  const identities = new Map<string, ClaudeCredentialIdentity>();
+  for (const entry of entries) {
+    const account = accounts.find((candidate) => candidate.id === entry.id)!;
+    const saved: ClaudeCredentialIdentity = {
+      ...(account.email ? { email: account.email } : {}),
+      ...(entry.lastUsage?.accountUuid ? { accountUuid: entry.lastUsage.accountUuid } : {}),
+    };
+    const useLive =
+      account.active &&
+      live !== undefined &&
+      hasIdentity(live) &&
+      (!hasIdentity(saved) || sameAccountIdentity(saved, live));
+    identities.set(entry.id, useLive ? live : saved);
+  }
+  const rank = (account: ProviderAccount) =>
+    account.status === "error" && account.message
+      ? 2
+      : account.kind === "default"
+        ? 0
+        : account.status === "ready"
+          ? 1
+          : 2;
+  const kept = entries
+    .filter((entry) => entry.kind !== "external" && entry.status !== "pending")
+    .map((entry) => ({ entry, account: accounts.find((account) => account.id === entry.id)! }))
+    .toSorted(
+      (left, right) =>
+        rank(left.account) - rank(right.account) ||
+        left.entry.createdAt.localeCompare(right.entry.createdAt),
+    );
+  const duplicateOf = (entry: ProviderAccountEntry) => {
+    const identity = identities.get(entry.id)!;
+    if (entry.kind !== "managed" || entry.status === "pending" || !hasIdentity(identity)) return;
+    const original = kept.find((candidate) =>
+      sameAccountIdentity(identities.get(candidate.entry.id)!, identity),
+    );
+    return original && original.entry.id !== entry.id ? original.account.id : undefined;
+  };
+  return { identities, duplicateOf };
+}
+
+const claudeGroupOf = (snapshot: ProviderAccountsSnapshot) =>
+  snapshot.groups.find((group) => group.driver === "claudeAgent");
 
 type LoginClient = Pick<
   ProviderAccountLogin,
@@ -385,10 +450,27 @@ const make = (
       };
     });
 
-    const list = Effect.fn("providerAccounts.list")(function* (): Effect.fn.Return<
-      ProviderAccountsSnapshot,
-      ProviderAccountError
-    > {
+    // ~/.claude.json can be large; re-read it only when it changed on disk.
+    let liveClaude:
+      | { path: string; mtimeMs: number; size: number; identity: ClaudeCredentialIdentity }
+      | undefined;
+    const liveClaudeIdentity = (state: Parameters<typeof claudeCredentialLocation>[0]) =>
+      Effect.promise(async () => {
+        const path = claudeCredentialLocation(state).activeConfigPath;
+        const stat = await NodeFSP.stat(path).catch(() => undefined);
+        if (!stat) return {};
+        if (
+          liveClaude?.path === path &&
+          liveClaude.mtimeMs === stat.mtimeMs &&
+          liveClaude.size === stat.size
+        )
+          return liveClaude.identity;
+        const identity = await readClaudeConfigIdentity(path);
+        liveClaude = { path, mtimeMs: stat.mtimeMs, size: stat.size, identity };
+        return identity;
+      });
+
+    const listDetailed = Effect.fn("providerAccounts.listDetailed")(function* () {
       const providerSnapshots = yield* providers.getProviders;
       const groups = yield* Effect.forEach(["claudeAgent", "codex"] as const, (driver) =>
         Effect.gen(function* () {
@@ -410,20 +492,23 @@ const make = (
           const snapshot = candidate && candidate.checkedAt !== stale ? candidate : undefined;
           if (snapshot) staleSnapshots.delete(driver);
           const captured = state.accounts.find((entry) => entry.id === state.activeAccountId);
+          const live = driver === "claudeAgent" ? yield* liveClaudeIdentity(state) : undefined;
           // Capture Default's first known identity so a later terminal login cannot silently
           // become the saved Default account when its credentials are checked back in.
+          const capturedEmail = live?.email ?? snapshot?.auth.email;
           if (
             driver === "claudeAgent" &&
             captured?.kind === "default" &&
             !captured.lastUsage?.email &&
-            snapshot?.auth.email
+            capturedEmail
           ) {
             yield* io(() =>
               registry.update(captured.id, {
                 lastUsage: {
                   ...captured.lastUsage,
-                  checkedAt: snapshot.checkedAt,
-                  email: snapshot.auth.email!,
+                  checkedAt: snapshot?.checkedAt ?? new Date().toISOString(),
+                  email: capturedEmail,
+                  ...(live?.email && live.accountUuid ? { accountUuid: live.accountUuid } : {}),
                 },
               }),
             );
@@ -447,7 +532,15 @@ const make = (
           ]
             .filter(Boolean)
             .join(" ");
-          return {
+          const accounts = state.accounts.map((entry) =>
+            accountFromEntry(
+              entry,
+              entry.id === state.activeAccountId,
+              entry.id === state.activeAccountId ? snapshot : undefined,
+            ),
+          );
+          const { identities, duplicateOf } = accountIdentities(state.accounts, accounts, live);
+          const group = {
             driver,
             instanceId,
             switchMode: driver === "claudeAgent" ? ("hot" as const) : ("restart" as const),
@@ -471,18 +564,26 @@ const make = (
                   }
                 : {}),
             },
-            accounts: state.accounts.map((entry) =>
-              accountFromEntry(
-                entry,
-                entry.id === state.activeAccountId,
-                entry.id === state.activeAccountId ? snapshot : undefined,
-              ),
-            ),
+            accounts: state.accounts.map((entry, index) => {
+              const original = duplicateOf(entry);
+              return { ...accounts[index]!, ...(original ? { duplicateOf: original } : {}) };
+            }),
             ...(warning ? { warning } : {}),
           };
+          return { group, identities };
         }),
       );
-      return { groups };
+      return {
+        snapshot: { groups: groups.map((entry) => entry.group) },
+        identities: new Map(groups.flatMap((entry) => [...entry.identities])),
+      };
+    });
+
+    const list = Effect.fn("providerAccounts.list")(function* (): Effect.fn.Return<
+      ProviderAccountsSnapshot,
+      ProviderAccountError
+    > {
+      return (yield* listDetailed()).snapshot;
     });
 
     const cache = makeAccountUsageCache({
@@ -639,19 +740,37 @@ const make = (
           mutation.withPermit(
             Effect.gen(function* () {
               const registry = yield* registryEffect;
-              const snapshot = yield* list();
+              const { snapshot, identities } = yield* listDetailed();
+              // Claude writes the signed-in account uuid next to its email; keep it when both agree.
+              const writtenPath =
+                account.driver !== "claudeAgent"
+                  ? undefined
+                  : account.claudeActive
+                    ? claudeCredentialLocation(yield* configuration("claudeAgent")).activeConfigPath
+                    : NodePath.join(account.homePath, ".claude.json");
+              const written: ClaudeCredentialIdentity = writtenPath
+                ? yield* Effect.promise(() => readClaudeConfigIdentity(writtenPath))
+                : {};
+              const signedIn: ClaudeCredentialIdentity = {
+                email: identity.email,
+                ...(written.accountUuid &&
+                written.email?.toLowerCase() === identity.email.toLowerCase()
+                  ? { accountUuid: written.accountUuid }
+                  : {}),
+              };
+              // Every account of the driver counts, Default and the active one included.
               const duplicate = snapshot.groups
-                .flatMap((group) => group.accounts)
-                .find(
+                .find((group) => group.driver === account.driver)
+                ?.accounts.find(
                   (entry) =>
-                    entry.driver === account.driver &&
                     entry.id !== account.accountId &&
-                    entry.email?.toLowerCase() === identity.email.toLowerCase(),
+                    sameAccountIdentity(identities.get(entry.id) ?? {}, signedIn),
                 );
+              // A new sign-in is discarded by the caller; nothing is persisted for it.
               if (duplicate && !account.existing)
-                return yield* new ProviderAccountError({
-                  message: "This account is already saved.",
-                });
+                return {
+                  message: `You're already signed in with ${identity.email} as ${duplicate.label}.`,
+                };
               const checkedAt = DateTime.formatIso(yield* DateTime.now);
               const message = duplicate
                 ? `Signed in as ${identity.email}, which is already saved as ${duplicate.label}. Sign in again with the right account.`
@@ -660,7 +779,7 @@ const make = (
                 registry.update(account.accountId, {
                   status: duplicate ? "error" : "ready",
                   message,
-                  lastUsage: { ...identity, checkedAt },
+                  lastUsage: { ...identity, ...signedIn, checkedAt },
                 }),
               );
               cache.forget(ProviderAccountId.make(account.accountId));
@@ -930,7 +1049,21 @@ const make = (
       const entry = yield* io(() => registry.get(input.accountId));
       if (entry.driver === "claudeAgent") yield* requireClaudeReady();
       const state = yield* groupState(entry.driver);
-      if (entry.kind === "default" || entry.id === state.activeAccountId || login.isBusy(entry.id))
+      const active = entry.id === state.activeAccountId;
+      // An active Claude duplicate hands the selection to the account it duplicates. The active
+      // home already holds that identity's token and the duplicate's store is checked out, so
+      // no credential moves; the kept account's stale store copy is superseded on its next switch.
+      const handOff =
+        active && entry.driver === "claudeAgent" && !state.warning
+          ? claudeGroupOf(yield* list())?.accounts.find((account) => account.id === entry.id)
+              ?.duplicateOf
+          : undefined;
+      if (
+        entry.kind === "default" ||
+        (active && !handOff) ||
+        login.isBusy(entry.id) ||
+        (handOff && login.isBusy(handOff))
+      )
         return yield* new ProviderAccountError({
           message: "Default, active, or signing-in accounts cannot be removed.",
         });
@@ -945,6 +1078,14 @@ const make = (
           cwd: config.cwd,
         };
         yield* io(() => login.logout(account));
+        if (handOff) {
+          yield* io(() => registry.setClaudeActiveAccount(handOff));
+          // Same live credentials: keep the provider snapshot instead of masking it as stale.
+          const observed = observedAccounts.get("claudeAgent");
+          if (observed) observedAccounts.set("claudeAgent", { ...observed, id: handOff });
+          checkoutGeneration.claudeAgent++;
+          cache.forget(handOff);
+        }
         yield* deleteManagedHome(account);
       }
       yield* io(() => registry.remove(input.accountId, state.currentHome));

@@ -31,6 +31,8 @@ export const ProviderAccount = Schema.Struct({
     }),
   ),
   message: Schema.optional(TrimmedNonEmptyString),
+  /** Set on a saved account signed in as the same identity as this (kept) account. */
+  duplicateOf: Schema.optional(ProviderAccountId),
 });
 export type ProviderAccount = typeof ProviderAccount.Type;
 

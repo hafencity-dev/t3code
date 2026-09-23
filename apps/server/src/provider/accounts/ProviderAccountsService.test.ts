@@ -1386,4 +1386,158 @@ describe("ProviderAccountsService", () => {
       );
     },
   );
+
+  it.effect("does not report probe backoff for the active account, whose usage is live", () =>
+    run(
+      Effect.gen(function* () {
+        const service = yield* ProviderAccountsService;
+        const codex = (snapshot: ProviderAccountsSnapshot) =>
+          snapshot.groups.find((group) => group.driver === "codex")!;
+        const inactive = codex(yield* service.list()).accounts.find(
+          (account) => account.id === seeded!.id,
+        );
+        expect(inactive?.usageRefresh?.rateLimited).toBe(true);
+        const switched = codex(yield* service.switchAccount({ accountId: seeded!.id }));
+        const active = switched.accounts.find((account) => account.id === seeded!.id)!;
+        expect(active.active).toBe(true);
+        expect(active.usageRefresh).toBeUndefined();
+      }),
+      true,
+      { backoff: true },
+    ),
+  );
+
+  it.effect(
+    "rejects a new Claude sign-in as the Default identity known only from its live home",
+    () => {
+      let callbacks: ProviderAccountLoginOptions;
+      const activeHome = NodePath.join(root, "claude");
+      return run(
+        Effect.gen(function* () {
+          const service = yield* ProviderAccountsService;
+          const before = claudeGroup(yield* service.list());
+          // No provider snapshot and nothing captured yet: only the live config knows Default.
+          const prepared = yield* Effect.promise(() =>
+            callbacks.prepare({ driver: "claudeAgent", label: "Work" }),
+          );
+          yield* Effect.promise(() =>
+            NodeFSP.writeFile(
+              NodePath.join(prepared.homePath, ".claude.json"),
+              JSON.stringify({
+                oauthAccount: { emailAddress: "Default@Example.test", accountUuid: "uuid-default" },
+              }),
+            ),
+          );
+          const outcome = yield* Effect.promise(() =>
+            callbacks.complete(prepared, { email: "Default@Example.test" }),
+          );
+          expect(outcome).toEqual({
+            message: "You're already signed in with Default@Example.test as Default.",
+          });
+          // Nothing was persisted, so the login's discard path can still remove the pending entry.
+          yield* Effect.promise(() => callbacks.cleanup(prepared));
+          const after = claudeGroup(yield* service.list());
+          expect(after.accounts.map((account) => account.id)).toEqual(
+            before.accounts.map((account) => account.id),
+          );
+          expect(after.activeAccountId).toBe(before.activeAccountId);
+        }),
+        false,
+        {
+          claudeHomePath: activeHome,
+          before: async () => {
+            await NodeFSP.mkdir(activeHome, { recursive: true });
+            await NodeFSP.writeFile(
+              NodePath.join(activeHome, ".claude.json"),
+              JSON.stringify({
+                oauthAccount: { emailAddress: "default@example.test", accountUuid: "uuid-default" },
+              }),
+            );
+          },
+          login: (options) => {
+            callbacks = options;
+            return new ProviderAccountLogin(options);
+          },
+        },
+      );
+    },
+  );
+
+  it.effect(
+    "flags an existing duplicate and removes it while active without moving credentials",
+    () => {
+      let seeded: Awaited<ReturnType<typeof seedClaudeStores>>;
+      const loggedOut: string[] = [];
+      return run(
+        Effect.gen(function* () {
+          const service = yield* ProviderAccountsService;
+          const dup = ProviderAccountId.make(seeded.ids.dup!);
+          const listed = claudeGroup(yield* service.list());
+          expect(listed.accounts.find((account) => account.id === dup)?.duplicateOf).toBe(
+            seeded.ids.default,
+          );
+          expect(
+            listed.accounts.find((account) => account.id === seeded.ids.default)?.duplicateOf,
+          ).toBeUndefined();
+          expect(
+            listed.accounts.find((account) => account.id === seeded.ids.other)?.duplicateOf,
+          ).toBeUndefined();
+          const switched = claudeGroup(yield* service.switchAccount({ accountId: dup }));
+          expect(switched.activeAccountId).toBe(dup);
+          expect(switched.accounts.find((account) => account.id === dup)?.duplicateOf).toBe(
+            seeded.ids.default,
+          );
+          const removed = claudeGroup(yield* service.remove({ accountId: dup }));
+          expect(removed.activeAccountId).toBe(seeded.ids.default);
+          expect(removed.accounts.some((account) => account.id === dup)).toBe(false);
+          expect(removed.accounts.some((account) => account.duplicateOf)).toBe(false);
+          expect(loggedOut).toEqual([seeded.homes.dup]);
+          // The checked-out token stays in the active home; only the duplicate's store is gone.
+          expect(
+            (yield* readJson(NodePath.join(seeded.activeHome, ".credentials.json"))).claudeAiOauth,
+          ).toEqual(seeded.credentials("dup").claudeAiOauth);
+          expect(
+            yield* Effect.promise(() =>
+              NodeFSP.stat(seeded.homes.dup!).then(
+                () => true,
+                () => false,
+              ),
+            ),
+          ).toBe(false);
+          // The kept account keeps working: switching away files the live token into its store.
+          const away = claudeGroup(
+            yield* service.switchAccount({ accountId: ProviderAccountId.make(seeded.ids.other!) }),
+          );
+          expect(away.activeAccountId).toBe(seeded.ids.other);
+          const defaultStore = (yield* service.list()).groups
+            .flatMap((group) => group.accounts)
+            .find((account) => account.id === seeded.ids.default);
+          expect(defaultStore).toMatchObject({ status: "ready", email: "default@example.test" });
+        }),
+        false,
+        {
+          claudeHomePath: NodePath.join(root, "claude"),
+          before: async () => {
+            seeded = await seedClaudeStores(["dup", "other"]);
+            // `dup` was signed in as the Default identity before duplicates were rejected.
+            const registry = await createProviderAccountRegistry({ stateDir: seeded.stateDir });
+            await registry.update(seeded.ids.dup!, {
+              lastUsage: { email: "default@example.test", accountUuid: "uuid-default", checkedAt },
+            });
+            await NodeFSP.writeFile(
+              NodePath.join(seeded.homes.dup!, ".claude.json"),
+              JSON.stringify({ oauthAccount: seeded.identity("default") }),
+            );
+          },
+          login: (options) => {
+            const login = new ProviderAccountLogin(options);
+            login.logout = async (account) => {
+              loggedOut.push(account.homePath);
+            };
+            return login;
+          },
+        },
+      );
+    },
+  );
 });

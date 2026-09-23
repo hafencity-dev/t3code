@@ -331,6 +331,10 @@ function identity(config: JsonObject): ClaudeCredentialIdentity {
     ...(typeof account.accountUuid === "string" ? { accountUuid: account.accountUuid } : {}),
   };
 }
+/** Identity recorded in a Claude global config (`.claude.json`); unreadable configs have none. */
+export async function readClaudeConfigIdentity(path: string): Promise<ClaudeCredentialIdentity> {
+  return readJson(path).then(identity, () => ({}));
+}
 /** Missing fields must stay missing; a signed-out source only matches a signed-out active home. */
 function identityEquals(left: ClaudeCredentialIdentity, right: ClaudeCredentialIdentity) {
   return (
