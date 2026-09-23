@@ -57,10 +57,10 @@ export function SourceControlStatusBand(props: SourceControlStatusBandProps) {
   if (props.error !== null) {
     return (
       <div className="flex-none px-3 py-2">
-        <Alert variant="error" className="px-3 py-2">
+        <Alert variant="error">
           <AlertCircle />
-          <AlertTitle className="text-xs">The working copy could not be read</AlertTitle>
-          <AlertDescription className="text-xs">
+          <AlertTitle>The working copy could not be read</AlertTitle>
+          <AlertDescription>
             <span className="line-clamp-3 break-words">{props.error}</span>
           </AlertDescription>
           <AlertAction>
@@ -104,10 +104,10 @@ export function SourceControlStatusBand(props: SourceControlStatusBandProps) {
 
   return (
     <div className="flex-none px-3 py-2">
-      <Alert variant="warning" className="px-3 py-2" aria-label={guidance.title}>
+      <Alert variant="warning" aria-label={guidance.title}>
         <AlertTriangle />
-        <AlertTitle className="text-xs">{guidance.title}</AlertTitle>
-        <AlertDescription className="text-xs">
+        <AlertTitle>{guidance.title}</AlertTitle>
+        <AlertDescription>
           <span>
             {remaining === 0
               ? "All conflicts resolved."

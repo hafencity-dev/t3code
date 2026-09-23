@@ -135,7 +135,6 @@ export function SourceControlHeader(props: SourceControlHeaderProps) {
                 <Button
                   size="xs"
                   variant="ghost"
-                  className="gap-1 px-1.5 text-[11px]"
                   disabled={props.actionsBusy || props.status === null}
                   aria-busy={props.syncBusy}
                   onClick={() => props.onSync(sync.kind)}
@@ -190,7 +189,7 @@ export function SourceControlHeader(props: SourceControlHeaderProps) {
             <MenuItem
               onClick={props.onDiscardAll}
               disabled={props.actionsBusy || clean || props.discardAllBusy}
-              className={cn(!clean && !props.discardAllBusy && "text-destructive-foreground")}
+              variant={!clean && !props.discardAllBusy ? "destructive" : "default"}
             >
               <Undo2 />
               {props.discardAllBusy ? "Discarding…" : "Discard all changes"}
@@ -215,8 +214,7 @@ function ToolbarButton(props: {
         render={
           <Button
             size="icon-xs"
-            variant="ghost"
-            className={cn(props.active && "bg-accent text-accent-foreground")}
+            variant={props.active ? "secondary" : "ghost"}
             disabled={props.disabled}
             aria-label={props.label}
             aria-pressed={props.active}

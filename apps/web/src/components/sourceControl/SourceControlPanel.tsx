@@ -628,13 +628,13 @@ export function SourceControlPanel(props: SourceControlPanelProps) {
         mode={props.mode}
         header={<span className="text-sm">Source control</span>}
       >
-        <Empty className="min-h-0 flex-1">
+        <Empty size="compact" className="min-h-0 flex-1">
           <EmptyHeader>
             <EmptyMedia variant="icon">
               <FolderGit2 />
             </EmptyMedia>
-            <EmptyTitle className="text-base">No project open</EmptyTitle>
-            <EmptyDescription className="text-xs">
+            <EmptyTitle>No project open</EmptyTitle>
+            <EmptyDescription>
               Open a project to stage, commit and browse its history.
             </EmptyDescription>
           </EmptyHeader>
@@ -650,13 +650,13 @@ export function SourceControlPanel(props: SourceControlPanelProps) {
         mode={props.mode}
         header={<span className="text-sm">Source control</span>}
       >
-        <Empty className="min-h-0 flex-1">
+        <Empty size="compact" className="min-h-0 flex-1">
           <EmptyHeader>
             <EmptyMedia variant="icon">
               <GitBranch />
             </EmptyMedia>
-            <EmptyTitle className="text-base">Not a git repository</EmptyTitle>
-            <EmptyDescription className="text-xs">
+            <EmptyTitle>Not a git repository</EmptyTitle>
+            <EmptyDescription>
               This folder is not tracked by git, so there is nothing to show here.
             </EmptyDescription>
           </EmptyHeader>
@@ -1043,7 +1043,7 @@ function StashDialog(props: {
             Parks every change in the working copy so you can come back to a clean tree.
           </DialogDescription>
         </DialogHeader>
-        <DialogPanel className="space-y-3">
+        <DialogPanel>
           <Input
             autoFocus
             value={message}

@@ -159,7 +159,9 @@ describe("CommitComposer", () => {
 
     expect(markup).toContain("Message (Ctrl+Enter to commit)");
     expect(markup).toContain("data-source-control-commit-composer");
-    expect(markup).toContain("flex-1 justify-center rounded-e-none");
+    // The primary action and its menu trigger share one Group, which joins their corners.
+    expect(markup).toContain('data-slot="group" role="group"><button type="button" class="');
+    expect(markup).toContain("min-w-0 flex-1");
     expect(markup.indexOf('aria-label="Commit message"')).toBeLessThan(
       markup.indexOf(">Commit</button>"),
     );

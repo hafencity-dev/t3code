@@ -39,6 +39,7 @@ import {
 
 import { Button } from "~/components/ui/button";
 import { Checkbox } from "~/components/ui/checkbox";
+import { Group } from "~/components/ui/group";
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "~/components/ui/menu";
 import { Textarea } from "~/components/ui/textarea";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
@@ -209,12 +210,10 @@ export function CommitComposer(props: CommitComposerProps) {
           placeholder={props.amend ? "Amend the last commit…" : "Message (Ctrl+Enter to commit)"}
           aria-label="Commit message"
           size="sm"
-          className={cn(
-            "[&_textarea]:max-h-36 [&_textarea]:min-h-12 [&_textarea]:resize-none",
-            "[&_textarea]:py-1.5 [&_textarea]:text-sm",
-            showCounter && "[&_textarea]:pr-14",
-            lengthState === "hard" && "border-destructive/64",
-          )}
+          aria-invalid={lengthState === "hard" || undefined}
+          className="[&_textarea]:max-h-36 [&_textarea]:min-h-12 [&_textarea]:resize-none"
+          // Keeps the first line clear of the absolutely positioned counter.
+          style={showCounter ? { paddingInlineEnd: "3.5rem" } : undefined}
         />
         {showCounter ? (
           <Tooltip>
@@ -288,14 +287,14 @@ export function CommitComposer(props: CommitComposerProps) {
       </div>
 
       {/* VS Code keeps the primary SCM action full-width below the input. */}
-      <div className="flex w-full items-center">
+      <Group className="w-full">
         <Button
           size="sm"
           variant={props.primaryVariant}
           disabled={!enabled}
           aria-busy={props.pendingLabel !== null && props.pendingLabel !== undefined}
           onClick={runPrimary}
-          className="min-w-0 flex-1 justify-center rounded-e-none"
+          className="min-w-0 flex-1"
         >
           {props.pendingLabel ? (
             <>
@@ -310,11 +309,10 @@ export function CommitComposer(props: CommitComposerProps) {
           <MenuTrigger
             render={
               <Button
-                size="sm"
+                size="icon-sm"
                 variant={props.primaryVariant}
                 disabled={!enabled}
                 aria-label="More commit actions"
-                className="rounded-s-none border-s-0 px-1.5"
               />
             }
           >
@@ -332,7 +330,7 @@ export function CommitComposer(props: CommitComposerProps) {
             </MenuItem>
           </MenuPopup>
         </Menu>
-      </div>
+      </Group>
     </div>
   );
 }

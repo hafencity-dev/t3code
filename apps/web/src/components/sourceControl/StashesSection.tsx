@@ -121,8 +121,8 @@ export function StashesPanel(props: StashesPanelProps) {
       <div className="-mx-3 min-h-0 flex-1 overflow-auto">
         {props.isLoading ? (
           <div className="space-y-1 px-3 py-1" role="status" aria-live="polite">
-            <Skeleton className="h-7 w-full rounded-md" />
-            <Skeleton className="h-7 w-11/12 rounded-md" />
+            <Skeleton shape="card" className="h-7 w-full" />
+            <Skeleton shape="card" className="h-7 w-11/12" />
             <span className="sr-only">Loading stashes…</span>
           </div>
         ) : null}
@@ -176,13 +176,13 @@ export function StashesPanel(props: StashesPanelProps) {
           </>
         ) : null}
         {empty ? (
-          <Empty className="gap-3 p-6">
+          <Empty size="compact" className="min-h-0">
             <EmptyHeader>
               <EmptyMedia variant="icon">
                 <Archive />
               </EmptyMedia>
-              <EmptyTitle className="text-base">No stashes</EmptyTitle>
-              <EmptyDescription className="text-xs">
+              <EmptyTitle>No stashes</EmptyTitle>
+              <EmptyDescription>
                 Stash your changes to park them without committing. Discards are backed up here too.
               </EmptyDescription>
             </EmptyHeader>

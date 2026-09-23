@@ -256,7 +256,7 @@ function CodexBridgeSignInDialog({
               Authorize the isolated account used only by Claude Code model routing.
             </DialogDescription>
           </DialogHeader>
-          <DialogPanel className="grid gap-4">
+          <DialogPanel>
             {event === undefined || event._tag === "started" ? (
               <div className="flex items-center gap-2 text-sm text-muted-foreground">
                 <Spinner className="size-4" />
@@ -327,9 +327,8 @@ function PromptEditor({
   const dirty = draft !== value;
   return (
     <SettingsRow title={label} description={description}>
-      <div className="mt-3 max-w-3xl space-y-2 pb-3.5">
+      <div className="mt-3 max-w-3xl space-y-2 pb-3.5 font-mono">
         <Textarea
-          className="font-mono text-[13px]"
           rows={6}
           value={draft}
           disabled={disabled}
@@ -567,8 +566,7 @@ export function ModelRoutingSettingsPanel() {
                   </Button>
                   <Button
                     size="sm"
-                    variant="ghost"
-                    className={signOutArmed ? "text-destructive" : "text-muted-foreground"}
+                    variant={signOutArmed ? "destructive-outline" : "ghost-muted"}
                     disabled={signingOut}
                     onClick={() => void handleSignOut()}
                   >
@@ -591,9 +589,8 @@ export function ModelRoutingSettingsPanel() {
             )}
             {!status?.installed ? (
               <Button
-                size="sm"
+                size="xs"
                 variant="ghost"
-                className="h-6 px-2 text-xs"
                 disabled={installing || status?.supported === false}
                 onClick={() => void handleInstall()}
               >

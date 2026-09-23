@@ -424,10 +424,10 @@ export function HistoryList(props: HistoryListProps) {
 
       {history.error ? (
         <div className="flex-none px-3 py-2">
-          <Alert variant="error" className="px-3 py-2">
+          <Alert variant="error">
             <AlertCircle />
-            <AlertTitle className="text-xs">The history could not be read</AlertTitle>
-            <AlertDescription className="text-xs">
+            <AlertTitle>The history could not be read</AlertTitle>
+            <AlertDescription>
               <span className="line-clamp-3 break-words">{history.error}</span>
             </AlertDescription>
           </Alert>
@@ -438,22 +438,20 @@ export function HistoryList(props: HistoryListProps) {
         <div className="min-h-0 flex-1 space-y-1 p-3" role="status" aria-live="polite">
           {Array.from({ length: 8 }, (_, index) => (
             <div key={index} className="flex items-center gap-2">
-              <Skeleton className="size-3 shrink-0 rounded-full" />
-              <Skeleton className="h-3.5 flex-1 rounded-full" />
+              <Skeleton shape="pill" className="size-3 shrink-0" />
+              <Skeleton shape="pill" className="h-3.5 flex-1" />
             </div>
           ))}
           <span className="sr-only">Loading commit history…</span>
         </div>
       ) : empty ? (
-        <Empty className="min-h-0 flex-1 justify-center gap-4 p-6">
+        <Empty size="compact" className="min-h-0 flex-1">
           <EmptyHeader>
             <EmptyMedia variant="icon">
               {history.filterActive ? <SearchX /> : <GitCommitHorizontal />}
             </EmptyMedia>
-            <EmptyTitle className="text-base">
-              {history.filterActive ? "No commits match" : "No commits yet"}
-            </EmptyTitle>
-            <EmptyDescription className="text-xs">
+            <EmptyTitle>{history.filterActive ? "No commits match" : "No commits yet"}</EmptyTitle>
+            <EmptyDescription>
               {history.filterActive
                 ? describeHistoryFilter(props.filter)
                 : "This branch has no history to show."}

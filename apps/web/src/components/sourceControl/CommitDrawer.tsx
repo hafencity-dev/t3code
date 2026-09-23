@@ -75,9 +75,9 @@ export function CommitDrawer(props: {
         <div ref={contentRef} className="flex flex-col gap-1 px-3 py-2">
           {props.isLoading || !props.detail ? (
             <div className="space-y-2 py-1" role="status" aria-live="polite">
-              <Skeleton className="h-3.5 w-40 rounded-full" />
-              <Skeleton className="h-3.5 w-full rounded-full" />
-              <Skeleton className="h-3.5 w-3/4 rounded-full" />
+              <Skeleton shape="pill" className="h-3.5 w-40" />
+              <Skeleton shape="pill" className="h-3.5 w-full" />
+              <Skeleton shape="pill" className="h-3.5 w-3/4" />
               <span className="sr-only">Loading commit…</span>
             </div>
           ) : (
@@ -88,13 +88,13 @@ export function CommitDrawer(props: {
                     render={
                       <Button
                         size="xs"
-                        variant="ghost"
-                        className="max-w-40 shrink-0 font-mono text-muted-foreground"
+                        variant="ghost-muted"
+                        className="max-w-40 shrink-0"
                         onClick={() => props.onCopy(props.detail?.hash ?? "", "the commit hash")}
                       />
                     }
                   >
-                    <span className="truncate">{props.detail.shortHash}</span>
+                    <span className="truncate font-mono">{props.detail.shortHash}</span>
                     <Copy />
                   </TooltipTrigger>
                   <TooltipPopup>Copy the full hash</TooltipPopup>
@@ -113,9 +113,9 @@ export function CommitDrawer(props: {
                       key={`${ref.kind}:${ref.name}`}
                       size="sm"
                       variant={ref.kind === "tag" ? "warning" : "secondary"}
-                      className="max-w-40 truncate"
+                      className="max-w-40"
                     >
-                      {ref.name}
+                      <span className="min-w-0 truncate">{ref.name}</span>
                     </Badge>
                   ))}
                 </div>

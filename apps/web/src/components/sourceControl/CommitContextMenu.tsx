@@ -130,7 +130,7 @@ export function CommitContextMenu(props: CommitContextMenuProps) {
               Mixed — keep working, unstage
             </MenuItem>
             <MenuItem
-              className="text-destructive-foreground"
+              variant="destructive"
               disabled={resetDisabledReason !== null || busy.reset}
               onClick={() => props.onReset(entry, "hard")}
             >
@@ -142,7 +142,7 @@ export function CommitContextMenu(props: CommitContextMenuProps) {
           <>
             <MenuSeparator />
             <MenuItem
-              className="text-destructive-foreground"
+              variant="destructive"
               disabled={busy.revert}
               onClick={() => props.onRevert(entry)}
             >
