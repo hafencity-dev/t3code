@@ -647,3 +647,5 @@ export const makePendingClaudeProvider = (
   });
 
 export { probeClaudeCapabilities };
+
+export { claudeAuthMetadata }; // fork: provider accounts

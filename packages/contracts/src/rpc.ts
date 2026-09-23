@@ -1,4 +1,5 @@
 import * as Schema from "effect/Schema";
+import { PROVIDER_ACCOUNTS_METHODS, PROVIDER_ACCOUNTS_RPCS } from "./providerAccounts.ts"; // fork: provider accounts
 import * as Rpc from "effect/unstable/rpc/Rpc";
 import * as RpcGroup from "effect/unstable/rpc/RpcGroup";
 import { NonNegativeInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
@@ -319,6 +320,7 @@ import {
 } from "./workingCopy.ts";
 
 export const WS_METHODS = {
+  ...PROVIDER_ACCOUNTS_METHODS, // fork: provider accounts
   // Project registry methods
   projectsList: "projects.list",
   projectsAdd: "projects.add",
@@ -1692,6 +1694,7 @@ export const WsWorkingCopyTagCommitRpc = Rpc.make(WS_METHODS.workingCopyTagCommi
 });
 
 export const WsRpcGroup = RpcGroup.make(
+  ...PROVIDER_ACCOUNTS_RPCS, // fork: provider accounts
   WsServerProbeRpc,
   WsServerGetConfigRpc,
   WsServerRefreshProvidersRpc,

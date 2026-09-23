@@ -22,6 +22,16 @@ type WsRpcMethod = RpcGroup.Rpcs<typeof WsRpcGroup>["_tag"];
  * runtime failure.
  */
 export const RPC_REQUIRED_SCOPES = {
+  [WS_METHODS.providerAccountsSetAutoSwitch]: AuthOrchestrationOperateScope, // fork: provider accounts
+  [WS_METHODS.providerAccountsAutoSwitchEvents]: AuthOrchestrationReadScope, // fork: provider accounts
+  [WS_METHODS.providerAccountsList]: AuthOrchestrationReadScope, // fork: provider accounts
+  [WS_METHODS.providerAccountsRefreshUsage]: AuthOrchestrationOperateScope, // fork: provider accounts
+  [WS_METHODS.providerAccountsStartLogin]: AuthOrchestrationOperateScope, // fork: provider accounts
+  [WS_METHODS.providerAccountsSubmitLoginCode]: AuthOrchestrationOperateScope, // fork: provider accounts
+  [WS_METHODS.providerAccountsCancelLogin]: AuthOrchestrationOperateScope, // fork: provider accounts
+  [WS_METHODS.providerAccountsSwitch]: AuthOrchestrationOperateScope, // fork: provider accounts
+  [WS_METHODS.providerAccountsRename]: AuthOrchestrationOperateScope, // fork: provider accounts
+  [WS_METHODS.providerAccountsRemove]: AuthOrchestrationOperateScope, // fork: provider accounts
   [ORCHESTRATION_WS_METHODS.dispatchCommand]: AuthOrchestrationOperateScope,
   [ORCHESTRATION_WS_METHODS.getWorkflowScript]: AuthOrchestrationReadScope,
   [ORCHESTRATION_WS_METHODS.getTurnDiff]: AuthOrchestrationReadScope,

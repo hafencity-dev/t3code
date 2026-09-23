@@ -4,6 +4,9 @@ For one account, use the default Codex provider with your normal Codex login.
 [Provider setup](./install.md#providers) covers installation, Settings > Providers,
 and custom binaries or environment variables.
 
+To save several accounts and switch between them from the sidebar, see
+[Account Switcher](./account-switcher.md).
+
 ## Use multiple accounts
 
 A shared Codex home with a shadow home lets work and personal accounts continue

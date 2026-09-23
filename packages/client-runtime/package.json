@@ -143,6 +143,10 @@
       "types": "./src/state/orchestration.ts",
       "default": "./src/state/orchestration.ts"
     },
+    "./state/provider-accounts": {
+      "types": "./src/state/providerAccounts.ts",
+      "default": "./src/state/providerAccounts.ts"
+    },
     "./state/claude-codex-routing": {
       "types": "./src/state/claudeCodexRouting.ts",
       "default": "./src/state/claudeCodexRouting.ts"

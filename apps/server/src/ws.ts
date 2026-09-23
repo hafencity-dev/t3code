@@ -142,6 +142,8 @@ import * as PortScanner from "./preview/PortScanner.ts";
 // fork: f4 source-control panel — the 28 `workingCopy.*` handlers live outside this file
 import { WorkingCopyService } from "./vcs/workingCopy/WorkingCopyService.ts";
 import { makeWorkingCopyRpcHandlers } from "./vcs/workingCopy/workingCopyRpcHandlers.ts";
+import { ProviderAccountsService } from "./provider/accounts/ProviderAccountsService.ts"; // fork: provider accounts
+import { makeProviderAccountsRpcHandlers } from "./provider/accounts/providerAccountsRpcHandlers.ts"; // fork: provider accounts
 import * as WorkspaceEntries from "./workspace/WorkspaceEntries.ts";
 import * as WorkspaceFileSystem from "./workspace/WorkspaceFileSystem.ts";
 import { readWorkflowScript } from "./orchestration/workflowScriptQuery.ts";
@@ -572,6 +574,7 @@ const makeWsRpcLayer = (
       const vcsProvisioning = yield* VcsProvisioningService.VcsProvisioningService;
       const vcsStatusBroadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
       const workingCopy = yield* WorkingCopyService; // fork: f4 source-control panel
+      const providerAccounts = yield* ProviderAccountsService; // fork: provider accounts
       const terminalManager = yield* TerminalManager.TerminalManager;
       const previewManager = yield* PreviewManager.PreviewManager;
       const deviceService = yield* DeviceService.DeviceService;
@@ -1923,6 +1926,12 @@ const makeWsRpcLayer = (
         // fork: f4 source-control panel — one spread, handlers defined in
         // `vcs/workingCopy/workingCopyRpcHandlers.ts`.
         ...makeWorkingCopyRpcHandlers({ workingCopy, observeRpcEffect, refreshGitStatus }),
+        ...makeProviderAccountsRpcHandlers({
+          providerAccounts,
+          currentSessionId,
+          observeRpcEffect,
+          observeRpcStream,
+        }), // fork: provider accounts
         [ORCHESTRATION_WS_METHODS.dispatchCommand]: (command) =>
           observeRpcEffect(
             ORCHESTRATION_WS_METHODS.dispatchCommand,
@@ -3932,6 +3941,7 @@ export const websocketRpcRouteLayer = Layer.unwrap(
         ),
     });
     const pullRequests = yield* PullRequestService.PullRequestService;
+    const providerAccounts = yield* ProviderAccountsService; // fork: provider accounts
     const sql = yield* SqlClient.SqlClient;
     return HttpRouter.add(
       "GET",
@@ -3980,6 +3990,7 @@ export const websocketRpcRouteLayer = Layer.unwrap(
               // One server-lifetime service means clients share the same PR caches, and a WS
               // mutation invalidates the HTTP diff cache that every client reads from.
               Layer.provide(Layer.succeed(PullRequestService.PullRequestService, pullRequests)),
+              Layer.provide(Layer.succeed(ProviderAccountsService, providerAccounts)), // fork: provider accounts
               Layer.provide(
                 SourceControlDiscovery.layer.pipe(
                   Layer.provide(

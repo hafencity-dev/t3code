@@ -7,6 +7,9 @@ shared provider settings.
 To use GPT/Codex models as Claude Code subagents through the Haiku slot, see
 [Claude Code → Codex Model Routing](./claude-codex-model-routing.md).
 
+To save several accounts and switch between them from the sidebar, see
+[Account Switcher](./account-switcher.md).
+
 ## Separate accounts or configurations
 
 Use a separate Claude config directory for each account. This also works for named

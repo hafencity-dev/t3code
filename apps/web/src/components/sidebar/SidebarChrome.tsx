@@ -30,6 +30,7 @@ import { SidebarThreadUndoNotice } from "./SidebarThreadUndoNotice";
 import { SidebarProviderUpdatePill } from "./SidebarProviderUpdatePill";
 import { SidebarUpdateArchitectureWarning, SidebarUpdatePill } from "./SidebarUpdatePill";
 import { SidebarProviderUsage } from "./SidebarProviderUsage"; // fork: sidebar usage stats
+import { SidebarAccountSwitcherButton } from "../accountSwitcher/SidebarAccountSwitcherButton"; // fork: provider accounts
 import { PullRequestGlyph } from "~/components/pullRequest/pullRequestIcons";
 
 export const SidebarChromeHeader = memo(function SidebarChromeHeader({
@@ -223,6 +224,7 @@ export const SidebarChromeFooter = memo(function SidebarChromeFooter() {
       <SidebarProviderUpdatePill />
       <SidebarUpdateArchitectureWarning />
       <SidebarProviderUsage /> {/* fork: sidebar usage stats */}
+      <SidebarAccountSwitcherButton /> {/* fork: provider accounts */}
       <SidebarUtilityMenu />
     </SidebarFooter>
   );
