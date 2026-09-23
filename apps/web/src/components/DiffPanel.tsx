@@ -83,7 +83,8 @@ import {
 import {
   DropdownMenu,
   DropdownMenuContent,
-  DropdownMenuItem,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
   DropdownMenuSub,
   DropdownMenuSubContent,
   DropdownMenuSubTrigger,
@@ -733,6 +734,27 @@ export default function DiffPanel({
   const selectBranchBaseRef = (baseRef: string | null) => {
     useDiffPanelStore.getState().selectBranchBaseRef(threadRef, baseRef);
   };
+  // The scope menu has two radio groups: the top-level one treats the latest
+  // turn as "latest", while the turn sub-menu keys every turn by id so the
+  // latest turn is also marked there.
+  const selectedTurnValue = selectedTurn ? `turn:${selectedTurn.turnId}` : "";
+  const selectedScopeValue = hunkStaging.active
+    ? "" /* fork: f4 hunk staging — a working-copy file is its own scope */
+    : selectedTurnId === null
+      ? selectedGitScope
+      : selectedTurn?.turnId === latestTurn?.turnId
+        ? "latest"
+        : selectedTurnValue;
+  const selectScopeValue = (value: string) => {
+    if (value === "unstaged" || value === "branch") {
+      selectGitScope(value);
+    } else if (value === "latest") {
+      if (latestTurn) selectTurn(latestTurn.turnId);
+    } else {
+      const turn = orderedTurnDiffSummaries.find((summary) => `turn:${summary.turnId}` === value);
+      if (turn) selectTurn(turn.turnId);
+    }
+  };
 
   const headerRow = (
     <>
@@ -764,69 +786,50 @@ export default function DiffPanel({
         )}
         <DropdownMenu>
           <DropdownMenuTrigger
-            className="inline-flex h-6 max-w-full items-center gap-1 rounded-md bg-accent px-2 text-xs font-medium text-accent-foreground outline-none transition-colors hover:bg-accent/80 focus-visible:ring-2 focus-visible:ring-ring"
+            render={<Button size="xs" variant="secondary" />}
+            className="max-w-full"
             aria-label={`Diff scope: ${selectedScopeLabel}`}
           >
             <span className="truncate">{selectedScopeLabel}</span>
             <ChevronDownIcon className="size-3.5 shrink-0 opacity-70" />
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="start" className="w-60">
-            <DropdownMenuItem
-              className={
-                /* fork: f4 hunk staging — a working-copy file is its own scope */
-                selectedTurnId === null && !hunkStaging.active && selectedGitScope === "unstaged"
-                  ? "bg-foreground/[0.08]"
-                  : undefined
-              }
-              onClick={() => selectGitScope("unstaged")}
-            >
-              <span>Working tree</span>
-            </DropdownMenuItem>
-            <DropdownMenuItem
-              className={
-                selectedTurnId === null && !hunkStaging.active && selectedGitScope === "branch"
-                  ? "bg-foreground/[0.08]"
-                  : undefined
-              }
-              onClick={() => selectGitScope("branch")}
-            >
-              <span>Branch changes</span>
-            </DropdownMenuItem>
-            <DropdownMenuItem
-              className={
-                selectedTurnId !== null && selectedTurn?.turnId === latestTurn?.turnId
-                  ? "bg-foreground/[0.08]"
-                  : undefined
-              }
-              onClick={() => {
-                if (latestTurn) selectTurn(latestTurn.turnId);
-              }}
-            >
-              <span>Latest turn</span>
-            </DropdownMenuItem>
+          <DropdownMenuContent align="start">
+            <DropdownMenuRadioGroup value={selectedScopeValue} onValueChange={selectScopeValue}>
+              <DropdownMenuRadioItem value="unstaged" closeOnClick>
+                <span>Working tree</span>
+              </DropdownMenuRadioItem>
+              <DropdownMenuRadioItem value="branch" closeOnClick>
+                <span>Branch changes</span>
+              </DropdownMenuRadioItem>
+              <DropdownMenuRadioItem value="latest" closeOnClick>
+                <span>Latest turn</span>
+              </DropdownMenuRadioItem>
+            </DropdownMenuRadioGroup>
             <DropdownMenuSub>
               <DropdownMenuSubTrigger>Turn</DropdownMenuSubTrigger>
-              <DropdownMenuSubContent className="w-64">
-                {orderedTurnDiffSummaries.map((summary) => {
-                  const turnCount =
-                    summary.checkpointTurnCount ??
-                    inferredCheckpointTurnCountByTurnId[summary.turnId] ??
-                    "?";
-                  return (
-                    <DropdownMenuItem
-                      key={summary.turnId}
-                      className={
-                        summary.turnId === selectedTurn?.turnId ? "bg-foreground/[0.08]" : undefined
-                      }
-                      onClick={() => selectTurn(summary.turnId)}
-                    >
-                      <span>Turn {turnCount}</span>
-                      <span className="ml-auto text-xs tabular-nums text-muted-foreground">
-                        {formatShortTimestamp(summary.completedAt, settings.timestampFormat)}
-                      </span>
-                    </DropdownMenuItem>
-                  );
-                })}
+              <DropdownMenuSubContent>
+                <DropdownMenuRadioGroup value={selectedTurnValue} onValueChange={selectScopeValue}>
+                  {orderedTurnDiffSummaries.map((summary) => {
+                    const turnCount =
+                      summary.checkpointTurnCount ??
+                      inferredCheckpointTurnCountByTurnId[summary.turnId] ??
+                      "?";
+                    return (
+                      <DropdownMenuRadioItem
+                        key={summary.turnId}
+                        value={`turn:${summary.turnId}`}
+                        closeOnClick
+                      >
+                        <span className="flex items-center gap-2">
+                          <span>Turn {turnCount}</span>
+                          <span className="ml-auto text-xs tabular-nums text-muted-foreground">
+                            {formatShortTimestamp(summary.completedAt, settings.timestampFormat)}
+                          </span>
+                        </span>
+                      </DropdownMenuRadioItem>
+                    );
+                  })}
+                </DropdownMenuRadioGroup>
               </DropdownMenuSubContent>
             </DropdownMenuSub>
           </DropdownMenuContent>
@@ -860,7 +863,8 @@ export default function DiffPanel({
               }}
             >
               <ComboboxTrigger
-                className="inline-flex min-w-0 max-w-48 items-center gap-1 overflow-hidden rounded-md px-1.5 py-1 outline-none transition-colors hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+                render={<Button variant="ghost-muted" size="xs" />}
+                className="min-w-0 max-w-48"
                 aria-label={`Change comparison target. Currently ${selectedGitSource.baseRef}`}
               >
                 <span className="min-w-0 truncate">{selectedGitSource.baseRef}</span>
@@ -885,8 +889,7 @@ export default function DiffPanel({
                 <ComboboxEmpty>No matching refs.</ComboboxEmpty>
                 <ComboboxList className="max-h-64 min-w-0 overflow-x-hidden">
                   <ComboboxItem
-                    className="h-8 w-full min-w-0 grid-cols-[1rem_minmax(0,1fr)] py-0"
-                    contentClassName="w-full min-w-0 overflow-hidden"
+                    className="w-full min-w-0 grid-cols-[1rem_minmax(0,1fr)]"
                     value={AUTOMATIC_BASE_REF}
                   >
                     <span className="block min-w-0 truncate">Automatic</span>
@@ -898,8 +901,7 @@ export default function DiffPanel({
                     return (
                       <ComboboxItem
                         key={choice.id}
-                        className="h-8 w-full min-w-0 grid-cols-[1rem_minmax(0,1fr)] py-0"
-                        contentClassName="w-full min-w-0 overflow-hidden"
+                        className="w-full min-w-0 grid-cols-[1rem_minmax(0,1fr)]"
                         value={item}
                       >
                         <div className="grid w-full min-w-0 grid-cols-[minmax(0,1fr)_2rem] items-center overflow-hidden">
@@ -1248,10 +1250,7 @@ export default function DiffPanel({
                               <Button
                                 size="icon-micro"
                                 variant="ghost"
-                                className={cn(
-                                  "-ms-0.5 [--control-icon-color:currentColor] bg-transparent hover:bg-foreground/10",
-                                  getDiffCollapseIconClassName(fileDiff),
-                                )}
+                                className="-ms-0.5"
                                 aria-label={
                                   collapsed ? `Expand ${filePath}` : `Collapse ${filePath}`
                                 }
@@ -1265,9 +1264,13 @@ export default function DiffPanel({
                             }
                           >
                             {collapsed ? (
-                              <ChevronRightIcon className="size-4" />
+                              <ChevronRightIcon
+                                className={cn("size-4", getDiffCollapseIconClassName(fileDiff))}
+                              />
                             ) : (
-                              <ChevronDownIcon className="size-4" />
+                              <ChevronDownIcon
+                                className={cn("size-4", getDiffCollapseIconClassName(fileDiff))}
+                              />
                             )}
                           </TooltipTrigger>
                           <TooltipPopup side="top">
