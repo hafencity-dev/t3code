@@ -131,7 +131,7 @@ class LoginFailure extends Error {}
 export class ProviderAccountLogin {
   readonly #options: ProviderAccountLoginOptions;
   readonly #sessions = new Map<string, LoginSession>();
-  readonly #busy = new Set<string>();
+  readonly #busy = new Map<string, LoginSession>();
 
   constructor(options: ProviderAccountLoginOptions) {
     this.#options = options;
@@ -144,11 +144,15 @@ export class ProviderAccountLogin {
     signal?: AbortSignal,
   ): Promise<void> {
     const key = `${input.driver}:${input.accountId ?? "new"}`;
-    if (this.#busy.has(key)) {
-      emit({ _tag: "failed", message: "A sign-in for this account is already running." });
-      return;
+    // A client restarting its own login replaces it; other sessions cannot take it over.
+    for (let running = this.#busy.get(key); running; running = this.#busy.get(key)) {
+      if (running.owner !== owner) {
+        emit({ _tag: "failed", message: "A sign-in for this account is already running." });
+        return;
+      }
+      running.controller.abort();
+      await running.done;
     }
-    this.#busy.add(key);
     const loginId = NodeCrypto.randomUUID();
     const controller = new AbortController();
     let finish!: () => void;
@@ -164,6 +168,7 @@ export class ProviderAccountLogin {
       ...(input.accountId ? { accountId: input.accountId } : {}),
     };
     this.#sessions.set(loginId, session);
+    this.#busy.set(key, session);
     const abort = () => controller.abort();
     signal?.addEventListener("abort", abort, { once: true });
     if (signal?.aborted) abort();

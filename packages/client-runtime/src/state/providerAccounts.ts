@@ -16,6 +16,7 @@ import {
   createEnvironmentRpcCommand,
   createEnvironmentRpcQueryAtomFamily,
   createEnvironmentSubscriptionAtomFamily,
+  environmentRpcKey,
   runStreamInEnvironment,
 } from "./runtime.ts";
 
@@ -36,32 +37,34 @@ export function createProviderAccountsEnvironmentAtoms<R, E>(
     Effect.sync(() => registry.refresh(list({ environmentId, input: {} })));
 
   // Login is a command: following registry changes would replay its side effects.
-  const loginEventsByEnvironment = Atom.family((environmentId: EnvironmentId) =>
-    Atom.family((key: string) => {
-      const { attempt: _attempt, ...input } = JSON.parse(key) as ProviderAccountLoginRequest;
-      const refresh = Effect.flatMap(AtomRegistry.AtomRegistry, (registry) =>
-        invalidate(environmentId, registry),
-      );
-      return runtime
-        .atom(
-          runStreamInEnvironment(
-            environmentId,
-            runStream(WS_METHODS.providerAccountsStartLogin, input),
-          ).pipe(
-            Stream.tap((event) =>
-              event._tag === "started" || event._tag === "completed" || event._tag === "failed"
-                ? refresh
-                : Effect.void,
-            ),
-            Stream.ensuring(refresh),
+  // Keep this family flat. Atom.family holds its values weakly, so a nested family's
+  // inner lookup can be collected while its login atom is still mounted; the next
+  // lookup would then build a second atom and start a second server login.
+  const loginEventsFamily = Atom.family((key: string) => {
+    const [environmentId, request] = JSON.parse(key) as [
+      EnvironmentId,
+      ProviderAccountLoginRequest,
+    ];
+    const { attempt: _attempt, ...input } = request;
+    const refresh = Effect.flatMap(AtomRegistry.AtomRegistry, (registry) =>
+      invalidate(environmentId, registry),
+    );
+    return runtime
+      .atom(
+        runStreamInEnvironment(
+          environmentId,
+          runStream(WS_METHODS.providerAccountsStartLogin, input),
+        ).pipe(
+          Stream.tap((event) =>
+            event._tag === "started" || event._tag === "completed" || event._tag === "failed"
+              ? refresh
+              : Effect.void,
           ),
-        )
-        .pipe(
-          Atom.setIdleTTL(0),
-          Atom.withLabel(`environment-data:provider-accounts:login:${environmentId}:${key}`),
-        );
-    }),
-  );
+          Stream.ensuring(refresh),
+        ),
+      )
+      .pipe(Atom.setIdleTTL(0), Atom.withLabel(`environment-data:provider-accounts:login:${key}`));
+  });
 
   const onSettled = (
     { environmentId }: { readonly environmentId: EnvironmentId },
@@ -92,7 +95,7 @@ export function createProviderAccountsEnvironmentAtoms<R, E>(
     loginEvents: (target: {
       readonly environmentId: EnvironmentId;
       readonly input: ProviderAccountLoginRequest;
-    }) => loginEventsByEnvironment(target.environmentId)(JSON.stringify(target.input)),
+    }) => loginEventsFamily(environmentRpcKey(target)),
     refreshUsage: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:provider-accounts:refresh-usage",
       tag: WS_METHODS.providerAccountsRefreshUsage,

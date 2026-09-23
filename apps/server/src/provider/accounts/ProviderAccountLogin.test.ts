@@ -297,12 +297,14 @@ describe("ProviderAccountLogin", () => {
     expect(f.spawn.mock.calls[1]?.[1]).toEqual(["auth", "status", "--json"]);
   });
 
-  it("rejects concurrent sign-ins and abort cleans up only after logout", async () => {
+  it("rejects another owner's concurrent sign-in and abort cleans up only after logout", async () => {
     const f = fixture();
     const controller = new AbortController();
     const running = f.start(controller.signal);
     await f.spawned.promise;
-    await f.start();
+    await f.login.start("other-owner", { driver: f.account.driver }, (event) =>
+      f.events.push(event),
+    );
     expect(f.events.at(-1)).toMatchObject({
       _tag: "failed",
       message: expect.stringContaining("already running"),
@@ -313,6 +315,53 @@ describe("ProviderAccountLogin", () => {
     expect(f.spawn.mock.calls[1]?.[1]).toEqual(["auth", "logout"]);
     expect(f.cleanup).toHaveBeenCalledExactlyOnceWith(f.account);
     expect(f.complete).not.toHaveBeenCalled();
+  });
+
+  it("replaces the same owner's login only after the interrupted session finishes cleanup", async () => {
+    const cleaning = deferred<void>();
+    const releaseCleanup = deferred<void>();
+    const replacementStarted = deferred<string>();
+    const f = fixture({
+      cleanup: async () => {
+        cleaning.resolve();
+        await releaseCleanup.promise;
+      },
+    });
+    const originalAbort = new AbortController();
+    const original = f.start(originalAbort.signal);
+    await f.spawned.promise;
+    const replacementAbort = new AbortController();
+    const events: ProviderAccountLoginEvent[] = [];
+    const replacement = f.login.start(
+      "owner",
+      { driver: f.account.driver },
+      (event) => {
+        events.push(event);
+        if (event._tag === "started") replacementStarted.resolve(event.loginId);
+      },
+      replacementAbort.signal,
+    );
+    // Replacement must abort the old child even before its RPC cancellation arrives.
+    expect(f.children[0]?.kill).toHaveBeenCalledWith("SIGTERM");
+    await cleaning.promise;
+    expect(f.prepare).toHaveBeenCalledTimes(1);
+    expect(events).toEqual([]);
+    const outsider: ProviderAccountLoginEvent[] = [];
+    await f.login.start("other-owner", { driver: f.account.driver }, (event) =>
+      outsider.push(event),
+    );
+    expect(outsider).toEqual([
+      { _tag: "failed", message: "A sign-in for this account is already running." },
+    ]);
+    releaseCleanup.resolve();
+    await original;
+    const id = await replacementStarted.promise;
+    expect(id).not.toBe(f.loginId());
+    expect(f.prepare).toHaveBeenCalledTimes(2);
+    originalAbort.abort();
+    expect(events.some((event) => event._tag === "failed")).toBe(false);
+    replacementAbort.abort();
+    await replacement;
   });
 
   it("reports a persisted re-login identity conflict without completing or removing the account", async () => {

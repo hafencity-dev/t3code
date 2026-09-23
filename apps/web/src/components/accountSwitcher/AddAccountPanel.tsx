@@ -3,7 +3,6 @@ import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
-import type { ProviderAccountLoginRequest } from "@t3tools/client-runtime/state/provider-accounts";
 import type {
   EnvironmentId,
   ProviderAccountGroup,
@@ -35,6 +34,8 @@ import { providerAccountsEnvironment } from "./state";
 import { SwitchAccountAction } from "./SwitchAccountAction";
 
 let loginAttempt = 0;
+
+type LoginEventsAtom = ReturnType<typeof providerAccountsEnvironment.loginEvents>;
 
 function CopyAction({
   value,
@@ -73,14 +74,12 @@ export function AddAccountPanel({
   onBack: () => void;
 }) {
   const [name, setName] = useState("");
-  const [request, setRequest] = useState<ProviderAccountLoginRequest | null>(null);
+  // Hold the attempt's atom for its lifetime: a fresh lookup must never start another login.
+  const [eventAtom, setEventAtom] = useState<LoginEventsAtom | null>(null);
   const [loginId, setLoginId] = useState<string | null>(null);
   const registry = useContext(RegistryContext);
   const [code, setCode] = useState("");
   const [submitting, setSubmitting] = useState(false);
-  const eventAtom = request
-    ? providerAccountsEnvironment.loginEvents({ environmentId, input: request })
-    : null;
   const events = useEnvironmentQuery(eventAtom);
   const event = events.data;
   const submit = useAtomCommand(providerAccountsEnvironment.submitLoginCode, {
@@ -105,17 +104,22 @@ export function AddAccountPanel({
   const start = () => {
     setCode("");
     setLoginId(null);
-    setRequest({
-      driver,
-      // New attempts need a new account: failed/cancelled new homes are cleaned up by the server.
-      ...(account ? { accountId: account.id } : {}),
-      ...(name.trim() ? { label: name.trim() } : {}),
-      attempt: ++loginAttempt,
-    });
+    setEventAtom(
+      providerAccountsEnvironment.loginEvents({
+        environmentId,
+        input: {
+          driver,
+          // New attempts need a new account: failed/cancelled new homes are cleaned up by the server.
+          ...(account ? { accountId: account.id } : {}),
+          ...(name.trim() ? { label: name.trim() } : {}),
+          attempt: ++loginAttempt,
+        },
+      }),
+    );
   };
   const cancel = () => {
     // Unsubscribing also cancels the server process, including before started arrives.
-    setRequest(null);
+    setEventAtom(null);
     if (loginId) void cancelLogin({ environmentId, input: { loginId } });
     setLoginId(null);
   };
@@ -135,7 +139,7 @@ export function AddAccountPanel({
   };
   const failed = events.error ?? (event?._tag === "failed" ? event.message : null);
   const link = event?._tag === "browser" || event?._tag === "deviceCode" ? event : null;
-  const waiting = request !== null && !failed && event?._tag !== "completed";
+  const waiting = eventAtom !== null && !failed && event?._tag !== "completed";
   return (
     <>
       <DialogHeader>
@@ -153,7 +157,7 @@ export function AddAccountPanel({
         </DialogDescription>
       </DialogHeader>
       <DialogPanel>
-        {!request ? (
+        {!eventAtom ? (
           <div className="grid gap-3">
             {!account ? (
               <label className="grid gap-1.5 text-sm">
