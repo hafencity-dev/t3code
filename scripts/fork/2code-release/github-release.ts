@@ -228,7 +228,12 @@ function getRelease(config: TwoCodeReleaseConfig): ReleaseResponse | undefined {
     "--slurp",
     `repos/${config.githubRepository}/releases?per_page=100`,
   ]);
-  return findReleaseInPaginatedListing(listing.stdout, tag);
+  const listed = findReleaseInPaginatedListing(listing.stdout, tag);
+  if (!listed) return undefined;
+  // Draft releases only resolve through the listing, which returns their assets as an empty
+  // array. Re-read the draft by id to get its real assets.
+  const byId = run("gh", ["api", `repos/${config.githubRepository}/releases/${listed.id}`]);
+  return parseReleaseResponse(byId.stdout);
 }
 
 function resolveTagCommit(config: TwoCodeReleaseConfig, tag: string): string | undefined {
