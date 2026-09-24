@@ -593,9 +593,11 @@ describe("auto-switch status", () => {
     );
   });
   it("prefers the server message, otherwise names the watched account", () => {
-    expect(autoSwitchStatus(group({ state: "paused", message: "Paused for 2h" }))).toMatchObject({
+    expect(
+      autoSwitchStatus(group({ state: "paused", message: "Pausing early rotation." })),
+    ).toMatchObject({
       badge: { label: "Paused" },
-      text: "Paused for 2h",
+      text: "Pausing early rotation.",
     });
     expect(autoSwitchStatus(group({}))).toMatchObject({
       badge: { label: "On", variant: "success" },

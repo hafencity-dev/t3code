@@ -48,12 +48,14 @@ new account the next time you switch.
 
 Turn on **Auto-switch** per provider and pick a threshold (10% by default). When the active account
 reaches the threshold on its 5-hour or weekly limit, T3 Code switches to the account whose weekly
-limit resets soonest and still has headroom, so no weekly quota expires unused. It also moves to an
-account early when a lot of its weekly quota would otherwise expire within a day.
+limit resets soonest and still has headroom, so no weekly quota expires unused. It also switches
+early, while the active account is still healthy, when another account's weekly limit resets sooner
+and it still has at least 20% of it left, so that quota is used up first. If that account's 5-hour
+limit is low, it switches once that limit resets.
 
-Automatic switching never interrupts a running Codex turn; it waits until the turn finishes. After
-you switch manually, it pauses early switches for two hours. A toast explains every automatic
-switch.
+Automatic switching never interrupts a running Codex turn; it waits until the turn finishes. A
+manual switch does not pause it: once the account you picked reaches the threshold, it switches as
+usual. A toast explains every automatic switch.
 
 ## Start 5-hour windows automatically
 

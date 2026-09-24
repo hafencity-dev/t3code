@@ -84,7 +84,7 @@ describe("ProviderAccountRegistry", () => {
     expect(await NodeFSP.readFile(registryPath(), "utf8")).toBe(before);
   });
 
-  it("persists per-driver config, switch history and manual holds across account mutations", async () => {
+  it("persists per-driver config and switch history across account mutations", async () => {
     const registry = await createProviderAccountRegistry({ stateDir });
     const lastSwitch = {
       at: "2026-09-23T10:00:00.000Z",
@@ -94,9 +94,8 @@ describe("ProviderAccountRegistry", () => {
       reason: "Default has 8% left; switching to Work with 60% left.",
       accessToken: "never-persist",
     };
-    const manual = { at: 1000, holdUntil: 7201000, activeWasBelowThreshold: true };
     await Promise.all([
-      registry.updateAutoSwitch("claudeAgent", { enabled: true, lastSwitch, manual }),
+      registry.updateAutoSwitch("claudeAgent", { enabled: true, lastSwitch }),
       registry.updateAutoSwitch("claudeAgent", { thresholdPercent: 5 }),
       registry.updateAutoSwitch("codex", { thresholdPercent: 50 }),
       registry.list("claudeAgent", shared),
@@ -108,7 +107,6 @@ describe("ProviderAccountRegistry", () => {
       enabled: true,
       thresholdPercent: 5,
       lastSwitch: expectedLastSwitch,
-      manual,
     });
     expect(await reopened.getAutoSwitch("codex")).toEqual({ enabled: false, thresholdPercent: 50 });
     expect(await reopened.get("claudeAgent-default")).toMatchObject({ label: "Personal" });
@@ -118,8 +116,7 @@ describe("ProviderAccountRegistry", () => {
     expect(await NodeFSP.readdir(NodePath.dirname(registryPath()))).toEqual(["accounts.json"]);
   });
 
-  it("preserves omitted manual holds and explicitly clears them without losing history", async () => {
-    const registry = await createProviderAccountRegistry({ stateDir });
+  it("ignores a legacy manual hold and drops it on the next write without losing history", async () => {
     const lastSwitch = {
       at: "2026-09-23T10:00:00.000Z",
       fromAccountId: "default",
@@ -127,14 +124,34 @@ describe("ProviderAccountRegistry", () => {
       trigger: "session" as const,
       reason: "Default has exhausted its session limit.",
     };
-    const manual = { at: 1000, holdUntil: 7201000, activeWasBelowThreshold: false };
-    await registry.updateAutoSwitch("codex", { enabled: true, manual, lastSwitch });
-    expect(await registry.updateAutoSwitch("codex", {})).toMatchObject({ manual });
+    await NodeFSP.mkdir(NodePath.dirname(registryPath()), { recursive: true });
+    await NodeFSP.writeFile(
+      registryPath(),
+      JSON.stringify({
+        version: 1,
+        accounts: [],
+        sharedHomes: {},
+        autoSwitch: {
+          codex: {
+            enabled: true,
+            thresholdPercent: 10,
+            lastSwitch,
+            manual: { at: 1000, holdUntil: 7201000, activeWasBelowThreshold: true },
+          },
+        },
+      }),
+    );
+    const registry = await createProviderAccountRegistry({ stateDir });
+    expect(await registry.getAutoSwitch("codex")).toEqual({
+      enabled: true,
+      thresholdPercent: 10,
+      lastSwitch,
+    });
     const snapshot = await registry.getAutoSwitch("codex");
-    Object.assign(snapshot.manual!, { holdUntil: 0 });
     Object.assign(snapshot.lastSwitch!, { reason: "Mutated" });
-    expect(await registry.getAutoSwitch("codex")).toMatchObject({ manual, lastSwitch });
-    expect(await registry.updateAutoSwitch("codex", { manual: null })).not.toHaveProperty("manual");
+    expect(await registry.getAutoSwitch("codex")).toMatchObject({ lastSwitch });
+    await registry.updateAutoSwitch("codex", {});
+    expect(await NodeFSP.readFile(registryPath(), "utf8")).not.toContain("holdUntil");
     const reopened = await createProviderAccountRegistry({ stateDir });
     expect(await reopened.getAutoSwitch("codex")).toEqual({
       enabled: true,

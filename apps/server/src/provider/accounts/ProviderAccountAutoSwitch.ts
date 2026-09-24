@@ -40,7 +40,7 @@ export interface ProviderAccountAutoSwitchDependencies {
   readonly switchAccount: (
     accountId: ProviderAccountId,
   ) => Effect.Effect<unknown, ProviderAccountError | ProviderAccountBusyError>;
-  /** Persist the successful automatic switch and clear the manual hold together. */
+  /** Persist the successful automatic switch. */
   readonly persistLastSwitch: (
     driver: ProviderAccountDriver,
     lastSwitch: ProviderAccountAutoSwitchLastSwitch,
@@ -209,7 +209,6 @@ export const makeProviderAccountAutoSwitch = Effect.fn("makeProviderAccountAutoS
             ...(probeWakeAt ? { probeWakeAt } : {}),
             recentAutoSwitchAts: runtime.recent,
             ...(config.lastSwitch ? { lastSwitchAt: Date.parse(config.lastSwitch.at) } : {}),
-            ...(config.manual ? { manual: config.manual } : {}),
           });
           runtime.needsIdle =
             group.switchMode === "restart" &&
@@ -223,7 +222,7 @@ export const makeProviderAccountAutoSwitch = Effect.fn("makeProviderAccountAutoS
           if (decision.kind === "probe") return decision;
           if (decision.kind === "stay") {
             const state =
-              decision.code === "manualHold" || decision.code === "circuitBreaker"
+              decision.code === "circuitBreaker"
                 ? "paused"
                 : decision.code === "healthy"
                   ? "watching"

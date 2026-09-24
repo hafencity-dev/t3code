@@ -28,7 +28,6 @@ import {
   runClaudeWindowPrime,
   type ClaudeWindowPrimeFailure,
 } from "./ClaudeWindowPrime.ts";
-import { activeBelowThreshold } from "./autoSwitchPolicy.ts";
 import type * as FileSystem from "effect/FileSystem";
 import type * as Path from "effect/Path";
 import type { ChildProcessSpawner } from "effect/unstable/process";
@@ -1189,22 +1188,7 @@ const make = (
     ) {
       const snapshot = yield* switchAccountUnlocked(input);
       const group = snapshot.groups.find((entry) => entry.activeAccountId === input.accountId)!;
-      const active = group.accounts.find((entry) => entry.id === input.accountId)!;
-      const registry = yield* registryEffect;
-      const now = yield* Clock.currentTimeMillis;
-      yield* io(() =>
-        registry.updateAutoSwitch(group.driver, {
-          manual: {
-            at: now,
-            holdUntil: now + 2 * 60 * 60_000,
-            activeWasBelowThreshold: activeBelowThreshold(
-              { ...active, loginInProgress: login.isBusy(active.id) },
-              now,
-              group.autoSwitch.thresholdPercent,
-            ),
-          },
-        }),
-      );
+      // A manual switch is just a switch: the next evaluation uses the new account's numbers.
       if (autoSwitch) {
         yield* autoSwitch.clear(group.driver);
         yield* autoSwitch.notify(group.driver);
@@ -1375,7 +1359,7 @@ const make = (
       persistLastSwitch: (driver, lastSwitch) =>
         Effect.gen(function* () {
           const registry = yield* registryEffect;
-          yield* io(() => registry.updateAutoSwitch(driver, { lastSwitch, manual: null }));
+          yield* io(() => registry.updateAutoSwitch(driver, { lastSwitch }));
         }),
       withMutation: mutation.withPermit,
       providerChanges: providers.streamChanges,

@@ -12,18 +12,7 @@ import {
   WS_METHODS,
   type ProviderAccountsSnapshot,
 } from "@t3tools/contracts";
-import {
-  Clock,
-  Deferred,
-  Effect,
-  Fiber,
-  Layer,
-  PubSub,
-  Queue,
-  Schema,
-  Scope,
-  Stream,
-} from "effect";
+import { Deferred, Effect, Fiber, Layer, PubSub, Queue, Schema, Scope, Stream } from "effect";
 import { afterEach, beforeEach, vi } from "vite-plus/test";
 import { describe, expect, it } from "@effect/vitest";
 import * as ServerConfig from "../../config.ts";
@@ -554,11 +543,10 @@ describe("ProviderAccountsService", () => {
     ),
   );
 
-  it.effect("records the manual hold after switching, including a same-account selection", () =>
+  it.effect("a manual switch, even to a low account, records no hold or switch history", () =>
     run(
       Effect.gen(function* () {
         const service = yield* ProviderAccountsService;
-        const now = yield* Clock.currentTimeMillis;
         yield* service.switchAccount({ accountId: seeded!.id });
         yield* service.switchAccount({ accountId: seeded!.id });
         const config = yield* ServerConfig.ServerConfig;
@@ -566,27 +554,7 @@ describe("ProviderAccountsService", () => {
           const registry = await createProviderAccountRegistry({ stateDir: config.stateDir });
           return registry.getAutoSwitch("codex");
         });
-        expect(persisted.manual).toEqual({
-          at: now,
-          holdUntil: now + 2 * 60 * 60_000,
-          activeWasBelowThreshold: false,
-        });
-        expect(persisted.lastSwitch).toBeUndefined();
-      }),
-      true,
-    ),
-  );
-  it.effect("remembers when the manually selected account was already below threshold", () =>
-    run(
-      Effect.gen(function* () {
-        const service = yield* ProviderAccountsService;
-        yield* service.switchAccount({ accountId: seeded!.id });
-        const config = yield* ServerConfig.ServerConfig;
-        const persisted = yield* Effect.promise(async () => {
-          const registry = await createProviderAccountRegistry({ stateDir: config.stateDir });
-          return registry.getAutoSwitch("codex");
-        });
-        expect(persisted.manual?.activeWasBelowThreshold).toBe(true);
+        expect(persisted).toEqual({ enabled: false, thresholdPercent: 10 });
       }),
       "low",
     ),

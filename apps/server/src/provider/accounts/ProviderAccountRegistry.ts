@@ -52,19 +52,10 @@ const AutoSwitch = Schema.Struct({
       reason: Schema.String,
     }),
   ),
-  manual: Schema.optional(
-    Schema.Struct({
-      at: Schema.Number,
-      holdUntil: Schema.Number,
-      activeWasBelowThreshold: Schema.Boolean,
-    }),
-  ),
+  // A legacy `manual` hold field from older builds is stripped by decode and dropped on write.
 });
 export type ProviderAccountAutoSwitch = typeof AutoSwitch.Type;
-export type ProviderAccountAutoSwitchPatch = Partial<Omit<ProviderAccountAutoSwitch, "manual">> & {
-  /** Null clears the manual hold; omission leaves it unchanged. */
-  manual?: ProviderAccountAutoSwitch["manual"] | null;
-};
+export type ProviderAccountAutoSwitchPatch = Partial<ProviderAccountAutoSwitch>;
 const WindowPrimer = Schema.Struct({
   enabled: Schema.Boolean,
   /** Epoch ms of each account's last successful window start, keyed by account id. */
@@ -264,14 +255,11 @@ export async function createProviderAccountRegistry(input: { stateDir: string })
             "Auto-switch threshold must be an integer between 5 and 50.",
           );
         }
-        const { manual: previousManual, ...config } = previous;
-        const manual = patch.manual === undefined ? previousManual : patch.manual;
         const next: ProviderAccountAutoSwitch = {
-          ...config,
+          ...previous,
           enabled: patch.enabled ?? previous.enabled,
           thresholdPercent,
           ...(patch.lastSwitch !== undefined ? { lastSwitch: patch.lastSwitch } : {}),
-          ...(manual ? { manual } : {}),
         };
         await persist({ ...stored, autoSwitch: { ...stored.autoSwitch, [driver]: next } });
         return getAutoSwitch(driver);

@@ -75,12 +75,20 @@ const group = (
     ],
   });
 
+const manualSwitch = (snapshot: ProviderAccountAutoSwitchRead, id: ProviderAccountId) => ({
+  ...snapshot,
+  group: {
+    ...snapshot.group,
+    activeAccountId: id,
+    accounts: snapshot.group.accounts.map((account) => ({ ...account, active: account.id === id })),
+  },
+});
+
 const makeHarness = Effect.fnUntraced(function* (options?: {
   driver?: ProviderAccountDriver;
   enabled?: boolean;
   claudeEnabled?: boolean;
   unknown?: boolean;
-  manual?: boolean;
   used?: number;
   candidateUsed?: number;
   busy?: boolean;
@@ -104,9 +112,6 @@ const makeHarness = Effect.fnUntraced(function* (options?: {
       config: {
         enabled: options?.enabled ?? true,
         thresholdPercent: 10,
-        ...(options?.manual
-          ? { manual: { at: 0, holdUntil: 7_200_000, activeWasBelowThreshold: true } }
-          : {}),
       },
       group: group(options?.used, options?.candidateUsed, options?.reset, options?.driver),
       loginInProgress: [],
@@ -203,10 +208,9 @@ const makeHarness = Effect.fnUntraced(function* (options?: {
     persistLastSwitch: (_driver, lastSwitch) =>
       Effect.sync(() => {
         state.persisted.push(lastSwitch);
-        const { manual: _manual, ...config } = state.snapshot.config;
         state.snapshot = {
           ...state.snapshot,
-          config: { ...config, lastSwitch },
+          config: { ...state.snapshot.config, lastSwitch },
         };
       }),
     withMutation: (effect) =>
@@ -276,12 +280,29 @@ describe("ProviderAccountAutoSwitch", () => {
     }).pipe(Effect.scoped),
   );
 
-  it.effect("successful hard-exhaustion rotation persists and clears a manual hold", () =>
+  it.effect("successful hard-exhaustion rotation persists the last switch", () =>
     Effect.gen(function* () {
-      const h = yield* makeHarness({ used: 100, manual: true });
+      const h = yield* makeHarness({ used: 100 });
       expect((yield* Queue.take(h.events))._tag).toBe("switched");
-      expect(h.state.snapshot.config.manual).toBeUndefined();
       expect(h.state.snapshot.config.lastSwitch?.toAccountId).toBe(work);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("a manual switch to a low account still auto-switches at the threshold", () =>
+    Effect.gen(function* () {
+      const h = yield* makeHarness({ used: 20, candidateUsed: 95 });
+      yield* completed(h.completions, 2);
+      expect(h.state.switches).toEqual([]);
+      h.state.snapshot = manualSwitch(h.state.snapshot, work);
+      yield* h.reactor.clear("codex");
+      yield* h.reactor.notify("codex");
+      expect(yield* Queue.take(h.events)).toMatchObject({
+        _tag: "switched",
+        fromAccountId: work,
+        toAccountId: personal,
+        trigger: "session",
+      });
+      expect(h.state.switches).toEqual([personal]);
     }).pipe(Effect.scoped),
   );
 
@@ -398,7 +419,6 @@ describe("ProviderAccountAutoSwitch", () => {
       yield* completed(h.completions, 2);
       expect(h.state.switches).toEqual([work]);
       expect(h.state.persisted).toHaveLength(1);
-      expect(h.state.snapshot.config.manual).toBeUndefined();
       expect(h.reactor.needsIdle("codex")).toBe(false);
       expect(h.reactor.getState("codex").state).toBe("watching");
       expect(h.state.probes).toEqual([[work]]);
@@ -435,13 +455,7 @@ describe("ProviderAccountAutoSwitch", () => {
       yield* Deferred.await(h.probeStarted);
       yield* h.mutation.withPermit(
         Effect.gen(function* () {
-          h.state.snapshot = {
-            ...h.state.snapshot,
-            config: {
-              ...h.state.snapshot.config,
-              manual: { at: 0, holdUntil: 7_200_000, activeWasBelowThreshold: true },
-            },
-          };
+          h.state.snapshot = manualSwitch(h.state.snapshot, work);
           yield* h.reactor.clear("codex");
         }),
       );
@@ -450,7 +464,7 @@ describe("ProviderAccountAutoSwitch", () => {
       yield* completed(h.completions, 3);
       expect(h.state.switches).toEqual([]);
       expect(h.reactor.getState("codex").pendingTargetAccountId).toBeUndefined();
-      expect(h.reactor.getState("codex").state).toBe("paused");
+      expect(h.reactor.getState("codex").state).toBe("watching");
     }).pipe(Effect.scoped),
   );
 

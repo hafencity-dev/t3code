@@ -9,7 +9,7 @@ const minute = 60_000;
 const hour = 60 * minute;
 const targetMarginPercent = 10;
 const usageFreshMs = 5 * minute;
-const expiringHorizonMs = 24 * hour;
+const proactiveMinLongLeftPercent = 20;
 const proactiveDwellMs = 30 * minute;
 const maxProbe = 2;
 
@@ -31,11 +31,6 @@ export interface AutoSwitchInput {
   readonly probeWakeAt?: ReadonlyMap<ProviderAccountId, number>;
   readonly recentAutoSwitchAts: ReadonlyArray<number>;
   readonly lastSwitchAt?: number;
-  readonly manual?: {
-    readonly at: number;
-    readonly holdUntil: number;
-    readonly activeWasBelowThreshold: boolean;
-  };
 }
 
 export type AutoSwitchDecision =
@@ -52,14 +47,7 @@ export type AutoSwitchDecision =
     }
   | {
       readonly kind: "stay";
-      readonly code:
-        | "healthy"
-        | "waitingForReset"
-        | "allExhausted"
-        | "noCandidates"
-        | "manualHold"
-        | "dwell"
-        | "circuitBreaker";
+      readonly code: "healthy" | "allExhausted" | "noCandidates" | "dwell" | "circuitBreaker";
       readonly reason: string;
       readonly wakeAt?: number;
     };
@@ -118,15 +106,6 @@ function summarize(
         ? Infinity
         : Math.max(...blockers.map((window) => window.reset ?? Infinity)),
   };
-}
-
-export function activeBelowThreshold(
-  account: AutoSwitchAccountView,
-  now: number,
-  threshold: number,
-): boolean {
-  const summary = summarize(account, now, threshold, new Set());
-  return summary.known && (summary.sessionLeft <= threshold || summary.longLeft <= threshold);
 }
 
 /** All time comes from the caller; a successful probe may confirm a rolled-over window. */
@@ -209,22 +188,13 @@ export function chooseNextAccount(input: AutoSwitchInput): AutoSwitchDecision {
       `Waiting for usage from ${active.label} before switching at ${threshold}% left.`,
     );
   const hard = signedOut || current.sessionLeft <= 0 || current.longLeft <= 0;
-  let need: "signedOut" | "session" | "weekly" | undefined = signedOut
+  const need: "signedOut" | "session" | "weekly" | undefined = signedOut
     ? "signedOut"
     : current.sessionLeft <= threshold
       ? "session"
       : current.longLeft <= threshold
         ? "weekly"
         : undefined;
-  if (input.manual?.activeWasBelowThreshold && now < input.manual.holdUntil && !hard)
-    need = undefined;
-  const recent = input.recentAutoSwitchAts.filter((at) => at > now - hour && at <= now);
-  if (recent.length >= 4 && !hard)
-    return stay(
-      "circuitBreaker",
-      `Keeping ${active.label}: ${recent.length} automatic switches in the last hour; pausing rotation.`,
-      Math.min(...recent) + hour,
-    );
   const switchTo = (
     target: Summary,
     trigger: "session" | "weekly" | "signedOut" | "expiring",
@@ -234,22 +204,11 @@ export function chooseNextAccount(input: AutoSwitchInput): AutoSwitchDecision {
     trigger,
     reason:
       trigger === "expiring"
-        ? `${target.account.label}'s long-term limit resets in ${duration(target.deadline)} with ${target.longLeft}% unused; using it first. ${active.label}'s resets in ${duration(current.deadline)}.`
+        ? `${target.account.label}'s weekly limit resets in ${duration(target.deadline)}, sooner than ${active.label}'s (${Number.isFinite(current.deadline) ? duration(current.deadline) : "no known reset"}). Using ${target.account.label} first so its quota doesn't expire unused.`
         : `${active.label} ${trigger === "signedOut" ? "is signed out or unavailable" : `has ${trigger === "session" ? current.sessionLeft : current.longLeft}% of its ${trigger} limit left`}; switching to ${target.account.label} (${target.sessionLeft}% session left, ${target.longLeft}% long-term left; resets in ${duration(target.deadline)}).`,
   });
+  // At or below the threshold, any healthy candidate wins; the target margin prevents flapping.
   if (need !== undefined) {
-    if (
-      need === "session" &&
-      !hard &&
-      current.sessionLeft > 0 &&
-      current.sessionResetAt - now <= 15 * minute &&
-      current.longLeft > threshold
-    )
-      return stay(
-        "waitingForReset",
-        `${active.label} has ${current.sessionLeft}% session left and resets in ${duration(current.sessionResetAt)}; waiting instead of switching.`,
-        current.sessionResetAt,
-      );
     for (const strict of [true, false]) {
       const selection = pickOrProbe(rank(strict));
       if (selection !== undefined)
@@ -289,11 +248,13 @@ export function chooseNextAccount(input: AutoSwitchInput): AutoSwitchDecision {
       Math.min(first?.usableAgainAt ?? Infinity, probeWakeAt),
     );
   }
-  if (input.manual !== undefined && now < input.manual.holdUntil)
+  // Proactive rebalancing alone is rate-limited, so early switches cannot ping-pong.
+  const recent = input.recentAutoSwitchAts.filter((at) => at > now - hour && at <= now);
+  if (recent.length >= 4)
     return stay(
-      "manualHold",
-      `Keeping manually selected ${active.label} for ${duration(input.manual.holdUntil)}.`,
-      input.manual.holdUntil,
+      "circuitBreaker",
+      `Keeping ${active.label}: ${recent.length} automatic switches in the last hour; pausing early rotation.`,
+      Math.min(...recent) + hour,
     );
   if (input.lastSwitchAt !== undefined && now - input.lastSwitchAt < proactiveDwellMs)
     return stay(
@@ -301,21 +262,31 @@ export function chooseNextAccount(input: AutoSwitchInput): AutoSwitchDecision {
       `Keeping ${active.label} for at least 30 minutes after the last switch.`,
       input.lastSwitchAt + proactiveDwellMs,
     );
-  const expiring = rank(true).filter(
-    (candidate) => candidate.deadline + hour < current.deadline && candidate.longLeft >= 20,
-  );
-  const selection = pickOrProbe(
-    expiring.filter((candidate) => candidate.deadline <= now + expiringHorizonMs),
-  );
+  // Use up quota that resets sooner first. A fresh reset moves an account's deadline a week
+  // out, so it stops being preferred on its own.
+  const resetsSooner = (candidate: Summary) =>
+    candidate.deadline + hour < current.deadline &&
+    candidate.longLeft >= proactiveMinLongLeftPercent;
+  const selection = pickOrProbe(rank(true).filter(resetsSooner));
   if (selection !== undefined)
     return "kind" in selection ? selection : switchTo(selection, "expiring");
+  // A sooner-resetting account whose session is low becomes a target once its session resets.
+  const sessionWakeAt = Math.min(
+    ...candidates
+      .filter(
+        (candidate) =>
+          candidate.known &&
+          !input.probeBlocked?.has(candidate.account.id) &&
+          resetsSooner(candidate) &&
+          candidate.longLeft >= threshold + targetMarginPercent &&
+          candidate.sessionLeft < threshold + targetMarginPercent,
+      )
+      .map((candidate) => candidate.sessionResetAt)
+      .filter((at) => at > now),
+  );
   return stay(
     "healthy",
     `${active.label} has ${current.sessionLeft}% session and ${current.longLeft}% long-term quota left; no switch needed.`,
-    Math.min(
-      ...expiring
-        .map((candidate) => candidate.deadline - expiringHorizonMs)
-        .filter((at) => at > now),
-    ),
+    sessionWakeAt,
   );
 }

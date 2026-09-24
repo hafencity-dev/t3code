@@ -2,7 +2,6 @@
 import { ProviderAccountId, type ServerProviderUsageWindow } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 import {
-  activeBelowThreshold,
   chooseNextAccount,
   type AutoSwitchAccountView,
   type AutoSwitchDecision,
@@ -80,12 +79,11 @@ const rolled = account("Work", 0, 60, 48 * hour, {
   usage: { checkedAt: iso(0), windows: [window("session", 0, 0), window("weekly", 60, 48 * hour)] },
 });
 const recent = [now - 40 * minute, now - 30 * minute, now - 20 * minute, now - 10 * minute];
-const manual = { at: now - minute, holdUntil: now + 119 * minute, activeWasBelowThreshold: false };
 
 const scenarios: ReadonlyArray<{ name: string; input: AutoSwitchInput; expected: object }> = [
   {
-    name: "01 healthy account stays",
-    input: input({ active: personal }),
+    name: "01 healthy account stays when no candidate resets more than an hour sooner",
+    input: input({ active: personal, candidates: [account("Work", 60, 60, 71 * hour + minute)] }),
     expected: stay("healthy"),
   },
   {
@@ -120,9 +118,9 @@ const scenarios: ReadonlyArray<{ name: string; input: AutoSwitchInput; expected:
     expected: switchTo("Later"),
   },
   {
-    name: "07 soft session waits for imminent reset",
+    name: "07 soft session switches even when its reset is imminent",
     input: input({ active: nearReset(8) }),
-    expected: stay("waitingForReset", now + 10 * minute),
+    expected: switchTo("Work"),
   },
   {
     name: "08 hard exhaustion never waits for imminent reset",
@@ -218,8 +216,11 @@ const scenarios: ReadonlyArray<{ name: string; input: AutoSwitchInput; expected:
     expected: switchTo("Later"),
   },
   {
-    name: "20 proactively consumes quota expiring within 24 hours",
-    input: input({ active: personal, candidates: [account("Work", 60, 60, 9 * hour)] }),
+    name: "20 proactively uses up quota that resets days sooner",
+    input: input({
+      active: account("Personal", 80, 80, 5 * 24 * hour),
+      candidates: [account("Work", 60, 60, 3 * 24 * hour)],
+    }),
     expected: switchTo("Work", "expiring"),
   },
   {
@@ -232,9 +233,12 @@ const scenarios: ReadonlyArray<{ name: string; input: AutoSwitchInput; expected:
     expected: stay("healthy"),
   },
   {
-    name: "22 healthy evaluation wakes when candidate enters horizon",
-    input: input({ active: personal, candidates: [account("Work", 60, 60, 30 * hour)] }),
-    expected: stay("healthy", now + 6 * hour),
+    name: "22 sooner-resetting candidate with a low session is picked after its session resets",
+    input: input({
+      active: account("Personal", 80, 80, 5 * 24 * hour),
+      candidates: [account("Work", 15, 60, 3 * 24 * hour)],
+    }),
+    expected: stay("healthy", now + 2 * hour),
   },
   {
     name: "23 active expiring sooner is retained",
@@ -245,9 +249,9 @@ const scenarios: ReadonlyArray<{ name: string; input: AutoSwitchInput; expected:
     expected: stay("healthy"),
   },
   {
-    name: "24 manual hold suppresses proactive switch",
-    input: input({ active: personal, candidates: [account("Work", 60, 60, 9 * hour)], manual }),
-    expected: stay("manualHold", manual.holdUntil),
+    name: "24 without a recent automatic switch, proactive rebalancing runs",
+    input: input({ active: personal, candidates: [account("Work", 60, 60, 9 * hour)] }),
+    expected: switchTo("Work", "expiring"),
   },
   {
     name: "25 proactive dwell lasts thirty minutes",
@@ -259,19 +263,23 @@ const scenarios: ReadonlyArray<{ name: string; input: AutoSwitchInput; expected:
     expected: stay("dwell", now + 20 * minute),
   },
   {
-    name: "26 four switches trip breaker until oldest expires",
-    input: input({ recentAutoSwitchAts: recent }),
+    name: "26 four switches trip the breaker for proactive switches until the oldest expires",
+    input: input({
+      active: personal,
+      candidates: [account("Work", 60, 60, 9 * hour)],
+      recentAutoSwitchAts: recent,
+    }),
     expected: stay("circuitBreaker", now + 20 * minute),
   },
   {
-    name: "27 hard exhaustion bypasses breaker and manual hold",
-    input: input({ active: account("Personal", 0), recentAutoSwitchAts: recent, manual }),
+    name: "27 hard exhaustion bypasses the breaker",
+    input: input({ active: account("Personal", 0), recentAutoSwitchAts: recent }),
     expected: switchTo("Work"),
   },
   {
-    name: "28 manually selected low account suppresses soft trigger",
-    input: input({ manual: { ...manual, activeWasBelowThreshold: true } }),
-    expected: stay("manualHold", manual.holdUntil),
+    name: "28 soft threshold switch bypasses the breaker",
+    input: input({ recentAutoSwitchAts: recent }),
+    expected: switchTo("Work"),
   },
   {
     name: "29 unknown active usage cannot cause proactive switching",
@@ -297,6 +305,7 @@ const scenarios: ReadonlyArray<{ name: string; input: AutoSwitchInput; expected:
           resetCredits: { availableCount: 3 },
         },
       },
+      candidates: [account("Work", 60, 60, 96 * hour)],
     }),
     expected: stay("healthy"),
   },
@@ -319,19 +328,64 @@ describe("chooseNextAccount 32-scenario policy table", () => {
       decision,
     );
     expect(value).toEqual(before);
+    expect(["manualHold", "waitingForReset"]).not.toContain(
+      decision.kind === "stay" ? decision.code : undefined,
+    );
   });
 
-  it("expires suppression for a manually selected low account at the hold boundary", () => {
+  it("explains a proactive switch by the sooner weekly reset", () => {
+    const decision = chooseNextAccount(
+      input({
+        active: account("Personal", 80, 80, 5 * 24 * hour),
+        candidates: [account("Work", 60, 60, 2 * 24 * hour)],
+      }),
+    );
+    expect(decision).toMatchObject(switchTo("Work", "expiring"));
+    expect(decision.reason).toBe(
+      "Work's weekly limit resets in 2d, sooner than Personal's (5d). Using Work first so its quota doesn't expire unused.",
+    );
+  });
+
+  it("keeps the proactive dwell and treats deadlines within an hour as equal", () => {
+    const active = account("Personal", 80, 80, 5 * 24 * hour);
+    const sooner = [account("Work", 60, 60, 3 * 24 * hour)];
+    expect(
+      chooseNextAccount(input({ active, candidates: sooner, lastSwitchAt: now - 10 * minute })),
+    ).toMatchObject(stay("dwell", now + 20 * minute));
+    const close = chooseNextAccount(
+      input({ active, candidates: [account("Work", 60, 60, 5 * 24 * hour - 30 * minute)] }),
+    );
+    expect(close).toMatchObject(stay("healthy"));
+    expect(close).not.toHaveProperty("wakeAt");
+  });
+
+  it("probes a stale sooner-resetting candidate before switching proactively", () => {
     expect(
       chooseNextAccount(
         input({
-          manual: {
-            ...manual,
-            activeWasBelowThreshold: true,
-            holdUntil: now,
-          },
+          active: account("Personal", 80, 80, 5 * 24 * hour),
+          candidates: [stale(account("Work", 60, 60, 3 * 24 * hour))],
         }),
       ),
+    ).toMatchObject(probe("Work"));
+  });
+
+  it("switches a just-selected low account at the threshold without holding it", () => {
+    // A manual switch records only the new active account; nothing else reaches the policy.
+    const selected = account("Personal", 5, 80);
+    expect(
+      chooseNextAccount(input({ active: selected, lastSwitchAt: now - minute })),
+    ).toMatchObject(switchTo("Work"));
+  });
+
+  it("dwell after a recent switch blocks only proactive rebalancing", () => {
+    const expiring = [account("Work", 60, 60, 9 * hour)];
+    const lastSwitchAt = now - 10 * minute;
+    expect(
+      chooseNextAccount(input({ active: personal, candidates: expiring, lastSwitchAt })),
+    ).toMatchObject(stay("dwell", now + 20 * minute));
+    expect(
+      chooseNextAccount(input({ active: low, candidates: expiring, lastSwitchAt })),
     ).toMatchObject(switchTo("Work"));
   });
 
@@ -418,16 +472,21 @@ describe("chooseNextAccount 32-scenario policy table", () => {
           active: personal,
           candidates: [account("Work", 60, 60, 24 * hour)],
           lastSwitchAt: now - 30 * minute,
-          manual: { ...manual, holdUntil: now },
         }),
       ),
     ).toMatchObject(switchTo("Work", "expiring"));
     expect(
-      chooseNextAccount(input({ recentAutoSwitchAts: [now - hour, ...recent.slice(1)] })),
-    ).toMatchObject(switchTo("Work"));
+      chooseNextAccount(
+        input({
+          active: personal,
+          candidates: [account("Work", 60, 60, 9 * hour)],
+          recentAutoSwitchAts: [now - hour, ...recent.slice(1)],
+        }),
+      ),
+    ).toMatchObject(switchTo("Work", "expiring"));
   });
 
-  it("hard long exhaustion bypasses waiting even when session is only soft-low", () => {
+  it("hard long exhaustion switches even when session is only soft-low", () => {
     expect(
       chooseNextAccount(
         input({
@@ -467,18 +526,6 @@ describe("chooseNextAccount 32-scenario policy table", () => {
         }),
       ),
     ).toMatchObject(stay("healthy"));
-  });
-
-  it("manual selection helper shares model, unsupported and rollover normalization", () => {
-    expect(activeBelowThreshold(low, now, 10)).toBe(true);
-    expect(activeBelowThreshold(rolled, now, 10)).toBe(false);
-    expect(
-      activeBelowThreshold(
-        { ...low, usage: { ...low.usage!, unavailable: { reason: "unsupported" } } },
-        now,
-        10,
-      ),
-    ).toBe(false);
   });
 
   it("exports a discriminated decision union", () => {
