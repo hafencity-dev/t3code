@@ -78,6 +78,9 @@ const claudeStoreHomeWarning =
   "Claude home points at a saved account store. Reset the Claude config directory in Settings to use hot switching.";
 const claudeHomeChangedWarning =
   "Claude config directory changed in Settings. Restore it to switch accounts.";
+/** A terminal `claude auth login` overwrote this account's token in the active home. */
+export const claudeTerminalSignedOutMessage =
+  "Signed out by a sign-in in the terminal. Sign in again to use this account.";
 const claudeBarrierWarning = (reason: string) =>
   `A previous Claude account switch didn't finish: ${reason} Accounts are locked until it's resolved.`;
 
@@ -140,7 +143,14 @@ function accountFromEntry(
   provider?: ServerProvider,
 ): ProviderAccount {
   const metadata = entry.lastUsage;
-  const snapshot = entry.status === "error" && entry.message ? undefined : provider;
+  // The live Claude snapshot describes whoever is signed in to the active home. It belongs to
+  // this entry only while it reports the entry's own identity; a terminal login elsewhere must
+  // never lend its email, plan or limits to the saved account.
+  const foreign =
+    entry.driver === "claudeAgent" &&
+    Boolean(metadata?.email && provider?.auth.email) &&
+    provider!.auth.email!.toLowerCase() !== metadata!.email!.toLowerCase();
+  const snapshot = (entry.status === "error" && entry.message) || foreign ? undefined : provider;
   const status =
     entry.status === "pending" || (entry.status === "error" && entry.message)
       ? entry.status
@@ -182,6 +192,20 @@ function sameAccountIdentity(left: ClaudeCredentialIdentity, right: ClaudeCreden
 }
 const hasIdentity = (identity: ClaudeCredentialIdentity) =>
   Boolean(identity.email || identity.accountUuid);
+/** The identity an entry recorded from its own sign-in; never the live home's. */
+const storedIdentity = (entry: ProviderAccountEntry): ClaudeCredentialIdentity => ({
+  ...(entry.lastUsage?.email ? { email: entry.lastUsage.email } : {}),
+  ...(entry.lastUsage?.accountUuid ? { accountUuid: entry.lastUsage.accountUuid } : {}),
+});
+/** Which saved account keeps an identity: Default, then ready accounts, then the oldest. */
+const keeperRank = (entry: Pick<ProviderAccountEntry, "kind" | "status" | "message">) =>
+  entry.status === "error" && entry.message
+    ? 2
+    : entry.kind === "default"
+      ? 0
+      : entry.status === "ready"
+        ? 1
+        : 2;
 
 /**
  * Best known identity per account. The active Claude account prefers the active home's live
@@ -196,10 +220,12 @@ function accountIdentities(
   const identities = new Map<string, ClaudeCredentialIdentity>();
   for (const entry of entries) {
     const account = accounts.find((candidate) => candidate.id === entry.id)!;
-    const saved: ClaudeCredentialIdentity = {
-      ...(account.email ? { email: account.email } : {}),
-      ...(entry.lastUsage?.accountUuid ? { accountUuid: entry.lastUsage.accountUuid } : {}),
-    };
+    const stored = storedIdentity(entry);
+    const saved: ClaudeCredentialIdentity = hasIdentity(stored)
+      ? stored
+      : account.email
+        ? { email: account.email }
+        : {};
     const useLive =
       account.active &&
       live !== undefined &&
@@ -207,14 +233,7 @@ function accountIdentities(
       (!hasIdentity(saved) || sameAccountIdentity(saved, live));
     identities.set(entry.id, useLive ? live : saved);
   }
-  const rank = (account: ProviderAccount) =>
-    account.status === "error" && account.message
-      ? 2
-      : account.kind === "default"
-        ? 0
-        : account.status === "ready"
-          ? 1
-          : 2;
+  const rank = (account: ProviderAccount) => keeperRank(account);
   const kept = entries
     .filter((entry) => entry.kind !== "external" && entry.status !== "pending")
     .map((entry) => ({ entry, account: accounts.find((account) => account.id === entry.id)! }))
@@ -282,7 +301,7 @@ const make = (
       if (result.externalIdentity) {
         await registry.update(result.originalSourceAccountId, {
           status: "signedOut",
-          message: "Sign in again",
+          message: claudeTerminalSignedOutMessage,
         });
         const reused = await registry.get(result.sourceAccountId);
         await registry.update(result.sourceAccountId, {
@@ -608,10 +627,106 @@ const make = (
       };
     });
 
+    /**
+     * Files a terminal `claude auth login` under the right saved account. The caller holds the
+     * account mutation. No credential moves: the active home already holds the live login, so
+     * only the active selection changes. The previous account's store stays checked out, and
+     * its token was overwritten by the terminal login, so it is marked signed out.
+     */
+    const reconcileClaudeUnlocked = Effect.fn("providerAccounts.reconcileClaude")(function* () {
+      const registry = yield* registryEffect;
+      // An unfinished switch owns the active home until recovery resolves it.
+      const journaled = yield* Effect.promise(() =>
+        NodeFSP.stat(claudeCredentialSwitchJournalPath(config.stateDir)).then(
+          () => true,
+          () => false,
+        ),
+      );
+      if (journaled || claudeBarrier !== undefined) return false;
+      const state = yield* groupState("claudeAgent");
+      if (state.warning) return false;
+      const active = state.accounts.find((entry) => entry.id === state.activeAccountId);
+      // A sign-in into the active home finishes through its own completion.
+      if (!active || active.kind === "external" || login.isBusy(active.id)) return false;
+      const live = yield* liveClaudeIdentity(state);
+      if (!hasIdentity(live)) return false;
+      const known = storedIdentity(active);
+      // Default's first identity is captured from the live home, not reconciled.
+      if (!hasIdentity(known) && active.kind === "default") return false;
+      const activeMatches = hasIdentity(known) && sameAccountIdentity(known, live);
+      const keeper = state.accounts
+        .filter(
+          (entry) =>
+            entry.kind !== "external" &&
+            entry.status !== "pending" &&
+            !(entry.status === "error" && entry.message) &&
+            hasIdentity(storedIdentity(entry)) &&
+            sameAccountIdentity(storedIdentity(entry), live),
+        )
+        .toSorted(
+          (left, right) =>
+            keeperRank(left) - keeperRank(right) || left.createdAt.localeCompare(right.createdAt),
+        )[0];
+      // The active account is the live identity's keeper, or the only account that knows it.
+      if (activeMatches && (!keeper || keeper.id === active.id)) return false;
+      // Unknown active identity and no saved match: the live login may well be its own.
+      if (!activeMatches && !keeper && !hasIdentity(known)) return false;
+      const target =
+        keeper ??
+        (yield* io(async () => {
+          const created = await registry.createManaged({
+            driver: "claudeAgent",
+            label: live.email ?? "Terminal account",
+            sharedHomePath: state.sharedHomePath,
+            sourceConfigPath: state.sourceConfigPath,
+          });
+          // The terminal login is this new account's own sign-in.
+          await registry.update(created.id, {
+            status: "ready",
+            message: null,
+            lastUsage: { ...live, checkedAt: new Date().toISOString() },
+          });
+          return created;
+        }));
+      yield* io(async () => {
+        // An empty store is the checked-out state; the next switch-away files the live token.
+        await registry.ensureClaudeStore(target.id);
+        if (keeper) await registry.update(target.id, { status: "ready", message: null });
+        await registry.setClaudeActiveAccount(target.id);
+        // A conflicting sign-in keeps its own, more specific message.
+        if (!(active.status === "error" && active.message))
+          await registry.update(active.id, {
+            status: "signedOut",
+            message: claudeTerminalSignedOutMessage,
+          });
+      });
+      // Same live credentials: the provider snapshot now describes the new selection.
+      const observed = observedAccounts.get("claudeAgent");
+      if (observed) observedAccounts.set("claudeAgent", { ...observed, id: target.id });
+      checkoutGeneration.claudeAgent++;
+      cache.forget(ProviderAccountId.make(active.id));
+      cache.forget(ProviderAccountId.make(target.id));
+      yield* Effect.logInfo("Filed a terminal Claude sign-in under its saved account", {
+        created: !keeper,
+      });
+      yield* changed("claudeAgent");
+      return true;
+    });
+    /** Reconciles when no account mutation is running; mutations reconcile on their own. */
+    const reconcileClaudeIfIdle = mutation
+      .withPermitsIfAvailable(1)(reconcileClaudeUnlocked())
+      .pipe(
+        Effect.asVoid,
+        Effect.catchCause((cause) =>
+          Effect.logWarning("Reconciling the active Claude account failed", cause),
+        ),
+      );
+
     const list = Effect.fn("providerAccounts.list")(function* (): Effect.fn.Return<
       ProviderAccountsSnapshot,
       ProviderAccountError
     > {
+      yield* reconcileClaudeIfIdle;
       return (yield* listDetailed()).snapshot;
     });
 
@@ -685,9 +800,14 @@ const make = (
               ...(previous ? { previous } : {}),
               ...(input.force === undefined ? {} : { force: input.force }),
             });
+            // A probe measures usage; the identity stays the one the account signed in with.
+            // Probes report no account uuid and may omit the email.
             if (result)
               yield* io(() =>
-                registry.update(account.id, { status: result.status, lastUsage: result }),
+                registry.update(account.id, {
+                  status: result.status,
+                  lastUsage: { ...result, ...storedIdentity(entry) },
+                }),
               );
           }),
         { concurrency: 2 },
@@ -721,7 +841,10 @@ const make = (
           mutation.withPermit(
             Effect.gen(function* () {
               const registry = yield* registryEffect;
-              if (input.driver === "claudeAgent") yield* requireClaudeReady();
+              if (input.driver === "claudeAgent") {
+                yield* requireClaudeReady();
+                yield* reconcileClaudeUnlocked();
+              }
               const state = yield* groupState(input.driver);
               let entry: ProviderAccountEntry;
               if (input.accountId) {
@@ -911,7 +1034,10 @@ const make = (
         return yield* new ProviderAccountError({
           message: "Finish signing in before switching accounts.",
         });
-      if (entry.driver === "claudeAgent") yield* requireClaudeReady();
+      if (entry.driver === "claudeAgent") {
+        yield* requireClaudeReady();
+        yield* reconcileClaudeUnlocked();
+      }
       const state = yield* groupState(entry.driver);
       if (entry.driver === "claudeAgent" && state.warning)
         return yield* new ProviderAccountError({ message: state.warning });
@@ -926,7 +1052,16 @@ const make = (
         const current = (yield* list()).groups
           .find((group) => group.driver === "claudeAgent")
           ?.accounts.find((account) => account.active);
-        if (current && current.status !== "pending") {
+        // Live plan and limits are the source's only while the active home holds its identity.
+        const live = yield* liveClaudeIdentity(state);
+        const sourceIdentity = storedIdentity(source);
+        if (
+          current &&
+          current.status !== "pending" &&
+          (!hasIdentity(sourceIdentity) ||
+            !hasIdentity(live) ||
+            sameAccountIdentity(sourceIdentity, live))
+        ) {
           yield* io(() =>
             registry.update(source.id, {
               status: current.status,
@@ -1093,7 +1228,10 @@ const make = (
     }) {
       const registry = yield* registryEffect;
       const entry = yield* io(() => registry.get(input.accountId));
-      if (entry.driver === "claudeAgent") yield* requireClaudeReady();
+      if (entry.driver === "claudeAgent") {
+        yield* requireClaudeReady();
+        yield* reconcileClaudeUnlocked();
+      }
       const state = yield* groupState(entry.driver);
       const active = entry.id === state.activeAccountId;
       // An active Claude duplicate hands the selection to the account it duplicates. The active
@@ -1194,6 +1332,8 @@ const make = (
         Effect.gen(function* () {
           const registry = yield* registryEffect;
           const automatic = yield* io(() => registry.getAutoSwitch(driver));
+          // Runs under the account mutation; never decide on an unreconciled terminal login.
+          if (driver === "claudeAgent") yield* reconcileClaudeUnlocked();
           const group = (yield* list()).groups.find((entry) => entry.driver === driver)!;
           const now = yield* Clock.currentTimeMillis;
           const probeBlocked = new Set<ProviderAccountId>();
@@ -1265,6 +1405,7 @@ const make = (
       account: ProviderAccount,
     ) {
       yield* requireClaudeReady();
+      yield* reconcileClaudeUnlocked();
       const state = yield* groupState("claudeAgent");
       if (state.warning) return yield* new ProviderAccountError({ message: state.warning });
       if (login.isBusy(account.id))
@@ -1358,6 +1499,26 @@ const make = (
         Effect.asVoid,
       ),
     });
+
+    // A terminal login shows up in the next Claude snapshot; file it without waiting for a list.
+    let lastClaudeSnapshotKey: string | undefined;
+    yield* providers.streamChanges.pipe(
+      Stream.runForEach((all) => {
+        const claude = all.find((item) => item.instanceId === claudeInstanceId);
+        const key =
+          claude && `${claude.checkedAt}:${claude.auth.status}:${claude.auth.email ?? ""}`;
+        if (!key || key === lastClaudeSnapshotKey) return Effect.void;
+        lastClaudeSnapshotKey = key;
+        return mutation
+          .withPermit(reconcileClaudeUnlocked())
+          .pipe(
+            Effect.catchCause((cause) =>
+              Effect.logWarning("Reconciling the active Claude account failed", cause),
+            ),
+          );
+      }),
+      Effect.forkIn(scope),
+    );
 
     return {
       list,

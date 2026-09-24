@@ -2,7 +2,7 @@ import type { ServerProviderUsageWindow } from "@t3tools/contracts";
 import { formatResetsIn } from "@t3tools/shared/usageLimits";
 import { cn } from "../../lib/utils";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
-import { accountUsageCell, usageResetLabel, usageTone, type UsageCellKind } from "./accounts.logic";
+import { accountUsageCellView, type UsageCellKind } from "./accounts.logic";
 
 const CELL_LABELS = { session: "5-hour", weekly: "Weekly" } as const;
 
@@ -27,12 +27,8 @@ export function AccountUsageCell({
   windows: readonly ServerProviderUsageWindow[];
   now: number;
 }) {
-  const { tightest, all } = accountUsageCell(windows, kind);
+  const { all, remaining, reset, resetPending, tone } = accountUsageCellView(windows, kind, now);
   const label = CELL_LABELS[kind];
-  const remaining = tightest ? Math.round(100 - tightest.usedPercent) : null;
-  const reset = tightest ? usageResetLabel(tightest, now) : null;
-  const tone = remaining === null ? "default" : usageTone(remaining);
-  const stale = reset === "Just reset";
   return (
     <Tooltip>
       <TooltipTrigger
@@ -46,11 +42,7 @@ export function AccountUsageCell({
               {remaining === null ? (
                 <span className="text-muted-foreground">—</span>
               ) : (
-                <span
-                  className={cn("font-medium", stale ? "text-muted-foreground" : VALUE_TONE[tone])}
-                >
-                  {remaining}% left
-                </span>
+                <span className={cn("font-medium", VALUE_TONE[tone])}>{remaining}% left</span>
               )}
               {reset ? (
                 <span className="ml-auto truncate text-muted-foreground">{reset}</span>
@@ -59,9 +51,11 @@ export function AccountUsageCell({
             <div
               role="progressbar"
               aria-label={
-                remaining === null
-                  ? `${label} limit: not reported`
-                  : `${label} limit: ${remaining}% left${reset ? (stale ? ", just reset" : `, resets ${reset}`) : ""}`
+                resetPending
+                  ? `${label} limit: reset, checking again`
+                  : remaining === null
+                    ? `${label} limit: not reported`
+                    : `${label} limit: ${remaining}% left${reset ? `, resets ${reset}` : ""}`
               }
               aria-valuemin={0}
               aria-valuemax={100}

@@ -135,6 +135,15 @@ export class AccountUsageProbeStaleError extends Error {
 }
 
 export const ACCOUNT_USAGE_TTL_MS = 5 * 60_000;
+
+/** A window reset between the measurement and now. A reset already past when measured never counts. */
+export function resetSinceMeasured(usage: Pick<AccountUsage, "checkedAt" | "usage">, now: number) {
+  const checkedAt = Date.parse(usage.checkedAt);
+  return (usage.usage?.windows ?? []).some((window) => {
+    const resetsAt = window.resetsAt ? Date.parse(window.resetsAt) : Number.NaN;
+    return resetsAt > checkedAt && resetsAt <= now;
+  });
+}
 const MANUAL_FLOOR_MS = 60_000;
 const MAX_ATTEMPTS = 6;
 
@@ -212,11 +221,16 @@ export const makeAccountUsageCache = <E, R>(dependencies: {
   };
   // Manual refreshes wait only for the 60s floor and failure backoff; the TTL gates the rest.
   // A success's stored nextAllowedAt is ignored so older 5-minute values never block them.
-  const accountAt = (prior: AccountUsage | undefined, force = false) =>
+  // A window that reset after it was measured makes the measurement stale regardless of age.
+  const accountAt = (prior: AccountUsage | undefined, now: number, force = false) =>
     Math.max(
       prior?.lastFailureKind ? (prior.nextAllowedAt ?? 0) : 0,
       prior?.lastAttemptAt === undefined ? 0 : prior.lastAttemptAt + MANUAL_FLOOR_MS,
-      !force && prior && (prior.usage || prior.status === "signedOut") && !prior.lastFailureKind
+      !force &&
+        prior &&
+        (prior.usage || prior.status === "signedOut") &&
+        !prior.lastFailureKind &&
+        !resetSinceMeasured(prior, now)
         ? Date.parse(prior.checkedAt) + ACCOUNT_USAGE_TTL_MS
         : 0,
     );
@@ -227,7 +241,7 @@ export const makeAccountUsageCache = <E, R>(dependencies: {
     force = false,
   ) =>
     Math.max(
-      accountAt(newest(cache.get(id), previous), force),
+      accountAt(newest(cache.get(id), previous), now, force),
       budgetAt(now),
       pendingUntil.get(id) ?? 0,
     );
@@ -248,7 +262,7 @@ export const makeAccountUsageCache = <E, R>(dependencies: {
         const inFlight = pending.get(input.id);
         if (inFlight) return inFlight;
         const now = yield* Clock.currentTimeMillis;
-        if (now < Math.max(accountAt(prior, input.force), budgetAt(now)))
+        if (now < Math.max(accountAt(prior, now, input.force), budgetAt(now)))
           return Effect.succeed(prior);
         // Reserve the attempt before releasing the admission lock, not after the probe finishes.
         while (attempts.length && attempts[0]!.at <= now - ACCOUNT_USAGE_TTL_MS) attempts.shift();

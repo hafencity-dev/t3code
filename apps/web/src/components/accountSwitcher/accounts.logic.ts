@@ -119,16 +119,47 @@ export function accountUsageCell(
   return { tightest, all };
 }
 
-export function usageTone(remaining: number) {
+export type UsageTone = "error" | "warning" | "default";
+
+export function usageTone(remaining: number): UsageTone {
   return remaining <= 10 ? "error" : remaining <= 25 ? "warning" : "default";
 }
 
-/** `in 6d 3h`, `Just reset` once the reset has passed, or null without a reset time. */
+/** Shown once a window's reset has passed and its numbers are waiting for the next check. */
+export const USAGE_RESET_PENDING_LABEL = "Resets now · checking…";
+
+function windowResetPassed(window: ServerProviderUsageWindow, now: number) {
+  const at = window.resetsAt ? Date.parse(window.resetsAt) : Number.NaN;
+  return Number.isFinite(at) && at <= now;
+}
+
+/** `in 6d 3h`, the pending label once the reset has passed, or null without a reset time. */
 export function usageResetLabel(window: ServerProviderUsageWindow, now: number) {
   if (!window.resetsAt) return null;
   const at = Date.parse(window.resetsAt);
   if (!Number.isFinite(at)) return null;
-  return at <= now ? "Just reset" : `in ${formatDuration(at - now)}`;
+  return at <= now ? USAGE_RESET_PENDING_LABEL : `in ${formatDuration(at - now)}`;
+}
+
+/**
+ * What one usage column shows. A window whose reset has passed no longer reports its
+ * percent: the old number would read as current quota next to a reset that already happened.
+ */
+export function accountUsageCellView(
+  windows: readonly ServerProviderUsageWindow[],
+  kind: UsageCellKind,
+  now: number,
+) {
+  const { tightest, all } = accountUsageCell(windows, kind);
+  const resetPending = tightest !== undefined && windowResetPassed(tightest, now);
+  const remaining = tightest && !resetPending ? Math.round(100 - tightest.usedPercent) : null;
+  return {
+    all,
+    remaining,
+    reset: tightest ? usageResetLabel(tightest, now) : null,
+    resetPending,
+    tone: remaining === null ? "default" : usageTone(remaining),
+  };
 }
 
 function defaultAccountProvider(
@@ -171,8 +202,9 @@ export function isUsageRefreshCoolingDown(lastRefreshedAt: number | null | undef
 
 /**
  * Picks at most one inactive account for the dialog's automatic refresh, so it never
- * bulk-probes: a ready account that was never measured first, otherwise the stalest
- * measurement older than the TTL. Accounts the server is backing off are skipped.
+ * bulk-probes: a ready account that was never measured first, then one with a window that
+ * reset after it was measured, otherwise the stalest measurement older than the TTL.
+ * Accounts the server is backing off are skipped.
  */
 export function autoRefreshAccountId(
   accounts: readonly ProviderAccount[],
@@ -189,6 +221,14 @@ export function autoRefreshAccountId(
   );
   const unmeasured = candidates.find((account) => !account.usage);
   if (unmeasured) return unmeasured.id;
+  // Same rule as the server's probe gate: only a reset after the measurement makes it stale.
+  const reset = candidates.find((account) => {
+    const checkedAt = Date.parse(account.usage!.checkedAt);
+    return account.usage!.windows.some(
+      (window) => windowResetPassed(window, now) && Date.parse(window.resetsAt!) > checkedAt,
+    );
+  });
+  if (reset) return reset.id;
   let stalest: ProviderAccount | undefined;
   for (const account of candidates) {
     const checkedAt = Date.parse(account.usage!.checkedAt);
@@ -359,7 +399,7 @@ export function accountStatusMessage(
       return {
         icon: "signedOut",
         tone: "warning",
-        text: "Signed out. Sign in to use this account.",
+        text: account.message ?? "Signed out. Sign in to use this account.",
       };
     case "error":
       return {
@@ -424,12 +464,13 @@ export function accountPrimaryAction(
   return { kind: "switch" };
 }
 
-/** Line 2 of the identity cell. */
+/** Line 2 of the identity cell. An email already shown as the name is not repeated. */
 export function accountSubtitle(account: ProviderAccount) {
-  if (account.email && account.email !== account.label) return account.email;
+  const sameAsLabel = account.email?.toLowerCase() === account.label.trim().toLowerCase();
+  if (account.email && !sameAsLabel) return account.email;
   if (account.kind === "default") return "Original login";
   if (account.kind === "external") return "Set in Settings";
-  return "No email reported";
+  return account.email ? "Saved login" : "No email reported";
 }
 
 /** Signed-in accounts auto-switch can move between; duplicates count once. */

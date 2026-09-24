@@ -38,6 +38,7 @@ import { ProviderAccountLogin, type ProviderAccountLoginOptions } from "./Provid
 import { createProviderAccountRegistry } from "./ProviderAccountRegistry.ts";
 import { switchClaudeCredentials } from "./ClaudeCredentialSwitch.ts";
 import {
+  claudeTerminalSignedOutMessage,
   inactiveClaudeProbeEnvironment,
   ProviderAccountsService,
 } from "./ProviderAccountsService.ts";
@@ -51,7 +52,8 @@ const idleProbe = () => Effect.never;
 const codexId = ProviderInstanceId.make("codex");
 const claudeId = ProviderInstanceId.make("claudeAgent");
 const checkedAt = "2026-09-23T12:00:00.000Z";
-const provider = Schema.decodeUnknownSync(ServerProvider)({
+const decodeProvider = Schema.decodeUnknownSync(ServerProvider);
+const provider = decodeProvider({
   instanceId: "codex",
   driver: "codex",
   enabled: true,
@@ -103,8 +105,10 @@ describe("ProviderAccountsService", () => {
       probe?: Probe;
       runPrime?: typeof runClaudeWindowPrime;
       refreshInstance?: ProviderRegistryShape["refreshInstance"];
+      providers?: ReadonlyArray<ServerProvider>;
     } = {},
   ) {
+    const snapshots = [provider, ...(options.providers ?? [])];
     const providerLayer = options.refreshInstance
       ? Layer.effect(
           ProviderRegistry,
@@ -112,8 +116,8 @@ describe("ProviderAccountsService", () => {
             const base = yield* ProviderRegistry;
             return ProviderRegistry.of({ ...base, refreshInstance: options.refreshInstance! });
           }),
-        ).pipe(Layer.provide(makeProviderRegistryLayer([provider])))
-      : makeProviderRegistryLayer([provider]);
+        ).pipe(Layer.provide(makeProviderRegistryLayer(snapshots)))
+      : makeProviderRegistryLayer(snapshots);
     const dependencies = Layer.mergeAll(
       ServerConfig.layerTest(root, NodePath.join(root, "state")),
       ServerSettings.layerTest({
@@ -682,7 +686,7 @@ describe("ProviderAccountsService", () => {
           )!.accounts;
           expect(accounts.find((account) => account.id === prepared.accountId)).toMatchObject({
             status: "signedOut",
-            message: "Sign in again",
+            message: claudeTerminalSignedOutMessage,
           });
           expect(
             accounts.find((account) => account.email === "terminal@example.test"),
@@ -1412,7 +1416,7 @@ describe("ProviderAccountsService", () => {
         });
         expect(
           switched.accounts.find((account) => account.id === seeded.ids.default),
-        ).toMatchObject({ status: "signedOut", message: "Sign in again" });
+        ).toMatchObject({ status: "signedOut", message: claudeTerminalSignedOutMessage });
         expect(
           (yield* readJson(NodePath.join(seeded.homes.c!, ".credentials.json"))).claudeAiOauth,
         ).toEqual(seeded.credentials("c-live").claudeAiOauth);
@@ -1697,4 +1701,296 @@ describe("ProviderAccountsService", () => {
       );
     },
   );
+
+  describe("terminal Claude logins", () => {
+    const readCredentials = (home: string) =>
+      Effect.promise(() =>
+        NodeFSP.readFile(NodePath.join(home, ".credentials.json"), "utf8").then(
+          (text) => JSON.parse(text),
+          () => ({}),
+        ),
+      );
+    const storedEntry = (stateDir: string, id: string) =>
+      Effect.promise(async () => (await createProviderAccountRegistry({ stateDir })).get(id));
+    /** `claude auth login` in a terminal: a new lineage and identity in the active home. */
+    const terminalLogin = async (
+      seeded: Awaited<ReturnType<typeof seedClaudeStores>>,
+      name: string,
+    ) => {
+      await NodeFSP.writeFile(
+        NodePath.join(seeded.activeHome, ".credentials.json"),
+        JSON.stringify(seeded.credentials(`${name}-live`)),
+      );
+      await NodeFSP.writeFile(
+        NodePath.join(seeded.activeHome, ".claude.json"),
+        JSON.stringify({ oauthAccount: seeded.identity(name) }),
+      );
+    };
+
+    it.effect("moves the selection to the saved account a terminal login signed in to", () => {
+      let seeded: Awaited<ReturnType<typeof seedClaudeStores>>;
+      return run(
+        Effect.gen(function* () {
+          const service = yield* ProviderAccountsService;
+          const group = claudeGroup(yield* service.list());
+          expect(group.activeAccountId).toBe(seeded.ids.c);
+          expect(group.accounts.find((account) => account.id === seeded.ids.default)).toMatchObject(
+            {
+              active: false,
+              status: "signedOut",
+              message: claudeTerminalSignedOutMessage,
+              email: "default@example.test",
+            },
+          );
+          expect(group.accounts.find((account) => account.id === seeded.ids.c)).toMatchObject({
+            active: true,
+            email: "c@example.test",
+          });
+          expect(group.accounts.some((account) => account.duplicateOf)).toBe(false);
+          // Neither entry took the other's identity.
+          expect(
+            (yield* storedEntry(seeded.stateDir, seeded.ids.default!)).lastUsage,
+          ).toMatchObject({ email: "default@example.test", accountUuid: "uuid-default" });
+          expect((yield* storedEntry(seeded.stateDir, seeded.ids.c!)).lastUsage).toMatchObject({
+            email: "c@example.test",
+            accountUuid: "uuid-c",
+          });
+          // No credential moved: the live login stays active, C's stale copy stays in its store.
+          expect((yield* readCredentials(seeded.activeHome)).claudeAiOauth).toEqual(
+            seeded.credentials("c-live").claudeAiOauth,
+          );
+          expect((yield* readCredentials(seeded.homes.c!)).claudeAiOauth).toEqual(
+            seeded.credentials("c").claudeAiOauth,
+          );
+        }),
+        false,
+        {
+          claudeHomePath: NodePath.join(root, "claude"),
+          before: async () => {
+            seeded = await seedClaudeStores(["b", "c"]);
+            await terminalLogin(seeded, "c");
+          },
+        },
+      );
+    });
+
+    it.effect("saves a terminal login to an unknown account as a new active account", () => {
+      let seeded: Awaited<ReturnType<typeof seedClaudeStores>>;
+      return run(
+        Effect.gen(function* () {
+          const service = yield* ProviderAccountsService;
+          const group = claudeGroup(yield* service.list());
+          expect(group.accounts).toHaveLength(3);
+          const created = group.accounts.find((account) => account.label === "new@example.test")!;
+          expect(created).toMatchObject({
+            kind: "managed",
+            active: true,
+            status: "ready",
+            email: "new@example.test",
+          });
+          expect(group.activeAccountId).toBe(created.id);
+          expect(group.accounts.find((account) => account.id === seeded.ids.default)).toMatchObject(
+            { status: "signedOut", message: claudeTerminalSignedOutMessage },
+          );
+          const entry = yield* storedEntry(seeded.stateDir, created.id);
+          expect(entry.lastUsage).toMatchObject({
+            email: "new@example.test",
+            accountUuid: "uuid-new",
+          });
+          // Its store is allocated and checked out: the live token is still only in the active home.
+          expect(entry.storePath).toBe(entry.homePath);
+          expect((yield* readCredentials(entry.homePath)).claudeAiOauth).toBeUndefined();
+          expect((yield* readCredentials(seeded.activeHome)).claudeAiOauth).toEqual(
+            seeded.credentials("new-live").claudeAiOauth,
+          );
+          // Switching away files the live token into the new account's own store.
+          const switched = claudeGroup(
+            yield* service.switchAccount({ accountId: ProviderAccountId.make(seeded.ids.b!) }),
+          );
+          expect(switched.activeAccountId).toBe(seeded.ids.b);
+          expect(switched.accounts.find((account) => account.id === created.id)).toMatchObject({
+            status: "ready",
+            email: "new@example.test",
+          });
+          expect((yield* readCredentials(entry.homePath)).claudeAiOauth).toEqual(
+            seeded.credentials("new-live").claudeAiOauth,
+          );
+        }),
+        false,
+        {
+          claudeHomePath: NodePath.join(root, "claude"),
+          before: async () => {
+            seeded = await seedClaudeStores(["b"]);
+            await terminalLogin(seeded, "new");
+          },
+        },
+      );
+    });
+
+    it.effect("never lends a snapshot of another identity to the active account", () => {
+      let seeded: Awaited<ReturnType<typeof seedClaudeStores>>;
+      const foreign = decodeProvider({
+        instanceId: "claudeAgent",
+        driver: "claudeAgent",
+        enabled: true,
+        installed: true,
+        version: "1.0.0",
+        status: "ready",
+        auth: { status: "authenticated", email: "someone@example.test", label: "Claude Max" },
+        checkedAt,
+        models: [],
+        usageLimits: {
+          checkedAt,
+          windows: [{ id: "session", label: "5h", kind: "session", usedPercent: 99 }],
+        },
+      });
+      return run(
+        Effect.gen(function* () {
+          const service = yield* ProviderAccountsService;
+          const active = claudeGroup(yield* service.list()).accounts.find(
+            (account) => account.active,
+          )!;
+          expect(active).toMatchObject({ id: seeded.ids.default, email: "default@example.test" });
+          expect(active.plan).toBeUndefined();
+          expect(active.usage).toBeUndefined();
+          yield* service.switchAccount({ accountId: ProviderAccountId.make(seeded.ids.b!) });
+          const saved = yield* storedEntry(seeded.stateDir, seeded.ids.default!);
+          expect(saved.lastUsage).toMatchObject({
+            email: "default@example.test",
+            accountUuid: "uuid-default",
+          });
+          expect(saved.lastUsage?.plan).toBeUndefined();
+          expect(saved.lastUsage?.usage).toBeUndefined();
+        }),
+        false,
+        {
+          claudeHomePath: NodePath.join(root, "claude"),
+          providers: [foreign],
+          before: async () => {
+            seeded = await seedClaudeStores(["b"]);
+          },
+        },
+      );
+    });
+
+    it.effect(
+      "repairs an active entry that took another account's identity: flags, removes, re-adds",
+      () => {
+        let seeded: Awaited<ReturnType<typeof seedClaudeStores>>;
+        let callbacks: ProviderAccountLoginOptions;
+        const loggedOut: string[] = [];
+        return run(
+          Effect.gen(function* () {
+            const service = yield* ProviderAccountsService;
+            const marius = ProviderAccountId.make(seeded.ids.marius!);
+            const group = claudeGroup(yield* service.list());
+            // The Default owns the live identity; the corrupted copy is inactive and flagged.
+            expect(group.activeAccountId).toBe(seeded.ids.default);
+            expect(group.accounts.find((account) => account.id === marius)).toMatchObject({
+              active: false,
+              status: "signedOut",
+              duplicateOf: seeded.ids.default,
+            });
+            expect((yield* readCredentials(seeded.activeHome)).claudeAiOauth).toEqual(
+              seeded.credentials("default-live").claudeAiOauth,
+            );
+            const removed = claudeGroup(yield* service.remove({ accountId: marius }));
+            expect(removed.accounts.some((account) => account.id === marius)).toBe(false);
+            expect(removed.activeAccountId).toBe(seeded.ids.default);
+            expect(loggedOut).toEqual([seeded.homes.marius]);
+            // Signing in to the real account again is a new account, not a duplicate.
+            const prepared = yield* Effect.promise(() =>
+              callbacks.prepare({ driver: "claudeAgent" }),
+            );
+            yield* Effect.promise(() =>
+              NodeFSP.writeFile(
+                NodePath.join(prepared.homePath, ".claude.json"),
+                JSON.stringify({ oauthAccount: seeded.identity("marius") }),
+              ),
+            );
+            const outcome = yield* Effect.promise(() =>
+              callbacks.complete(prepared, { email: "marius@example.test" }),
+            );
+            expect(outcome).toBeUndefined();
+            const readded = claudeGroup(yield* service.list()).accounts.find(
+              (account) => account.id === prepared.accountId,
+            );
+            expect(readded).toMatchObject({
+              label: "marius@example.test",
+              status: "ready",
+              email: "marius@example.test",
+            });
+            expect(readded?.duplicateOf).toBeUndefined();
+          }),
+          false,
+          {
+            claudeHomePath: NodePath.join(root, "claude"),
+            before: async () => {
+              seeded = await seedClaudeStores(["marius"]);
+              const registry = await createProviderAccountRegistry({ stateDir: seeded.stateDir });
+              // Default was switched away earlier: its store holds an older copy of its token.
+              const store = await registry.ensureClaudeStore(seeded.ids.default!);
+              await NodeFSP.writeFile(
+                NodePath.join(store.storePath!, ".credentials.json"),
+                JSON.stringify(seeded.credentials("default")),
+              );
+              await NodeFSP.writeFile(
+                NodePath.join(store.storePath!, ".claude.json"),
+                JSON.stringify({ oauthAccount: seeded.identity("default") }),
+              );
+              // marius was active (store checked out) when a terminal login as Default replaced
+              // its token, and an old build wrote the live email into its entry.
+              await NodeFSP.writeFile(
+                NodePath.join(seeded.homes.marius!, ".credentials.json"),
+                "{}",
+              );
+              await registry.setClaudeActiveAccount(seeded.ids.marius!);
+              await registry.update(seeded.ids.marius!, {
+                lastUsage: { email: "default@example.test", checkedAt },
+              });
+              await terminalLogin(seeded, "default");
+            },
+            login: (options) => {
+              callbacks = options;
+              const login = new ProviderAccountLogin(options);
+              login.logout = async (account) => {
+                loggedOut.push(account.homePath);
+              };
+              return login;
+            },
+          },
+        );
+      },
+    );
+
+    it.effect("keeps a known identity when a usage probe reports none", () =>
+      run(
+        Effect.gen(function* () {
+          const service = yield* ProviderAccountsService;
+          const config = yield* ServerConfig.ServerConfig;
+          yield* service.refreshUsage({ accountIds: [seeded!.id], force: true });
+          const listed = (yield* service.list()).groups
+            .flatMap((group) => group.accounts)
+            .find((account) => account.id === seeded!.id);
+          expect(listed).toMatchObject({ email: "other@example.test", status: "ready" });
+          expect(listed?.usage?.windows).toHaveLength(1);
+          expect((yield* storedEntry(config.stateDir, seeded!.id)).lastUsage?.email).toBe(
+            "other@example.test",
+          );
+        }),
+        true,
+        {
+          probe: (() =>
+            Effect.succeed({
+              checkedAt,
+              status: "ready",
+              usage: {
+                checkedAt,
+                windows: [{ id: "session", label: "5h", kind: "session", usedPercent: 10 }],
+              },
+            } satisfies AccountUsage)) as unknown as Probe,
+        },
+      ),
+    );
+  });
 });

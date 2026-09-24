@@ -116,6 +116,34 @@ describe("provider account usage admission", () => {
     }),
   );
 
+  it.effect("treats a window that reset after the measurement as stale within the TTL", () =>
+    Effect.gen(function* () {
+      let calls = 0;
+      const cache = makeAccountUsageCache({
+        probe: () => measuredNow.pipe(Effect.tap(() => Effect.sync(() => calls++))),
+      });
+      const withReset = (resetsAt: string): AccountUsage => ({
+        ...good,
+        usage: {
+          checkedAt: good.checkedAt,
+          windows: [{ id: "session", label: "5h", kind: "session", usedPercent: 100, resetsAt }],
+        },
+      });
+      yield* TestClock.adjust(2 * minute);
+      // Reset one minute after the measurement: numbers are stale although only 2 minutes old.
+      yield* cache.refresh({ id, active: false, previous: withReset("1970-01-01T00:01:00.000Z") });
+      expect(calls).toBe(1);
+      // A reset already past when measured is what the provider reported; the TTL still applies.
+      const other = ProviderAccountId.make("reported-reset");
+      yield* cache.refresh({
+        id: other,
+        active: false,
+        previous: { ...withReset("1969-12-31T23:00:00.000Z") },
+      });
+      expect(calls).toBe(1);
+    }),
+  );
+
   for (const [label, error] of [
     [
       "SDK wrapped 429",

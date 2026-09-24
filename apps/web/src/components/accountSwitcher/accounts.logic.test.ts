@@ -15,6 +15,7 @@ import {
   accountSubtitle,
   accountTone,
   accountUsageCell,
+  accountUsageCellView,
   autoRefreshAccountId,
   autoSwitchStatus,
   isUsageRefreshCoolingDown,
@@ -84,15 +85,30 @@ describe("account choices", () => {
     expect(accountUsageCell([monthly], "weekly").tightest).toBe(monthly);
     expect(accountUsageCell([monthly], "session")).toEqual({ tightest: undefined, all: [] });
   });
-  it("labels resets, and marks a passed reset as just reset", () => {
+  it("labels resets, and marks a passed reset as waiting for a check", () => {
     const now = Date.parse("2026-09-23T12:00:00Z");
     expect(usageResetLabel(window(10), now)).toBeNull();
     expect(usageResetLabel({ ...window(10), resetsAt: "2026-09-23T15:30:00Z" }, now)).toBe(
       "in 3h 30m",
     );
     expect(usageResetLabel({ ...window(10), resetsAt: "2026-09-23T11:00:00Z" }, now)).toBe(
-      "Just reset",
+      "Resets now · checking…",
     );
+  });
+  it("never shows a stale percent next to a reset that already passed", () => {
+    const now = Date.parse("2026-09-23T12:00:00Z");
+    const weekly = { ...window(100), id: "weekly", kind: "weekly" as const };
+    expect(
+      accountUsageCellView([{ ...weekly, resetsAt: "2026-09-23T11:00:00Z" }], "weekly", now),
+    ).toMatchObject({
+      remaining: null,
+      reset: "Resets now · checking…",
+      resetPending: true,
+      tone: "default",
+    });
+    expect(
+      accountUsageCellView([{ ...weekly, resetsAt: "2026-09-24T12:00:00Z" }], "weekly", now),
+    ).toMatchObject({ remaining: 0, reset: "in 1d 0h", resetPending: false, tone: "error" });
   });
   it("uses the tightest window, not an average", () => {
     const tight = account("tight", 0, {
@@ -439,9 +455,11 @@ describe("copy helpers", () => {
     expect(accountSubtitle(account("ext", undefined, { kind: "external" }))).toBe(
       "Set in Settings",
     );
-    expect(accountSubtitle(account("a@x.dev", undefined, { email: "a@x.dev" }))).toBe(
-      "No email reported",
+    // An email already used as the name is known, just not repeated.
+    expect(accountSubtitle(account("a@x.dev", undefined, { email: "A@x.dev" }))).toBe(
+      "Saved login",
     );
+    expect(accountSubtitle(account("Work"))).toBe("No email reported");
   });
 });
 
@@ -458,6 +476,15 @@ describe("row state", () => {
     expect(accountStatusMessage(account("a", 0, { status: "signedOut" }), "")?.text).toBe(
       "Signed out. Sign in to use this account.",
     );
+    expect(
+      accountStatusMessage(
+        account("a", 0, {
+          status: "signedOut",
+          message: "Signed out by a sign-in in the terminal.",
+        }),
+        "",
+      )?.text,
+    ).toBe("Signed out by a sign-in in the terminal.");
     expect(accountStatusMessage(account("a", 0, { status: "error" }), "")?.text).toBe(
       "Login expired. Sign in again to use this account.",
     );
@@ -660,6 +687,34 @@ describe("automatic usage refresh", () => {
       ),
     ).toBe("stalest");
     expect(autoRefreshAccountId([measured("fresh", "2026-09-23T12:30:00Z")], now)).toBeNull();
+  });
+  it("next picks an account whose window reset after it was measured, however recent", () => {
+    const reset = (id: string, checkedAt: string, resetsAt: string) =>
+      account(id, undefined, {
+        usage: { checkedAt, windows: [{ ...window(100), resetsAt }] },
+      });
+    expect(
+      autoRefreshAccountId(
+        [
+          measured("stalest", "2026-09-23T11:00:00Z"),
+          reset("rolled-over", "2026-09-23T12:33:00Z", "2026-09-23T12:34:00Z"),
+        ],
+        now,
+      ),
+    ).toBe("rolled-over");
+    // A reset already past when measured is what the provider reported; probing won't change it.
+    expect(
+      autoRefreshAccountId(
+        [reset("reported", "2026-09-23T12:33:00Z", "2026-09-23T12:00:00Z")],
+        now,
+      ),
+    ).toBeNull();
+    expect(
+      autoRefreshAccountId(
+        [account("new"), reset("rolled-over", "2026-09-23T12:33:00Z", "2026-09-23T12:34:00Z")],
+        now,
+      ),
+    ).toBe("new");
   });
   it("skips active, not-ready, unsupported and server-gated accounts", () => {
     expect(
