@@ -12,6 +12,7 @@ import {
   type ProviderAccountLoginEvent,
   type ProviderAccountAutoSwitchEvent,
   type ProviderAccountsSetAutoSwitchInput,
+  type ProviderAccountsSetWindowPrimerInput,
   type ProviderAccountsRefreshUsageInput,
   type ProviderAccountsStartLoginInput,
   type ProviderAccountsSwitchInput,
@@ -21,6 +22,12 @@ import {
 } from "@t3tools/contracts";
 import { Clock, Context, DateTime, Effect, Layer, PubSub, Queue, Semaphore, Stream } from "effect";
 import { makeProviderAccountAutoSwitch } from "./ProviderAccountAutoSwitch.ts";
+import { makeProviderAccountWindowPrimer } from "./ProviderAccountWindowPrimer.ts";
+import {
+  claudeWindowPrimeLaunch,
+  runClaudeWindowPrime,
+  type ClaudeWindowPrimeFailure,
+} from "./ClaudeWindowPrime.ts";
 import { activeBelowThreshold } from "./autoSwitchPolicy.ts";
 import type * as FileSystem from "effect/FileSystem";
 import type * as Path from "effect/Path";
@@ -35,6 +42,7 @@ import { ProviderRegistry } from "../Services/ProviderRegistry.ts";
 import { ProviderInstanceRegistry } from "../Services/ProviderInstanceRegistry.ts";
 import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment.ts";
 import { materializeCodexAccountHome } from "./CodexAccountHome.ts";
+import { inactiveClaudeProbeEnvironment } from "./ClaudeAccountHome.ts";
 import {
   ProviderAccountLogin,
   type PreparedProviderAccountLogin,
@@ -73,15 +81,7 @@ const claudeHomeChangedWarning =
 const claudeBarrierWarning = (reason: string) =>
   `A previous Claude account switch didn't finish: ${reason} Accounts are locked until it's resolved.`;
 
-/** Inactive-store probes must authenticate from that store only, like login does. */
-export function inactiveClaudeProbeEnvironment(environment: NodeJS.ProcessEnv) {
-  const {
-    CLAUDE_SECURESTORAGE_CONFIG_DIR: _secure,
-    CLAUDE_CODE_OAUTH_TOKEN: _token,
-    ...rest
-  } = environment;
-  return rest;
-}
+export { inactiveClaudeProbeEnvironment };
 function claudeCredentialLocation(state: {
   currentHome: string;
   settings: { homePath: string };
@@ -245,6 +245,7 @@ type CreateLogin = (options: ProviderAccountLoginOptions) => LoginClient;
 const make = (
   createLogin: CreateLogin = (options) => new ProviderAccountLogin(options),
   probe: typeof probeAccountUsage = probeAccountUsage,
+  runPrime: typeof runClaudeWindowPrime = runClaudeWindowPrime,
 ) =>
   Effect.gen(function* () {
     const config = yield* ServerConfig;
@@ -367,8 +368,17 @@ const make = (
     const autoEvents = yield* PubSub.unbounded<ProviderAccountAutoSwitchEvent>();
     yield* Effect.addFinalizer(() => PubSub.shutdown(autoEvents));
     let autoSwitch: Effect.Success<ReturnType<typeof makeProviderAccountAutoSwitch>> | undefined;
+    let windowPrimer:
+      | Effect.Success<ReturnType<typeof makeProviderAccountWindowPrimer>>
+      | undefined;
     const changed = (driver: ProviderAccountDriver) =>
-      PubSub.publish(autoEvents, { _tag: "changed", driver }).pipe(Effect.asVoid);
+      PubSub.publish(autoEvents, { _tag: "changed", driver }).pipe(
+        // Account list changes can make a Claude window startable (or not).
+        Effect.andThen(
+          driver === "claudeAgent" && windowPrimer ? windowPrimer.notify : Effect.void,
+        ),
+        Effect.asVoid,
+      );
 
     const configuration = Effect.fn("providerAccounts.configuration")(function* (
       driver: ProviderAccountDriver,
@@ -540,6 +550,11 @@ const make = (
             ),
           );
           const { identities, duplicateOf } = accountIdentities(state.accounts, accounts, live);
+          const primer =
+            driver === "claudeAgent" ? yield* io(() => registry.getWindowPrimer()) : undefined;
+          const lastPrimed = Object.entries(primer?.primedAt ?? {})
+            .filter(([id]) => state.accounts.some((entry) => entry.id === id))
+            .toSorted((left, right) => right[1] - left[1])[0];
           const group = {
             driver,
             instanceId,
@@ -564,6 +579,20 @@ const make = (
                   }
                 : {}),
             },
+            ...(primer
+              ? {
+                  windowPrimer: {
+                    enabled: primer.enabled,
+                    ...(primer.enabled ? windowPrimer?.getState() : {}),
+                    ...(lastPrimed
+                      ? {
+                          lastPrimedAt: new Date(lastPrimed[1]).toISOString(),
+                          lastPrimedAccountId: ProviderAccountId.make(lastPrimed[0]),
+                        }
+                      : {}),
+                  },
+                }
+              : {}),
             accounts: state.accounts.map((entry, index) => {
               const original = duplicateOf(entry);
               return { ...accounts[index]!, ...(original ? { duplicateOf: original } : {}) };
@@ -663,6 +692,7 @@ const make = (
           }),
         { concurrency: 2 },
       );
+      if (windowPrimer) yield* windowPrimer.notify;
       return yield* list();
     });
 
@@ -1131,6 +1161,17 @@ const make = (
       return yield* list();
     }, mutation.withPermit);
 
+    const setWindowPrimer = Effect.fn("providerAccounts.setWindowPrimer")(function* (
+      input: ProviderAccountsSetWindowPrimerInput,
+    ) {
+      const registry = yield* registryEffect;
+      yield* io(() => registry.updateWindowPrimer({ enabled: input.enabled }));
+      if (windowPrimer) yield* windowPrimer.clear;
+      // Also re-evaluates the primer, which arms or stops its timer.
+      yield* changed(input.driver);
+      return yield* list();
+    }, mutation.withPermit);
+
     // OrchestrationEngine commits projectEventDeferred's SQL projections before
     // publishing domain events. Only attachment cleanup is deferred, so idle
     // evaluations can read the updated shell immediately (no timer/poll needed).
@@ -1206,10 +1247,123 @@ const make = (
         ),
     });
 
+    const primeFailureMessages: Record<ClaudeWindowPrimeFailure, string> = {
+      signedOut: "Claude reported the account as signed out.",
+      rateLimited: "Claude is rate limiting this account.",
+      timeout: "Claude didn't answer within a minute.",
+      failed: "Claude returned an error.",
+    };
+    // Credentials that would bill the request elsewhere instead of starting a subscription window.
+    const apiBillingKeys = [
+      "ANTHROPIC_API_KEY",
+      "ANTHROPIC_AUTH_TOKEN",
+      "CLAUDE_CODE_USE_BEDROCK",
+      "CLAUDE_CODE_USE_VERTEX",
+    ];
+    /** Runs under the account mutation, so no credential move or checkout can interleave. */
+    const primeClaudeWindow = Effect.fn("providerAccounts.primeClaudeWindow")(function* (
+      account: ProviderAccount,
+    ) {
+      yield* requireClaudeReady();
+      const state = yield* groupState("claudeAgent");
+      if (state.warning) return yield* new ProviderAccountError({ message: state.warning });
+      if (login.isBusy(account.id))
+        return yield* new ProviderAccountError({ message: "A sign-in is running." });
+      const registry = yield* registryEffect;
+      const entry = yield* io(() => registry.get(account.id));
+      const active = state.activeAccountId === entry.id;
+      // Never a checked-out store: the active account is primed through the active home.
+      const home = active
+        ? state.currentHome
+        : (entry.storePath ?? (entry.kind === "managed" ? entry.homePath : undefined));
+      if (!home || (!active && NodePath.resolve(home) === NodePath.resolve(state.currentHome)))
+        return yield* new ProviderAccountError({ message: "Its saved login wasn't found." });
+      const launch = claudeWindowPrimeLaunch({
+        active,
+        homePath: home,
+        configuredHomePath: state.settings.homePath,
+        binaryPath: state.settings.binaryPath,
+        environment: state.environment,
+        stateDir: config.stateDir,
+      });
+      yield* io(() => NodeFSP.mkdir(launch.cwd, { recursive: true, mode: 0o700 }));
+      const result = yield* Effect.promise((signal) => runPrime(launch, { signal }));
+      if (!result.ok) {
+        // Only the classified reason; prompts and CLI output are never logged.
+        yield* Effect.logWarning("Claude window start failed", { reason: result.reason, active });
+        return yield* new ProviderAccountError({ message: primeFailureMessages[result.reason] });
+      }
+      yield* Effect.logInfo("Started a Claude 5-hour window", { active });
+    });
+    windowPrimer = yield* makeProviderAccountWindowPrimer({
+      read: () =>
+        Effect.gen(function* () {
+          const registry = yield* registryEffect;
+          const primer = yield* io(() => registry.getWindowPrimer());
+          const group = claudeGroupOf(yield* list());
+          const state = yield* groupState("claudeAgent");
+          const now = yield* Clock.currentTimeMillis;
+          const previous = new Map<ProviderAccountId, AccountUsage | undefined>();
+          for (const account of group?.accounts ?? []) {
+            if (account.active) continue;
+            const entry = yield* io(() => registry.get(account.id));
+            previous.set(
+              account.id,
+              entry.lastUsage
+                ? {
+                    ...entry.lastUsage,
+                    status: entry.status === "pending" ? "error" : entry.status,
+                  }
+                : undefined,
+            );
+          }
+          const billing = apiBillingKeys.filter((key) => Boolean(state.environment[key]));
+          const blocked =
+            state.warning ??
+            (billing.length > 0
+              ? `Paused: ${billing.join(", ")} in Claude's environment would bill that instead of starting a subscription window.`
+              : undefined);
+          return {
+            enabled: primer.enabled,
+            group,
+            primedAt: new Map(
+              Object.entries(primer.primedAt ?? {}).map(([id, at]) => [
+                ProviderAccountId.make(id),
+                at,
+              ]),
+            ),
+            loginInProgress: (group?.accounts ?? [])
+              .filter((account) => login.isBusy(account.id))
+              .map((account) => account.id),
+            probeAllowedAt: (accountId: ProviderAccountId, force: boolean) =>
+              previous.has(accountId)
+                ? cache.nextAllowedAt(accountId, now, previous.get(accountId), force)
+                : 0,
+            ...(blocked ? { blocked } : {}),
+          };
+        }),
+      refresh: (account, force) =>
+        account.active
+          ? providers.refreshInstance(claudeInstanceId)
+          : refreshUsage({ accountIds: [account.id], force }),
+      prime: primeClaudeWindow,
+      persistPrimed: (accountId, at) =>
+        Effect.gen(function* () {
+          const registry = yield* registryEffect;
+          yield* io(() => registry.updateWindowPrimer({ primed: { accountId, at } }));
+        }),
+      withMutation: mutation.withPermit,
+      providerChanges: providers.streamChanges,
+      publish: PubSub.publish(autoEvents, { _tag: "changed", driver: "claudeAgent" }).pipe(
+        Effect.asVoid,
+      ),
+    });
+
     return {
       list,
       refreshUsage,
       setAutoSwitch,
+      setWindowPrimer,
       autoSwitchEvents: Stream.fromPubSub(autoEvents),
       startLogin,
       switchAccount,
@@ -1227,6 +1381,9 @@ export class ProviderAccountsService extends Context.Service<
   Effect.Success<ReturnType<typeof make>>
 >()("t3/provider/accounts/ProviderAccountsService") {
   static readonly layer = Layer.effect(ProviderAccountsService, make());
-  static readonly layerWithLogin = (createLogin: CreateLogin, probe?: typeof probeAccountUsage) =>
-    Layer.effect(ProviderAccountsService, make(createLogin, probe));
+  static readonly layerWithLogin = (
+    createLogin: CreateLogin,
+    probe?: typeof probeAccountUsage,
+    runPrime?: typeof runClaudeWindowPrime,
+  ) => Layer.effect(ProviderAccountsService, make(createLogin, probe, runPrime));
 }

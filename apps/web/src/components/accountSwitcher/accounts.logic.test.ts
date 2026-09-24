@@ -35,6 +35,7 @@ import {
   accountSwitchBusyTurnCount,
   pendingAutoSwitchAccount,
   usageResetLabel,
+  windowPrimerStatus,
 } from "./accounts.logic";
 
 const window = (usedPercent: number): ServerProviderUsageWindow => ({
@@ -694,5 +695,69 @@ describe("automatic usage refresh", () => {
         now,
       ),
     ).toBe("allowed");
+  });
+});
+
+describe("windowPrimerStatus", () => {
+  const now = Date.parse("2026-09-24T12:00:00.000Z");
+  const work = ProviderAccountId.make("work");
+  const personal = ProviderAccountId.make("personal");
+  const accounts = [
+    { id: work, label: "Work" },
+    { id: personal, label: "Personal" },
+  ];
+  const at = (offset: number) => new Date(now + offset).toISOString();
+
+  it("describes the feature while off and shows errors first", () => {
+    expect(windowPrimerStatus({ enabled: false }, accounts, now)).toBe(
+      "Starts each account's 5-hour window as soon as it can.",
+    );
+    expect(
+      windowPrimerStatus(
+        {
+          enabled: true,
+          message: "Couldn't start Work's 5-hour window. Claude returned an error.",
+          nextPrimeAt: at(60_000),
+          nextPrimeAccountId: work,
+        },
+        accounts,
+        now,
+      ),
+    ).toBe("Couldn't start Work's 5-hour window. Claude returned an error.");
+  });
+
+  it("prefers a recent start, then the next start, then an older start", () => {
+    const next = { nextPrimeAt: at(42 * 60_000), nextPrimeAccountId: work };
+    expect(
+      windowPrimerStatus(
+        { enabled: true, lastPrimedAt: at(-3 * 60_000), lastPrimedAccountId: personal, ...next },
+        accounts,
+        now,
+      ),
+    ).toBe("Started Personal's window 3m ago.");
+    expect(
+      windowPrimerStatus(
+        { enabled: true, lastPrimedAt: at(-12 * 60_000), lastPrimedAccountId: personal, ...next },
+        accounts,
+        now,
+      ),
+    ).toBe("Next start: Work in 42m.");
+    expect(
+      windowPrimerStatus(
+        { enabled: true, nextPrimeAt: at(-1_000), nextPrimeAccountId: work },
+        accounts,
+        now,
+      ),
+    ).toBe("Starting Work's window now.");
+    expect(
+      windowPrimerStatus(
+        { enabled: true, lastPrimedAt: at(-12 * 60_000), lastPrimedAccountId: personal },
+        accounts,
+        now,
+      ),
+    ).toBe("Started Personal's window 12m ago.");
+    expect(windowPrimerStatus({ enabled: true }, accounts, now)).toBe(
+      "No signed-in account can start a window right now.",
+    );
   });
 });

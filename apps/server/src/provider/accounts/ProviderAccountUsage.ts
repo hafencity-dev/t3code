@@ -220,8 +220,17 @@ export const makeAccountUsageCache = <E, R>(dependencies: {
         ? Date.parse(prior.checkedAt) + ACCOUNT_USAGE_TTL_MS
         : 0,
     );
-  const nextAllowedAt = (id: ProviderAccountId, now: number, previous?: AccountUsage) =>
-    Math.max(accountAt(newest(cache.get(id), previous)), budgetAt(now), pendingUntil.get(id) ?? 0);
+  const nextAllowedAt = (
+    id: ProviderAccountId,
+    now: number,
+    previous?: AccountUsage,
+    force = false,
+  ) =>
+    Math.max(
+      accountAt(newest(cache.get(id), previous), force),
+      budgetAt(now),
+      pendingUntil.get(id) ?? 0,
+    );
   const canProbe = (id: ProviderAccountId, now: number, previous?: AccountUsage) =>
     !pending.has(id) && now >= nextAllowedAt(id, now, previous);
 

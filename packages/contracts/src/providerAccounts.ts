@@ -95,6 +95,18 @@ export const ProviderAccountAutoSwitchEvent = Schema.Union([
 ]);
 export type ProviderAccountAutoSwitchEvent = typeof ProviderAccountAutoSwitchEvent.Type;
 
+/** Claude only: sends a tiny Haiku request when an account's 5-hour window can start. */
+export const ProviderAccountWindowPrimer = Schema.Struct({
+  enabled: Schema.Boolean,
+  lastPrimedAt: Schema.optional(IsoDateTime),
+  lastPrimedAccountId: Schema.optional(ProviderAccountId),
+  nextPrimeAt: Schema.optional(IsoDateTime),
+  nextPrimeAccountId: Schema.optional(ProviderAccountId),
+  /** Safe, user-facing reason when a start failed or starting is paused. */
+  message: Schema.optional(TrimmedNonEmptyString),
+});
+export type ProviderAccountWindowPrimer = typeof ProviderAccountWindowPrimer.Type;
+
 export const ProviderAccountGroup = Schema.Struct({
   driver: ProviderAccountDriver,
   switchMode: Schema.Literals(["hot", "restart"]),
@@ -102,6 +114,7 @@ export const ProviderAccountGroup = Schema.Struct({
   activeAccountId: Schema.optional(ProviderAccountId),
   accounts: Schema.Array(ProviderAccount),
   autoSwitch: ProviderAccountAutoSwitch,
+  windowPrimer: Schema.optional(ProviderAccountWindowPrimer),
   warning: Schema.optional(TrimmedNonEmptyString),
 });
 export type ProviderAccountGroup = typeof ProviderAccountGroup.Type;
@@ -183,12 +196,18 @@ export const ProviderAccountsSetAutoSwitchInput = Schema.Struct({
   thresholdPercent: Schema.optional(ProviderAccountAutoSwitchThresholdPercent),
 });
 export type ProviderAccountsSetAutoSwitchInput = typeof ProviderAccountsSetAutoSwitchInput.Type;
+export const ProviderAccountsSetWindowPrimerInput = Schema.Struct({
+  driver: Schema.Literal("claudeAgent"),
+  enabled: Schema.Boolean,
+});
+export type ProviderAccountsSetWindowPrimerInput = typeof ProviderAccountsSetWindowPrimerInput.Type;
 export const ProviderAccountsAutoSwitchEventsInput = Schema.Struct({});
 export type ProviderAccountsAutoSwitchEventsInput =
   typeof ProviderAccountsAutoSwitchEventsInput.Type;
 
 export const PROVIDER_ACCOUNTS_METHODS = {
   providerAccountsSetAutoSwitch: "providerAccounts.setAutoSwitch",
+  providerAccountsSetWindowPrimer: "providerAccounts.setWindowPrimer",
   providerAccountsAutoSwitchEvents: "providerAccounts.autoSwitchEvents",
   providerAccountsList: "providerAccounts.list",
   providerAccountsRefreshUsage: "providerAccounts.refreshUsage",
@@ -268,6 +287,14 @@ export const WsProviderAccountsSetAutoSwitchRpc = Rpc.make(
     error: ProviderAccountsRpcError,
   },
 );
+export const WsProviderAccountsSetWindowPrimerRpc = Rpc.make(
+  PROVIDER_ACCOUNTS_METHODS.providerAccountsSetWindowPrimer,
+  {
+    payload: ProviderAccountsSetWindowPrimerInput,
+    success: ProviderAccountsSnapshot,
+    error: ProviderAccountsRpcError,
+  },
+);
 export const WsProviderAccountsAutoSwitchEventsRpc = Rpc.make(
   PROVIDER_ACCOUNTS_METHODS.providerAccountsAutoSwitchEvents,
   {
@@ -280,6 +307,7 @@ export const WsProviderAccountsAutoSwitchEventsRpc = Rpc.make(
 
 export const PROVIDER_ACCOUNTS_RPCS = [
   WsProviderAccountsSetAutoSwitchRpc,
+  WsProviderAccountsSetWindowPrimerRpc,
   WsProviderAccountsAutoSwitchEventsRpc,
   WsProviderAccountsListRpc,
   WsProviderAccountsRefreshUsageRpc,

@@ -10,6 +10,7 @@ import {
   type ProviderAccountsRenameInput,
   type ProviderAccountsRemoveInput,
   type ProviderAccountsSetAutoSwitchInput,
+  type ProviderAccountsSetWindowPrimerInput,
 } from "@t3tools/contracts";
 import type { Effect, Stream } from "effect";
 import type { ProviderAccountsService } from "./ProviderAccountsService.ts";
@@ -37,6 +38,8 @@ export function makeProviderAccountsRpcHandlers(deps: {
   return {
     [WS_METHODS.providerAccountsSetAutoSwitch]: (input: ProviderAccountsSetAutoSwitchInput) =>
       observe(WS_METHODS.providerAccountsSetAutoSwitch, service.setAutoSwitch(input)),
+    [WS_METHODS.providerAccountsSetWindowPrimer]: (input: ProviderAccountsSetWindowPrimerInput) =>
+      observe(WS_METHODS.providerAccountsSetWindowPrimer, service.setWindowPrimer(input)),
     [WS_METHODS.providerAccountsAutoSwitchEvents]: () =>
       observeRpcStream(WS_METHODS.providerAccountsAutoSwitchEvents, service.autoSwitchEvents),
     [WS_METHODS.providerAccountsList]: () =>

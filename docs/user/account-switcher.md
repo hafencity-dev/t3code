@@ -55,6 +55,19 @@ Automatic switching never interrupts a running Codex turn; it waits until the tu
 you switch manually, it pauses early switches for two hours. A toast explains every automatic
 switch.
 
+## Start 5-hour windows automatically
+
+A Claude Code 5-hour window only starts with an account's first message. Turn on **Start 5-hour
+windows automatically** below Auto-switch in the Claude Code section, and T3 Code sends a short
+message with Claude Haiku to each signed-in account as soon as its window can start, so the clock
+begins right away and the next reset comes sooner. It covers the active account and your other
+saved accounts, skips accounts that are signed out or have no weekly quota left, and uses a tiny
+amount of usage. The line below the toggle shows the next start or the last one.
+
+It runs on the T3 environment, so the server must be running for windows to start. It is paused
+while an API key or a Bedrock or Vertex setup is configured for Claude Code, because those would be
+billed instead of starting a subscription window.
+
 ## Usage checks
 
 The active account's usage updates with every turn. Other accounts are checked when you open the

@@ -51,6 +51,20 @@ describe("ProviderAccountRegistry", () => {
     expect(await NodeFSP.readdir(NodePath.dirname(registryPath()))).toEqual(["accounts.json"]);
   });
 
+  it("persists the window primer and keeps start times only for saved accounts", async () => {
+    const registry = await createProviderAccountRegistry({ stateDir });
+    expect(await registry.getWindowPrimer()).toEqual({ enabled: false });
+    await registry.list("claudeAgent", shared);
+    await registry.updateWindowPrimer({ enabled: true });
+    await registry.updateWindowPrimer({ primed: { accountId: "claudeAgent-default", at: 5 } });
+    await registry.updateWindowPrimer({ primed: { accountId: "removed", at: 6 } });
+    const reopened = await createProviderAccountRegistry({ stateDir });
+    expect(await reopened.getWindowPrimer()).toEqual({
+      enabled: true,
+      primedAt: { "claudeAgent-default": 5 },
+    });
+  });
+
   it("defaults auto-switch off without rewriting phase-one registries", async () => {
     const fresh = await createProviderAccountRegistry({ stateDir });
     expect(await fresh.getAutoSwitch("claudeAgent")).toEqual({

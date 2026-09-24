@@ -43,6 +43,7 @@ import {
 } from "./ProviderAccountsService.ts";
 import { makeProviderAccountsRpcHandlers } from "./providerAccountsRpcHandlers.ts";
 import type { AccountUsage, probeAccountUsage } from "./ProviderAccountUsage.ts";
+import type { ClaudeWindowPrimeLaunch, runClaudeWindowPrime } from "./ClaudeWindowPrime.ts";
 
 type Probe = typeof probeAccountUsage;
 const idleProbe = () => Effect.never;
@@ -100,6 +101,7 @@ describe("ProviderAccountsService", () => {
       runningClaude?: boolean;
       environment?: ReadonlyArray<{ name: string; value: string; sensitive: boolean }>;
       probe?: Probe;
+      runPrime?: typeof runClaudeWindowPrime;
       refreshInstance?: ProviderRegistryShape["refreshInstance"];
     } = {},
   ) {
@@ -245,6 +247,7 @@ describe("ProviderAccountsService", () => {
                 options.login ?? ((loginOptions) => new ProviderAccountLogin(loginOptions)),
                 // Completed logins probe in the background; never spawn a real CLI for it.
                 options.probe ?? (idleProbe as unknown as Probe),
+                options.runPrime,
               )
             : ProviderAccountsService.layer,
         ),
@@ -1275,6 +1278,67 @@ describe("ProviderAccountsService", () => {
       {
         claudeHomePath: NodePath.join(root, "claude"),
         probe,
+        before: async () => {
+          seeded = await seedClaudeStores(["b"]);
+        },
+      },
+    );
+  });
+
+  it.effect("starts an inactive Claude account's window in its own store once enabled", () => {
+    let seeded: Awaited<ReturnType<typeof seedClaudeStores>>;
+    const launches: ClaudeWindowPrimeLaunch[] = [];
+    let started!: () => void;
+    const primed = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    // Fresh usage without a 5-hour window: nothing is running, so it can start.
+    const probe: Probe = (() => {
+      const now = new Date().toISOString();
+      return Effect.succeed({
+        checkedAt: now,
+        status: "ready",
+        usage: {
+          checkedAt: now,
+          windows: [{ id: "seven_day", label: "Weekly", kind: "weekly", usedPercent: 10 }],
+        },
+      } satisfies AccountUsage);
+    }) as unknown as Probe;
+    vi.stubEnv("CLAUDE_CODE_OAUTH_TOKEN", "override-token");
+    return run(
+      Effect.gen(function* () {
+        const service = yield* ProviderAccountsService;
+        expect(claudeGroup(yield* service.list()).windowPrimer).toEqual({ enabled: false });
+        yield* service.setWindowPrimer({ driver: "claudeAgent", enabled: true });
+        yield* Effect.promise(() => primed);
+        const launch = launches[0]!;
+        expect(launch.env.CLAUDE_CONFIG_DIR).toBe(seeded.homes.b);
+        expect(launch.env).not.toHaveProperty("CLAUDE_CODE_OAUTH_TOKEN");
+        expect(launch.args).toContain("claude-haiku-4-5-20251001");
+        expect(launch.cwd).toBe(
+          NodePath.join(root, "state/userdata/fork/provider-accounts/window-primer"),
+        );
+        const group = claudeGroup(
+          yield* service.setWindowPrimer({
+            driver: "claudeAgent",
+            enabled: false,
+          }),
+        );
+        expect(group.windowPrimer?.enabled).toBe(false);
+        expect(group.windowPrimer?.lastPrimedAccountId).toBe(seeded.ids.b);
+        expect(launches.every((item) => item.env.CLAUDE_CONFIG_DIR !== seeded.activeHome)).toBe(
+          true,
+        );
+      }).pipe(Effect.ensuring(Effect.sync(() => vi.unstubAllEnvs()))),
+      false,
+      {
+        claudeHomePath: NodePath.join(root, "claude"),
+        probe,
+        runPrime: (launch) => {
+          launches.push(launch);
+          started();
+          return Promise.resolve({ ok: true });
+        },
         before: async () => {
           seeded = await seedClaudeStores(["b"]);
         },

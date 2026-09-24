@@ -92,6 +92,11 @@ export function createProviderAccountsEnvironmentAtoms<R, E>(
       tag: WS_METHODS.providerAccountsSetAutoSwitch,
       onSettled,
     }),
+    setWindowPrimer: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:provider-accounts:set-window-primer",
+      tag: WS_METHODS.providerAccountsSetWindowPrimer,
+      onSettled,
+    }),
     loginEvents: (target: {
       readonly environmentId: EnvironmentId;
       readonly input: ProviderAccountLoginRequest;

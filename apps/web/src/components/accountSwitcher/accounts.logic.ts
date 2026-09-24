@@ -5,6 +5,7 @@ import type {
   ProviderAccountDriver,
   ProviderAccountGroup,
   ProviderAccountId,
+  ProviderAccountWindowPrimer,
   ServerProvider,
   ServerProviderUsageWindow,
 } from "@t3tools/contracts";
@@ -551,4 +552,34 @@ export function autoSwitchStatus(
         : AUTO_SWITCH_OFF_TEXT[group.switchMode],
     showLastSwitch: true,
   };
+}
+
+/** A start this recent is reported before the next one. */
+const RECENT_WINDOW_START_MS = 10 * MINUTE;
+
+/** The muted status line under the "Start 5-hour windows automatically" toggle. */
+export function windowPrimerStatus(
+  primer: ProviderAccountWindowPrimer,
+  accounts: readonly Pick<ProviderAccount, "id" | "label">[],
+  now: number,
+) {
+  if (!primer.enabled) return "Starts each account's 5-hour window as soon as it can.";
+  if (primer.message) return primer.message;
+  const labelOf = (id: ProviderAccountId | undefined) =>
+    accounts.find((account) => account.id === id)?.label ?? "an account";
+  const last =
+    primer.lastPrimedAt === undefined
+      ? undefined
+      : `Started ${labelOf(primer.lastPrimedAccountId)}'s window ${formatAgo(now - Date.parse(primer.lastPrimedAt), true)}.`;
+  const lastAge =
+    primer.lastPrimedAt === undefined ? Infinity : now - Date.parse(primer.lastPrimedAt);
+  if (last && lastAge < RECENT_WINDOW_START_MS) return last;
+  if (primer.nextPrimeAt !== undefined) {
+    const label = labelOf(primer.nextPrimeAccountId);
+    const wait = Date.parse(primer.nextPrimeAt) - now;
+    return wait <= 0
+      ? `Starting ${label}'s window now.`
+      : `Next start: ${label} in ${formatWait(wait)}.`;
+  }
+  return last ?? "No signed-in account can start a window right now.";
 }

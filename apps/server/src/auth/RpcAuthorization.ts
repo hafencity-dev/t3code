@@ -23,6 +23,7 @@ type WsRpcMethod = RpcGroup.Rpcs<typeof WsRpcGroup>["_tag"];
  */
 export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.providerAccountsSetAutoSwitch]: AuthOrchestrationOperateScope, // fork: provider accounts
+  [WS_METHODS.providerAccountsSetWindowPrimer]: AuthOrchestrationOperateScope, // fork: provider accounts
   [WS_METHODS.providerAccountsAutoSwitchEvents]: AuthOrchestrationReadScope, // fork: provider accounts
   [WS_METHODS.providerAccountsList]: AuthOrchestrationReadScope, // fork: provider accounts
   [WS_METHODS.providerAccountsRefreshUsage]: AuthOrchestrationOperateScope, // fork: provider accounts

@@ -65,6 +65,12 @@ export type ProviderAccountAutoSwitchPatch = Partial<Omit<ProviderAccountAutoSwi
   /** Null clears the manual hold; omission leaves it unchanged. */
   manual?: ProviderAccountAutoSwitch["manual"] | null;
 };
+const WindowPrimer = Schema.Struct({
+  enabled: Schema.Boolean,
+  /** Epoch ms of each account's last successful window start, keyed by account id. */
+  primedAt: Schema.optional(Schema.Record(Schema.String, Schema.Number)),
+});
+export type ProviderAccountWindowPrimer = typeof WindowPrimer.Type;
 const StoredRegistry = Schema.Struct({
   version: Schema.Literal(1),
   accounts: Schema.Array(Entry),
@@ -76,6 +82,7 @@ const StoredRegistry = Schema.Struct({
       codex: Schema.optional(AutoSwitch),
     }),
   ),
+  windowPrimer: Schema.optional(Schema.Struct({ claudeAgent: Schema.optional(WindowPrimer) })),
 });
 
 const decodeStoredRegistry = Schema.decodeUnknownSync(StoredRegistry);
@@ -221,7 +228,31 @@ export async function createProviderAccountRegistry(input: { stateDir: string })
   function getAutoSwitch(driver: ProviderAccountDriver): ProviderAccountAutoSwitch {
     return structuredClone(stored.autoSwitch?.[driver] ?? { enabled: false, thresholdPercent: 10 });
   }
+  function getWindowPrimer(): ProviderAccountWindowPrimer {
+    return structuredClone(stored.windowPrimer?.claudeAgent ?? { enabled: false });
+  }
   return {
+    getWindowPrimer: () => serialized(async () => getWindowPrimer()),
+    updateWindowPrimer: (patch: {
+      enabled?: boolean;
+      primed?: { accountId: string; at: number };
+    }) =>
+      serialized(async () => {
+        const previous = getWindowPrimer();
+        // Only saved accounts keep a timestamp, so removed accounts never linger here.
+        const primedAt = Object.fromEntries(
+          Object.entries({
+            ...previous.primedAt,
+            ...(patch.primed ? { [patch.primed.accountId]: patch.primed.at } : {}),
+          }).filter(([id]) => stored.accounts.some((entry) => entry.id === id)),
+        );
+        const next: ProviderAccountWindowPrimer = {
+          enabled: patch.enabled ?? previous.enabled,
+          ...(Object.keys(primedAt).length > 0 ? { primedAt } : {}),
+        };
+        await persist({ ...stored, windowPrimer: { ...stored.windowPrimer, claudeAgent: next } });
+        return getWindowPrimer();
+      }),
     getAutoSwitch: (driver: ProviderAccountDriver) => serialized(async () => getAutoSwitch(driver)),
     updateAutoSwitch: (driver: ProviderAccountDriver, patch: ProviderAccountAutoSwitchPatch) =>
       serialized(async () => {

@@ -18,8 +18,12 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { ACCOUNT_DRIVER_LABELS, autoSwitchStatus, formatAgo } from "./accounts.logic";
 import { providerAccountsEnvironment } from "./state";
 import { SwitchAccountAction } from "./SwitchAccountAction";
+import { WindowPrimerRow } from "./WindowPrimerRow";
 
-/** Two fixed lines at the bottom of a provider card: the toggle and threshold, then status. */
+/**
+ * Two fixed lines at the bottom of a provider card: the toggle and threshold, then status.
+ * Claude cards add two more for starting 5-hour windows automatically.
+ */
 export function AutoSwitchBar({
   group,
   environmentId,
@@ -187,6 +191,14 @@ export function AutoSwitchBar({
           </Tooltip>
         ) : null}
       </div>
+      {group.windowPrimer ? (
+        <WindowPrimerRow
+          primer={group.windowPrimer}
+          accounts={group.accounts}
+          environmentId={environmentId}
+          now={now}
+        />
+      ) : null}
     </div>
   );
 }

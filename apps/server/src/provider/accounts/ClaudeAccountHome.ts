@@ -106,3 +106,13 @@ export async function materializeClaudeAccountHome(input: {
   }
   return homePath;
 }
+
+/** Inactive-store probes must authenticate from that store only, like login does. */
+export function inactiveClaudeProbeEnvironment(environment: NodeJS.ProcessEnv) {
+  const {
+    CLAUDE_SECURESTORAGE_CONFIG_DIR: _secure,
+    CLAUDE_CODE_OAUTH_TOKEN: _token,
+    ...rest
+  } = environment;
+  return rest;
+}
