@@ -113,7 +113,7 @@ export const probeAccountUsage = Effect.fn("providerAccounts.probeUsage")(functi
       usage: makeUnavailableUsageLimits({ checkedAt, reason: "unsupported" }),
     } satisfies AccountUsage;
   }
-  const response = yield* client.request("account/rateLimits/read", undefined);
+  const response = yield* client.request("account/rateLimits/read", null);
   const plan = codexPlanLabel(account.planType);
   return {
     checkedAt,

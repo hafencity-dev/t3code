@@ -746,13 +746,13 @@ export const make = Effect.gen(function* () {
           const demandCwds = yield* Ref.get(demandCwdsRef);
           const shouldRun =
             refreshRequired ||
-            (yield* Effect.all(
-              [...demandCwds.keys()].map((demandCwd) =>
+            (yield* Effect.forEach(
+              [...demandCwds.keys()],
+              (demandCwd) =>
                 backgroundPolicy.shouldRunScopeWork({
                   type: "vcs-status",
                   cwd: demandCwd,
                 }),
-              ),
               { concurrency: "unbounded" },
             )).some(Boolean);
           if (!shouldRun) {
