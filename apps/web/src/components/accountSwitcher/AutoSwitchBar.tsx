@@ -53,7 +53,7 @@ function ThresholdSelect({
         if (next !== null && next !== value) onChange(next);
       }}
     >
-      <SelectTrigger size="xs" aria-label={label}>
+      <SelectTrigger size="xs" className="w-24 min-w-24 shrink-0" aria-label={label}>
         <SelectValue />
       </SelectTrigger>
       <SelectPopup>
@@ -144,51 +144,58 @@ export function AutoSwitchBar({
   );
   return (
     <div className="grid gap-1.5 bg-muted/30 px-3 py-2.5">
-      <div className="flex min-h-6 min-w-0 items-center gap-2 text-xs">
-        {enableBlockedReason ? (
-          <Tooltip>
-            <TooltipTrigger render={<span tabIndex={0} className="inline-flex" />}>
-              {toggle}
-            </TooltipTrigger>
-            <TooltipPopup>{enableBlockedReason}</TooltipPopup>
-          </Tooltip>
-        ) : (
-          toggle
-        )}
-        <Tooltip>
-          <TooltipTrigger render={<span id={labelId} className="font-medium" />}>
-            Auto-switch<span className="sr-only"> {provider}</span>
-          </TooltipTrigger>
-          <TooltipPopup>
-            Switches when the active account runs low. Prefers accounts whose weekly limit resets
-            soonest so no quota goes unused.
-            {group.switchMode === "restart" ? " Never interrupts a running turn." : null}
-          </TooltipPopup>
-        </Tooltip>
-        {autoSwitch.enabled ? (
-          <span className="flex min-w-0 items-center gap-1.5 text-muted-foreground">
-            <span className="truncate">5-hour at</span>
-            <ThresholdSelect
-              value={autoSwitch.thresholdPercent}
-              options={SESSION_THRESHOLDS}
-              disabled={saving}
-              label={`${provider} 5-hour auto-switch threshold`}
-              onChange={(thresholdPercent) => void update(true, { thresholdPercent })}
-            />
+      {/* Wraps between whole label + select pairs, so a label never truncates. */}
+      <div className="flex min-h-6 min-w-0 flex-wrap items-center gap-x-3 gap-y-1.5 text-xs">
+        <span className="inline-flex shrink-0 items-center gap-2">
+          {enableBlockedReason ? (
             <Tooltip>
-              <TooltipTrigger render={<span className="truncate" />}>Weekly at</TooltipTrigger>
-              <TooltipPopup>
-                Switches before the weekly limit runs out, so no chat stops mid-turn.
-              </TooltipPopup>
+              <TooltipTrigger render={<span tabIndex={0} className="inline-flex" />}>
+                {toggle}
+              </TooltipTrigger>
+              <TooltipPopup>{enableBlockedReason}</TooltipPopup>
             </Tooltip>
-            <ThresholdSelect
-              value={autoSwitch.weeklyThresholdPercent}
-              options={WEEKLY_THRESHOLDS}
-              disabled={saving}
-              label={`${provider} weekly auto-switch threshold`}
-              onChange={(weeklyThresholdPercent) => void update(true, { weeklyThresholdPercent })}
-            />
-          </span>
+          ) : (
+            toggle
+          )}
+          <Tooltip>
+            <TooltipTrigger render={<span id={labelId} className="font-medium" />}>
+              Auto-switch<span className="sr-only"> {provider}</span>
+            </TooltipTrigger>
+            <TooltipPopup>
+              Switches when the active account runs low. Prefers accounts whose weekly limit resets
+              soonest so no quota goes unused.
+              {group.switchMode === "restart" ? " Never interrupts a running turn." : null}
+            </TooltipPopup>
+          </Tooltip>
+        </span>
+        {autoSwitch.enabled ? (
+          <>
+            <span className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap text-muted-foreground">
+              5-hour at
+              <ThresholdSelect
+                value={autoSwitch.thresholdPercent}
+                options={SESSION_THRESHOLDS}
+                disabled={saving}
+                label={`${provider} 5-hour auto-switch threshold`}
+                onChange={(thresholdPercent) => void update(true, { thresholdPercent })}
+              />
+            </span>
+            <span className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap text-muted-foreground">
+              <Tooltip>
+                <TooltipTrigger render={<span />}>Weekly at</TooltipTrigger>
+                <TooltipPopup>
+                  Switches before the weekly limit runs out, so no chat stops mid-turn.
+                </TooltipPopup>
+              </Tooltip>
+              <ThresholdSelect
+                value={autoSwitch.weeklyThresholdPercent}
+                options={WEEKLY_THRESHOLDS}
+                disabled={saving}
+                label={`${provider} weekly auto-switch threshold`}
+                onChange={(weeklyThresholdPercent) => void update(true, { weeklyThresholdPercent })}
+              />
+            </span>
+          </>
         ) : null}
         {status.badge ? (
           <span className="ml-auto shrink-0">

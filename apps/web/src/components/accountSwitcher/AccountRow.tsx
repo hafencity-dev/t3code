@@ -332,7 +332,7 @@ export function AccountRow({
                   <TooltipTrigger render={<Badge variant="success" size="sm" />}>
                     Best option
                   </TooltipTrigger>
-                  <TooltipPopup>{nextAccountReason(account, now)}</TooltipPopup>
+                  <TooltipPopup>{nextAccountReason(account, group, now)}</TooltipPopup>
                 </Tooltip>
               ) : null}
             </>

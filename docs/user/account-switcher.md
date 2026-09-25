@@ -54,10 +54,11 @@ and **Weekly at** (2% left by default). The weekly threshold is low so each acco
 gets used almost fully, while still switching before it runs out, so no chat stops mid-turn. When
 the active account reaches either threshold, T3 Code switches to the account whose weekly limit
 resets soonest and still has headroom, so no weekly quota expires unused. It also switches early,
-while the active account is still healthy, when another account's weekly limit resets sooner and
-it still has at least 20% of it left, so that quota is used up first. If that account's 5-hour
-limit is low, it switches once that limit resets. An early switch waits at least 5 minutes after
-the last switch.
+while the active account is still healthy, when another account's weekly limit resets sooner, so
+that quota is used up first. An account is only switched to while it has at least 3 points more
+weekly quota left than the weekly threshold (5% with the default 2%), so it never has to switch
+away again right after. If that account's 5-hour limit is low, it switches once that limit
+resets. An early switch waits at least 5 minutes after the last switch.
 
 Automatic switching never interrupts a running Codex turn; it waits until the turn finishes. A
 manual switch does not pause it: once the account you picked reaches a threshold, it switches as

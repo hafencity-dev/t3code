@@ -130,6 +130,8 @@ export const ProviderAccountGroup = Schema.Struct({
   autoSwitch: ProviderAccountAutoSwitch,
   /** Where auto-switch would move next, whether or not it is on; the "Best option" badge. */
   nextAccountId: Schema.optional(ProviderAccountId),
+  /** Set when a switch to `nextAccountId` is due now, not only once the active account runs low. */
+  nextAccountDue: Schema.optional(Schema.Literal(true)),
   windowPrimer: Schema.optional(ProviderAccountWindowPrimer),
   warning: Schema.optional(TrimmedNonEmptyString),
 });

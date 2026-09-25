@@ -184,11 +184,15 @@ describe("account choices", () => {
         ],
       },
     });
-    expect(nextAccountReason(next, NOW)).toBe(
-      "Next up: its weekly limit resets soonest (4d 13h) with enough left.",
+    const marcos = account("marcos", 10, { active: true });
+    expect(nextAccountReason(next, { accounts: [marcos, next] }, NOW)).toBe(
+      "Next up when marcos runs low: its weekly limit resets soonest (4d 13h) with enough left.",
     );
-    expect(nextAccountReason(account("no-reset", 20), NOW)).toBe(
-      "Next up: its weekly limit resets soonest with enough left.",
+    expect(nextAccountReason(next, { accounts: [marcos, next], nextAccountDue: true }, NOW)).toBe(
+      "Next up now: its weekly limit resets soonest (4d 13h) with enough left.",
+    );
+    expect(nextAccountReason(account("no-reset", 20), { accounts: [] }, NOW)).toBe(
+      "Next up when the active account runs low: its weekly limit resets soonest with enough left.",
     );
   });
   it("does not recommend unavailable data or treat it as zero usage", () => {

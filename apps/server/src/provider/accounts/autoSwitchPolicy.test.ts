@@ -4,6 +4,7 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   chooseNextAccount,
   nextAutoSwitchAccountId,
+  nextAutoSwitchTarget,
   type AutoSwitchAccountView,
   type AutoSwitchDecision,
   type AutoSwitchInput,
@@ -273,11 +274,11 @@ const scenarios: ReadonlyArray<{ name: string; input: AutoSwitchInput; expected:
     expected: switchTo("Work", "expiring"),
   },
   {
-    name: "21 proactive target must have at least twenty percent long quota",
+    name: "21 proactive target needs weekly at least 3 points above the weekly threshold",
     input: input({
       config: { enabled: true, thresholdPercent: 5, weeklyThresholdPercent: 2 },
       active: personal,
-      candidates: [account("Work", 60, 19, 9 * hour)],
+      candidates: [account("Work", 60, 4, 9 * hour)],
     }),
     expected: stay("healthy"),
   },
@@ -434,7 +435,13 @@ describe("chooseNextAccount 32-scenario policy table", () => {
       input({ active: personal, candidates: expiring, lastSwitchAt }),
     );
     expect(dwell).toMatchObject(stay("dwell", now + 3 * minute));
-    expect(dwell.reason).toBe("Keeping Personal for at least 5 minutes after the last switch.");
+    expect(dwell.reason).toBe(
+      "Switching from Personal to Work in 3m: its weekly limit resets sooner (9h).",
+    );
+    expect(
+      chooseNextAccount(input({ active: personal, candidates: [account("Work")], lastSwitchAt }))
+        .reason,
+    ).toBe("Keeping Personal for at least 5 minutes after the last switch.");
     expect(
       chooseNextAccount(input({ active: low, candidates: expiring, lastSwitchAt })),
     ).toMatchObject(switchTo("Work"));
@@ -704,21 +711,25 @@ describe("separate 5-hour and weekly thresholds", () => {
     ).toMatchObject(switchTo("Work", "session"));
   });
 
-  it("keeps a nearly spent weekly out of the strict tier", () => {
+  it("targets a weekly only with at least 3 points above the weekly threshold", () => {
     const active = account("Personal", 90, 2, 5 * 24 * hour);
-    const nearlySpent = account("Spent", 90, 3, 24 * hour);
     const healthy = account("Work", 90, 40, 72 * hour);
-    // 3% is below 2% + the 10-point margin, so the later-resetting healthy account wins.
-    expect(chooseNextAccount(input({ active, candidates: [nearlySpent, healthy] }))).toMatchObject(
-      switchTo("Work", "weekly"),
-    );
-    // Alone, it is still better than running out: the relaxed tier only needs more than 2%.
-    expect(chooseNextAccount(input({ active, candidates: [nearlySpent] }))).toMatchObject(
-      switchTo("Spent", "weekly"),
-    );
+    // 4% is within 3 points of 2%, so the later-resetting healthy account wins.
     expect(
-      chooseNextAccount(input({ active, candidates: [account("Out", 90, 2, 24 * hour)] })),
+      chooseNextAccount(
+        input({ active, candidates: [account("Spent", 90, 4, 24 * hour), healthy] }),
+      ),
+    ).toMatchObject(switchTo("Work", "weekly"));
+    // Neither tier accepts it, even alone.
+    expect(
+      chooseNextAccount(input({ active, candidates: [account("Spent", 90, 4, 24 * hour)] })),
     ).toMatchObject(stay("allExhausted"));
+    // 5% is enough, and its sooner reset wins.
+    expect(
+      chooseNextAccount(
+        input({ active, candidates: [account("Spent", 90, 5, 24 * hour), healthy] }),
+      ),
+    ).toMatchObject(switchTo("Spent", "weekly"));
   });
 
   it("never switches to a duplicate of another saved login", () => {
@@ -752,7 +763,7 @@ describe("nextAutoSwitchAccountId", () => {
   it("never picks an exhausted, signed-out, signing-in, duplicate, or unmeasured account", () => {
     const active = account("Active", 50, 50);
     expect(next([active, account("Out", 100, 0, hour)])).toBeUndefined();
-    expect(next([active, account("Low", 100, 11, hour)])).toBeUndefined();
+    expect(next([active, account("Low", 100, 4, hour)])).toBeUndefined();
     expect(
       next([
         active,
@@ -783,7 +794,7 @@ describe("nextAutoSwitchAccountId", () => {
 
   it("matches the account a threshold switch moves to", () => {
     const active = account("Personal", 8, 50, 96 * hour);
-    const candidates = [account("Later", 95, 95, 72 * hour), work, account("Spent", 90, 5, hour)];
+    const candidates = [account("Later", 95, 95, 72 * hour), work, account("Spent", 90, 4, hour)];
     const decision = chooseNextAccount(input({ active, candidates }));
     expect(decision).toMatchObject(switchTo("Work"));
     expect(next([active, ...candidates])).toBe(id("Work"));
@@ -856,6 +867,107 @@ describe("accounts excluded from auto-switch", () => {
       kind: "switch",
       trigger: "weekly",
       summary: "Weekly limit at 2% · Work resets in 4d 13h",
+    });
+  });
+});
+
+describe("using sooner-resetting weekly quota first", () => {
+  const day = 24 * hour;
+  const config = { thresholdPercent: 10, weeklyThresholdPercent: 2 };
+  // The user's Claude group: 5-hour left, weekly left, weekly resets in.
+  const marcos = account("marcos", 91, 98, 4 * day + 19 * hour);
+  const hauke = account("hauke", 85, 10, 2 * day + 20 * hour);
+  const claude2 = account("claude2", 100, 19, 4 * day + 12 * hour);
+  const marius = account("marius", 100, 0, 39 * minute);
+  const gill = account("marius.gill.etc", 27, 43, 5 * day + 23 * hour);
+  const nico = account("nico", 30, 88, 6 * day + 3 * hour);
+  const all = [marcos, hauke, claude2, marius, gill, nico];
+  const decide = (active: AutoSwitchAccountView, accounts: AutoSwitchAccountView[]) =>
+    chooseNextAccount(
+      input({ active, candidates: accounts.filter((value) => value.id !== active.id) }),
+    );
+  const next = (active: AutoSwitchAccountView, accounts: AutoSwitchAccountView[]) =>
+    nextAutoSwitchTarget({ now, config, activeAccountId: active.id, accounts });
+
+  it("switches from a healthy account to the one whose weekly resets first", () => {
+    const decision = decide(marcos, all);
+    expect(decision).toMatchObject(switchTo("hauke", "expiring"));
+    // "Best option" names the same account, and says the switch is due now.
+    expect(next(marcos, all)).toEqual({ accountId: id("hauke"), due: true });
+  });
+
+  it("moves on in weekly-reset order as each account reaches the weekly threshold", () => {
+    const spentHauke = account("hauke", 85, 2, 2 * day + 20 * hour);
+    const afterHauke = [marcos, spentHauke, claude2, marius, gill, nico];
+    expect(decide(spentHauke, afterHauke)).toMatchObject(switchTo("claude2", "weekly"));
+    // On claude2, the spent accounts are never targets, so it stays until its own threshold.
+    expect(decide(claude2, afterHauke)).toMatchObject(stay("healthy"));
+    expect(next(claude2, afterHauke)).toEqual({ accountId: id("marcos"), due: false });
+    const spentClaude2 = account("claude2", 100, 2, 4 * day + 12 * hour);
+    const afterClaude2 = [marcos, spentHauke, spentClaude2, marius, gill, nico];
+    expect(decide(spentClaude2, afterClaude2)).toMatchObject(switchTo("marcos", "weekly"));
+    const gillReady = account("marius.gill.etc", 80, 43, 5 * day + 23 * hour);
+    const spentMarcos = account("marcos", 91, 2, 4 * day + 19 * hour);
+    const afterMarcos = [spentMarcos, spentHauke, spentClaude2, marius, gillReady, nico];
+    expect(decide(spentMarcos, afterMarcos)).toMatchObject(switchTo("marius.gill.etc", "weekly"));
+    const spentGill = account("marius.gill.etc", 80, 2, 5 * day + 23 * hour);
+    const nicoReady = account("nico", 80, 88, 6 * day + 3 * hour);
+    expect(
+      decide(spentGill, [spentMarcos, spentHauke, spentClaude2, marius, spentGill, nicoReady]),
+    ).toMatchObject(switchTo("nico", "weekly"));
+  });
+
+  it("never switches back to an account at its weekly threshold", () => {
+    const spentHauke = account("hauke", 85, 2, 2 * day + 20 * hour);
+    const almostHauke = account("hauke", 85, 5, 2 * day + 20 * hour);
+    // Proactive: an account within 3 points of the threshold is never a target...
+    expect(decide(claude2, [claude2, account("hauke", 85, 4, 2 * day + 20 * hour)])).toMatchObject(
+      stay("healthy"),
+    );
+    // ...and one that is a target stays active until its own weekly threshold, then moves on.
+    expect(decide(almostHauke, [almostHauke, claude2])).toMatchObject(stay("healthy"));
+    expect(decide(spentHauke, [spentHauke, claude2])).toMatchObject(switchTo("claude2", "weekly"));
+    expect(decide(claude2, [spentHauke, claude2])).toMatchObject(stay("healthy"));
+  });
+
+  it("explains a stay when the sooner account's 5-hour limit is low, and wakes at its reset", () => {
+    const lowSession = account("claude2", 12, 40, 2 * day, {
+      usage: {
+        checkedAt: iso(0),
+        windows: [window("session", 12, 19 * minute), window("weekly", 40, 2 * day)],
+      },
+    });
+    const decision = decide(marcos, [marcos, lowSession]);
+    expect(decision).toMatchObject(stay("healthy", now + 19 * minute));
+    expect(decision.reason).toBe(
+      "Keeping marcos. claude2 resets sooner but its 5-hour limit is low; switching when it resets in 19m.",
+    );
+  });
+
+  it("explains a stay when the sooner account has too little weekly left", () => {
+    const decision = decide(marcos, [marcos, account("claude2", 100, 4, 2 * day)]);
+    expect(decision).toMatchObject(stay("healthy"));
+    expect(decision.reason).toBe(
+      "Keeping marcos. claude2 resets sooner but only has 4% weekly left.",
+    );
+    expect(next(marcos, [marcos, account("claude2", 100, 4, 2 * day)])).toBeUndefined();
+  });
+
+  it("says which account a dwell is holding a proactive switch for", () => {
+    const decision = chooseNextAccount(
+      input({ active: marcos, candidates: all.slice(1), lastSwitchAt: now - 2 * minute }),
+    );
+    expect(decision).toMatchObject(stay("dwell", now + 3 * minute));
+    expect(decision.reason).toBe(
+      "Switching from marcos to hauke in 3m: its weekly limit resets sooner (2d 20h).",
+    );
+  });
+
+  it("marks the next account due when the active account is at a threshold", () => {
+    const spentHauke = account("hauke", 85, 2, 2 * day + 20 * hour);
+    expect(next(spentHauke, [spentHauke, claude2, marcos])).toEqual({
+      accountId: id("claude2"),
+      due: true,
     });
   });
 });

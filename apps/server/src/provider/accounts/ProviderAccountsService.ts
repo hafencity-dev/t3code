@@ -28,7 +28,7 @@ import {
   createProviderAccountActivityLog,
   type ProviderAccountActivityRecord,
 } from "./ProviderAccountActivityLog.ts";
-import { nextAutoSwitchAccountId } from "./autoSwitchPolicy.ts";
+import { nextAutoSwitchTarget } from "./autoSwitchPolicy.ts";
 import { makeProviderAccountWindowPrimer } from "./ProviderAccountWindowPrimer.ts";
 import {
   claudeWindowPrimeLaunch,
@@ -699,7 +699,7 @@ const make = (
             const original = duplicateOf(entry);
             return { ...accounts[index]!, ...(original ? { duplicateOf: original } : {}) };
           });
-          const nextAccountId = nextAutoSwitchAccountId({
+          const next = nextAutoSwitchTarget({
             now,
             config: automatic,
             activeAccountId: ProviderAccountId.make(state.activeAccountId),
@@ -752,7 +752,8 @@ const make = (
                   },
                 }
               : {}),
-            ...(nextAccountId ? { nextAccountId } : {}),
+            ...(next ? { nextAccountId: next.accountId } : {}),
+            ...(next?.due ? { nextAccountDue: true as const } : {}),
             accounts: groupAccounts,
             ...(warning ? { warning } : {}),
           };

@@ -71,14 +71,23 @@ export function accountTone(account: ProviderAccount, now: number) {
 }
 
 /**
- * Why the "Best option" account is next. The server picks it (`group.nextAccountId`) with the
- * auto-switch ranking, so the badge and auto-switch never disagree.
+ * Why the "Best option" account is next, and when. The server picks it (`group.nextAccountId`)
+ * with the auto-switch ranking, so the badge and auto-switch never disagree; `nextAccountDue`
+ * says a switch to it is due now rather than once the active account runs low.
  */
-export function nextAccountReason(account: ProviderAccount, now: number) {
+export function nextAccountReason(
+  account: ProviderAccount,
+  group: Pick<ProviderAccountGroup, "accounts" | "nextAccountDue">,
+  now: number,
+) {
   const { tightest } = accountUsageCell(account.usage?.windows ?? [], "weekly");
   const at = tightest?.resetsAt ? Date.parse(tightest.resetsAt) : Number.NaN;
   const reset = Number.isFinite(at) && at > now ? ` (${formatDuration(at - now)})` : "";
-  return `Next up: its weekly limit resets soonest${reset} with enough left.`;
+  const active = group.accounts.find((candidate) => candidate.active)?.label;
+  const when = group.nextAccountDue
+    ? "Next up now"
+    : `Next up when ${active ?? "the active account"} runs low`;
+  return `${when}: its weekly limit resets soonest${reset} with enough left.`;
 }
 
 /** Stable display order: Default first, then the server's creation order. Never re-sorts. */
