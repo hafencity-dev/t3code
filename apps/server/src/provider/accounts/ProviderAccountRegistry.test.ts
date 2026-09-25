@@ -70,8 +70,13 @@ describe("ProviderAccountRegistry", () => {
     expect(await fresh.getAutoSwitch("claudeAgent")).toEqual({
       enabled: false,
       thresholdPercent: 10,
+      weeklyThresholdPercent: 2,
     });
-    expect(await fresh.getAutoSwitch("codex")).toEqual({ enabled: false, thresholdPercent: 10 });
+    expect(await fresh.getAutoSwitch("codex")).toEqual({
+      enabled: false,
+      thresholdPercent: 10,
+      weeklyThresholdPercent: 2,
+    });
     await expect(NodeFSP.stat(registryPath())).rejects.toMatchObject({ code: "ENOENT" });
     await fresh.list("claudeAgent", shared);
     const before = await NodeFSP.readFile(registryPath(), "utf8");
@@ -80,6 +85,7 @@ describe("ProviderAccountRegistry", () => {
     expect(await reopened.getAutoSwitch("claudeAgent")).toEqual({
       enabled: false,
       thresholdPercent: 10,
+      weeklyThresholdPercent: 2,
     });
     expect(await NodeFSP.readFile(registryPath(), "utf8")).toBe(before);
   });
@@ -106,9 +112,14 @@ describe("ProviderAccountRegistry", () => {
     expect(await reopened.getAutoSwitch("claudeAgent")).toEqual({
       enabled: true,
       thresholdPercent: 5,
+      weeklyThresholdPercent: 2,
       lastSwitch: expectedLastSwitch,
     });
-    expect(await reopened.getAutoSwitch("codex")).toEqual({ enabled: false, thresholdPercent: 50 });
+    expect(await reopened.getAutoSwitch("codex")).toEqual({
+      enabled: false,
+      thresholdPercent: 50,
+      weeklyThresholdPercent: 2,
+    });
     expect(await reopened.get("claudeAgent-default")).toMatchObject({ label: "Personal" });
     const raw = await NodeFSP.readFile(registryPath(), "utf8");
     expect(raw).not.toContain("never-persist");
@@ -145,6 +156,7 @@ describe("ProviderAccountRegistry", () => {
     expect(await registry.getAutoSwitch("codex")).toEqual({
       enabled: true,
       thresholdPercent: 10,
+      weeklyThresholdPercent: 2,
       lastSwitch,
     });
     const snapshot = await registry.getAutoSwitch("codex");
@@ -156,6 +168,7 @@ describe("ProviderAccountRegistry", () => {
     expect(await reopened.getAutoSwitch("codex")).toEqual({
       enabled: true,
       thresholdPercent: 10,
+      weeklyThresholdPercent: 2,
       lastSwitch,
     });
   });
@@ -173,11 +186,55 @@ describe("ProviderAccountRegistry", () => {
       expect(await registry.getAutoSwitch("codex")).toEqual({
         enabled: true,
         thresholdPercent: 20,
+        weeklyThresholdPercent: 2,
       });
       expect(await registry.updateAutoSwitch("codex", { enabled: false })).toEqual({
         enabled: false,
         thresholdPercent: 20,
+        weeklyThresholdPercent: 2,
       });
+    },
+  );
+
+  it("defaults the weekly threshold to 2% for files written before it existed", async () => {
+    await NodeFSP.mkdir(NodePath.dirname(registryPath()), { recursive: true });
+    await NodeFSP.writeFile(
+      registryPath(),
+      JSON.stringify({
+        version: 1,
+        accounts: [],
+        sharedHomes: {},
+        autoSwitch: { codex: { enabled: true, thresholdPercent: 15 } },
+      }),
+    );
+    const registry = await createProviderAccountRegistry({ stateDir });
+    expect(await registry.getAutoSwitch("codex")).toEqual({
+      enabled: true,
+      thresholdPercent: 15,
+      weeklyThresholdPercent: 2,
+    });
+    // Each threshold changes alone.
+    expect(await registry.updateAutoSwitch("codex", { weeklyThresholdPercent: 5 })).toEqual({
+      enabled: true,
+      thresholdPercent: 15,
+      weeklyThresholdPercent: 5,
+    });
+    const reopened = await createProviderAccountRegistry({ stateDir });
+    expect(await reopened.getAutoSwitch("codex")).toMatchObject({
+      thresholdPercent: 15,
+      weeklyThresholdPercent: 5,
+    });
+  });
+
+  it.each([0, 26, 2.5, NaN])(
+    "rejects invalid weekly threshold %s",
+    async (weeklyThresholdPercent) => {
+      const registry = await createProviderAccountRegistry({ stateDir });
+      await registry.updateAutoSwitch("codex", { enabled: true, weeklyThresholdPercent: 3 });
+      await expect(
+        registry.updateAutoSwitch("codex", { weeklyThresholdPercent }),
+      ).rejects.toBeInstanceOf(ProviderAccountRegistryGuardError);
+      expect(await registry.getAutoSwitch("codex")).toMatchObject({ weeklyThresholdPercent: 3 });
     },
   );
 

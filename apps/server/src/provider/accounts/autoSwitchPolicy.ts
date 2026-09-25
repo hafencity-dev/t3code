@@ -3,6 +3,7 @@ import type {
   ProviderAccount,
   ProviderAccountId,
   ServerProviderUsageLimits,
+  ServerProviderUsageWindow,
 } from "@t3tools/contracts";
 import { accountGatingWindows } from "@t3tools/shared/fork/accountUsageWindows";
 
@@ -11,7 +12,7 @@ const hour = 60 * minute;
 const targetMarginPercent = 10;
 const usageFreshMs = 5 * minute;
 const proactiveMinLongLeftPercent = 20;
-const proactiveDwellMs = 30 * minute;
+const proactiveDwellMs = 5 * minute;
 const maxProbe = 2;
 /** A reset settles this long before the new window shows up in usage. */
 const resetGraceMs = minute;
@@ -21,12 +22,35 @@ export interface AutoSwitchAccountView {
   readonly label: string;
   readonly status: ProviderAccount["status"];
   readonly loginInProgress: boolean;
+  /** A second saved copy of another account's login shares its quota, so it is never a target. */
+  readonly duplicateOf?: ProviderAccountId | undefined;
   readonly usage?: ServerProviderUsageLimits | undefined;
+}
+
+export interface AutoSwitchThresholds {
+  /** Percent left on a 5-hour window at which the account counts as low. */
+  readonly thresholdPercent: number;
+  /** Percent left on a weekly (or monthly) window; low so weekly quota gets used up. */
+  readonly weeklyThresholdPercent: number;
+}
+
+const thresholdFor = (kind: ServerProviderUsageWindow["kind"], thresholds: AutoSwitchThresholds) =>
+  kind === "session" ? thresholds.thresholdPercent : thresholds.weeklyThresholdPercent;
+
+/** Whether any gating window of the active account is at its switch threshold. */
+export function atAutoSwitchThreshold(
+  windows: ReadonlyArray<Pick<ServerProviderUsageWindow, "id" | "kind" | "usedPercent">>,
+  thresholds: AutoSwitchThresholds,
+) {
+  return accountGatingWindows(windows).some(
+    (window) =>
+      window.kind !== "other" && 100 - window.usedPercent <= thresholdFor(window.kind, thresholds),
+  );
 }
 
 export interface AutoSwitchInput {
   readonly now: number;
-  readonly config: { readonly enabled: boolean; readonly thresholdPercent: number };
+  readonly config: AutoSwitchThresholds & { readonly enabled: boolean };
   readonly active: AutoSwitchAccountView;
   readonly candidates: ReadonlyArray<AutoSwitchAccountView>;
   readonly probed: ReadonlySet<ProviderAccountId>;
@@ -60,7 +84,7 @@ export type AutoSwitchDecision =
 function summarize(
   account: AutoSwitchAccountView,
   now: number,
-  threshold: number,
+  thresholds: AutoSwitchThresholds,
   probed: ReadonlySet<ProviderAccountId>,
 ) {
   let rolledOver = false;
@@ -87,7 +111,7 @@ function summarize(
       .filter((window) => window.left === sessionLeft)
       .map((window) => window.reset ?? Infinity),
   );
-  const blockers = windows.filter((window) => window.left <= threshold);
+  const blockers = windows.filter((window) => window.left <= thresholdFor(window.kind, thresholds));
   return {
     account,
     known:
@@ -106,7 +130,7 @@ function summarize(
     longResetAt: Math.min(...longs.map((window) => window.reset ?? Infinity)),
     deadline: Math.min(
       ...longs
-        .filter((window) => window.left > threshold)
+        .filter((window) => window.left > thresholds.weeklyThresholdPercent)
         .map((window) => window.reset ?? Infinity),
     ),
     usableAgainAt:
@@ -116,18 +140,60 @@ function summarize(
   };
 }
 
+type Summary = ReturnType<typeof summarize>;
+
+const isSwitchCandidate = (account: AutoSwitchAccountView, activeId: ProviderAccountId) =>
+  account.id !== activeId &&
+  account.status === "ready" &&
+  !account.loginInProgress &&
+  account.duplicateOf === undefined;
+
+/** Both limits clear their thresholds by the target margin, so a switch cannot flap back. */
+const hasStrictHeadroom = (candidate: Summary, thresholds: AutoSwitchThresholds) =>
+  candidate.sessionLeft >= thresholds.thresholdPercent + targetMarginPercent &&
+  candidate.longLeft >= thresholds.weeklyThresholdPercent + targetMarginPercent;
+
+/** Earliest weekly deadline (hour buckets) first, then more weekly, then more 5-hour left. */
+const compareCandidates = (a: Summary, b: Summary) => {
+  const bucketA = Math.floor(a.deadline / hour);
+  const bucketB = Math.floor(b.deadline / hour);
+  return (
+    (bucketA === bucketB ? 0 : bucketA < bucketB ? -1 : 1) ||
+    b.longLeft - a.longLeft ||
+    b.sessionLeft - a.sessionLeft ||
+    (a.account.id < b.account.id ? -1 : a.account.id > b.account.id ? 1 : 0)
+  );
+};
+
+/**
+ * The account auto-switch would move to next, by the same eligibility and ranking a
+ * threshold switch uses first. Ignores freshness, dwell, and the breaker: it answers "who is
+ * next", so the account switcher's "Best option" can never disagree with auto-switch.
+ */
+export function nextAutoSwitchAccountId(input: {
+  readonly now: number;
+  readonly config: AutoSwitchThresholds;
+  readonly activeAccountId: ProviderAccountId | undefined;
+  readonly accounts: ReadonlyArray<AutoSwitchAccountView>;
+}): ProviderAccountId | undefined {
+  const { activeAccountId } = input;
+  if (activeAccountId === undefined) return undefined;
+  return input.accounts
+    .filter((account) => isSwitchCandidate(account, activeAccountId))
+    .map((account) => summarize(account, input.now, input.config, new Set()))
+    .filter((candidate) => candidate.known && hasStrictHeadroom(candidate, input.config))
+    .sort(compareCandidates)[0]?.account.id;
+}
+
 /** All time comes from the caller; a successful probe may confirm a rolled-over window. */
 export function chooseNextAccount(input: AutoSwitchInput): AutoSwitchDecision {
   const { now, active, config, probed } = input;
   const threshold = config.thresholdPercent;
-  type Summary = ReturnType<typeof summarize>;
-  const current = summarize(active, now, threshold, probed);
+  const weeklyThreshold = config.weeklyThresholdPercent;
+  const current = summarize(active, now, config, probed);
   const candidates = input.candidates
-    .filter(
-      (account) =>
-        account.id !== active.id && account.status === "ready" && !account.loginInProgress,
-    )
-    .map((account) => summarize(account, now, threshold, probed));
+    .filter((account) => isSwitchCandidate(account, active.id))
+    .map((account) => summarize(account, now, config, probed));
   const stay = (
     code: Extract<AutoSwitchDecision, { kind: "stay" }>["code"],
     reason: string,
@@ -151,25 +217,17 @@ export function chooseNextAccount(input: AutoSwitchInput): AutoSwitchDecision {
     accountIds: accounts.map(({ account }) => account.id),
     reason: `Checking ${accounts.map(({ account }) => account.label).join(" and ")} before switching from ${active.label}; usage must be confirmed within 5 minutes.`,
   });
-  const compare = (a: Summary, b: Summary) => {
-    const bucketA = Math.floor(a.deadline / hour);
-    const bucketB = Math.floor(b.deadline / hour);
-    return (
-      (bucketA === bucketB ? 0 : bucketA < bucketB ? -1 : 1) ||
-      b.longLeft - a.longLeft ||
-      b.sessionLeft - a.sessionLeft ||
-      (a.account.id < b.account.id ? -1 : a.account.id > b.account.id ? 1 : 0)
-    );
-  };
+  const compare = compareCandidates;
   const hasHeadroom = (candidate: Summary, strict: boolean) =>
-    candidate.sessionLeft >= threshold + (strict ? targetMarginPercent : 1) &&
-    candidate.longLeft >= threshold + (strict ? targetMarginPercent : 1) &&
-    // Relaxed session headroom only matters when the session is what ran low.
-    (strict ||
-      hard ||
-      need !== "session" ||
-      !current.hasSession ||
-      candidate.sessionLeft >= current.sessionLeft + targetMarginPercent);
+    strict
+      ? hasStrictHeadroom(candidate, config)
+      : candidate.sessionLeft >= threshold + 1 &&
+        candidate.longLeft > weeklyThreshold &&
+        // Relaxed session headroom only matters when the session is what ran low.
+        (hard ||
+          need !== "session" ||
+          !current.hasSession ||
+          candidate.sessionLeft >= current.sessionLeft + targetMarginPercent);
   const rank = (strict: boolean) =>
     candidates
       .filter(
@@ -195,14 +253,14 @@ export function chooseNextAccount(input: AutoSwitchInput): AutoSwitchDecision {
   if (!signedOut && !current.known)
     return stay(
       "healthy",
-      `Waiting for usage from ${active.label} before switching at ${threshold}% left.`,
+      `Waiting for usage from ${active.label} before switching at ${threshold}% 5-hour or ${weeklyThreshold}% weekly left.`,
     );
   const hard = signedOut || current.sessionLeft <= 0 || current.longLeft <= 0;
   const need: "signedOut" | "session" | "weekly" | undefined = signedOut
     ? "signedOut"
     : current.sessionLeft <= threshold
       ? "session"
-      : current.longLeft <= threshold
+      : current.longLeft <= weeklyThreshold
         ? "weekly"
         : undefined;
   const switchTo = (
@@ -215,7 +273,7 @@ export function chooseNextAccount(input: AutoSwitchInput): AutoSwitchDecision {
     reason:
       trigger === "expiring"
         ? `${target.account.label}'s weekly limit resets in ${duration(target.deadline)}, sooner than ${active.label}'s (${Number.isFinite(current.deadline) ? duration(current.deadline) : "no known reset"}). Using ${target.account.label} first so its quota doesn't expire unused.`
-        : `${active.label} ${trigger === "signedOut" ? "is signed out or unavailable" : `has ${trigger === "session" ? current.sessionLeft : current.longLeft}% of its ${trigger} limit left`}; switching to ${target.account.label} (${target.sessionLeft}% session left, ${target.longLeft}% long-term left; resets in ${duration(target.deadline)}).`,
+        : `${active.label} ${trigger === "signedOut" ? "is signed out or unavailable" : trigger === "session" ? `has ${current.sessionLeft}% of its 5-hour limit left` : `has ${current.longLeft}% of its weekly limit left`}; switching to ${target.account.label} (${trigger === "weekly" ? "" : `5-hour ${target.sessionLeft}% left; `}weekly resets in ${duration(target.deadline)}, ${target.longLeft}% left).`,
   });
   // At or below the threshold, any healthy candidate wins; the target margin prevents flapping.
   if (need !== undefined) {
@@ -254,7 +312,7 @@ export function chooseNextAccount(input: AutoSwitchInput): AutoSwitchDecision {
     );
     return stay(
       "allExhausted",
-      `No account has enough confirmed quota above ${threshold}% to replace ${active.label}.${first === undefined ? " Waiting for usable account usage." : ` ${first.account.label} frees up first (blocking limits reset in ${duration(first.usableAgainAt)}).`}`,
+      `No account has enough confirmed quota above the ${threshold}% 5-hour and ${weeklyThreshold}% weekly thresholds to replace ${active.label}.${first === undefined ? " Waiting for usable account usage." : ` ${first.account.label} frees up first (blocking limits reset in ${duration(first.usableAgainAt)}).`}`,
       Math.min(first?.usableAgainAt ?? Infinity, probeWakeAt),
     );
   }
@@ -273,7 +331,7 @@ export function chooseNextAccount(input: AutoSwitchInput): AutoSwitchDecision {
   if (now - lastSwitchAt < proactiveDwellMs)
     return stay(
       "dwell",
-      `Keeping ${active.label} for at least 30 minutes after the last switch.`,
+      `Keeping ${active.label} for at least ${proactiveDwellMs / minute} minutes after the last switch.`,
       lastSwitchAt + proactiveDwellMs,
     );
   // Use up quota that resets sooner first. A fresh reset moves an account's deadline a week
@@ -292,7 +350,7 @@ export function chooseNextAccount(input: AutoSwitchInput): AutoSwitchDecision {
           candidate.known &&
           !input.probeBlocked?.has(candidate.account.id) &&
           resetsSooner(candidate) &&
-          candidate.longLeft >= threshold + targetMarginPercent &&
+          candidate.longLeft >= weeklyThreshold + targetMarginPercent &&
           candidate.sessionLeft < threshold + targetMarginPercent,
       )
       .map((candidate) => candidate.sessionResetAt)
@@ -311,7 +369,7 @@ export function chooseNextAccount(input: AutoSwitchInput): AutoSwitchDecision {
   );
   return stay(
     "healthy",
-    `${active.label} has ${current.sessionLeft}% session and ${current.longLeft}% long-term quota left; no switch needed.`,
+    `${active.label} has ${current.sessionLeft}% 5-hour and ${current.longLeft}% weekly quota left; no switch needed.`,
     Math.min(sessionWakeAt, weeklyWakeAt),
   );
 }

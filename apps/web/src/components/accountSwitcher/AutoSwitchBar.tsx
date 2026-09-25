@@ -26,8 +26,49 @@ import { providerAccountsEnvironment } from "./state";
 import { SwitchAccountAction } from "./SwitchAccountAction";
 import { WindowPrimerRow } from "./WindowPrimerRow";
 
+const SESSION_THRESHOLDS = [5, 10, 15, 20, 25];
+const WEEKLY_THRESHOLDS = [1, 2, 3, 5, 10];
+
+/** A percent-left select; a value saved outside the presets still shows. */
+function ThresholdSelect({
+  value,
+  options,
+  disabled,
+  label,
+  onChange,
+}: {
+  value: number;
+  options: readonly number[];
+  disabled: boolean;
+  label: string;
+  onChange: (value: number) => void;
+}) {
+  const values = [...new Set([...options, value])].sort((a, b) => a - b);
+  return (
+    <Select
+      value={value}
+      disabled={disabled}
+      items={values.map((item) => ({ value: item, label: `${item}%` }))}
+      onValueChange={(next) => {
+        if (next !== null && next !== value) onChange(next);
+      }}
+    >
+      <SelectTrigger size="xs" aria-label={label}>
+        <SelectValue />
+      </SelectTrigger>
+      <SelectPopup>
+        {values.map((item) => (
+          <SelectItem key={item} value={item}>
+            {item}%
+          </SelectItem>
+        ))}
+      </SelectPopup>
+    </Select>
+  );
+}
+
 /**
- * Two fixed lines at the bottom of a provider card: the toggle and threshold, then status.
+ * Two fixed lines at the bottom of a provider card: the toggle and thresholds, then status.
  * Claude cards add two more for starting 5-hour windows automatically.
  */
 export function AutoSwitchBar({
@@ -58,19 +99,14 @@ export function AutoSwitchBar({
     reportFailure: false,
   });
   const provider = ACCOUNT_DRIVER_LABELS[group.driver];
-  const update = async (enabled: boolean, thresholdPercent?: number) => {
+  const update = async (enabled: boolean, thresholds?: Parameters<typeof autoSwitchInput>[3]) => {
     if (pending.current) return;
     pending.current = true;
     setSaving(true);
     try {
       const result = await setAutoSwitch({
         environmentId,
-        input: autoSwitchInput(
-          group.driver,
-          enabled,
-          autoSwitch.thresholdPercent,
-          thresholdPercent,
-        ),
+        input: autoSwitchInput(group.driver, enabled, autoSwitch, thresholds),
       });
       if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
         const error = squashAtomCommandFailure(result);
@@ -94,9 +130,6 @@ export function AutoSwitchBar({
       : readyCount < 2
         ? "Add a second signed-in account to use auto-switch."
         : undefined;
-  const thresholds = [...new Set([5, 10, 15, 20, 25, autoSwitch.thresholdPercent])].sort(
-    (a, b) => a - b,
-  );
   const lastSwitch = status.showLastSwitch ? autoSwitch.lastSwitch : undefined;
   const labelOf = (id: ProviderAccountId) =>
     group.accounts.find((account) => account.id === id)?.label ?? "a removed account";
@@ -134,27 +167,27 @@ export function AutoSwitchBar({
         </Tooltip>
         {autoSwitch.enabled ? (
           <span className="flex min-w-0 items-center gap-1.5 text-muted-foreground">
-            <span className="truncate">when the active account has</span>
-            <Select
+            <span className="truncate">5-hour at</span>
+            <ThresholdSelect
               value={autoSwitch.thresholdPercent}
+              options={SESSION_THRESHOLDS}
               disabled={saving}
-              items={thresholds.map((value) => ({ value, label: `${value}%` }))}
-              onValueChange={(value) => {
-                if (value !== null) void update(true, value);
-              }}
-            >
-              <SelectTrigger size="xs" aria-label={`${provider} auto-switch threshold`}>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectPopup>
-                {thresholds.map((value) => (
-                  <SelectItem key={value} value={value}>
-                    {value}%
-                  </SelectItem>
-                ))}
-              </SelectPopup>
-            </Select>
-            <span>left</span>
+              label={`${provider} 5-hour auto-switch threshold`}
+              onChange={(thresholdPercent) => void update(true, { thresholdPercent })}
+            />
+            <Tooltip>
+              <TooltipTrigger render={<span className="truncate" />}>Weekly at</TooltipTrigger>
+              <TooltipPopup>
+                Switches before the weekly limit runs out, so no chat stops mid-turn.
+              </TooltipPopup>
+            </Tooltip>
+            <ThresholdSelect
+              value={autoSwitch.weeklyThresholdPercent}
+              options={WEEKLY_THRESHOLDS}
+              disabled={saving}
+              label={`${provider} weekly auto-switch threshold`}
+              onChange={(weeklyThresholdPercent) => void update(true, { weeklyThresholdPercent })}
+            />
           </span>
         ) : null}
         {status.badge ? (

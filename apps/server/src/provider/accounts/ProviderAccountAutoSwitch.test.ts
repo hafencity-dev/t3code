@@ -30,7 +30,12 @@ const group = (
     switchMode: driver === "claudeAgent" ? "hot" : "restart",
     instanceId: driver,
     activeAccountId: personal,
-    autoSwitch: { enabled: true, thresholdPercent: 10, state: "watching" },
+    autoSwitch: {
+      enabled: true,
+      thresholdPercent: 10,
+      weeklyThresholdPercent: 2,
+      state: "watching",
+    },
     accounts: [
       {
         id: personal,
@@ -114,6 +119,7 @@ const makeHarness = Effect.fnUntraced(function* (options?: {
       config: {
         enabled: options?.enabled ?? true,
         thresholdPercent: 10,
+        weeklyThresholdPercent: 2,
       },
       group: group(options?.used, options?.candidateUsed, options?.reset, options?.driver),
       loginInProgress: [],
@@ -162,7 +168,11 @@ const makeHarness = Effect.fnUntraced(function* (options?: {
                 switchMode: driver === "claudeAgent" ? "hot" : "restart",
                 accounts: snapshot.group.accounts.map((account) => ({ ...account, driver })),
               }),
-              config: { enabled: state.claudeEnabled, thresholdPercent: 10 },
+              config: {
+                enabled: state.claudeEnabled,
+                thresholdPercent: 10,
+                weeklyThresholdPercent: 2,
+              },
             };
       }),
     refresh: (ids) =>
@@ -318,7 +328,10 @@ describe("ProviderAccountAutoSwitch", () => {
       expect(h.state.idleSubscriptions).toBe(1);
       expect(h.reactor.needsIdle("codex")).toBe(false);
       expect(h.reactor.needsIdle("claudeAgent")).toBe(false);
-      h.state.snapshot = { ...h.state.snapshot, config: { enabled: false, thresholdPercent: 10 } };
+      h.state.snapshot = {
+        ...h.state.snapshot,
+        config: { enabled: false, thresholdPercent: 10, weeklyThresholdPercent: 2 },
+      };
       yield* h.reactor.notify("codex");
       yield* completed(h.completions);
       expect(yield* Deferred.isDone(h.idleStopped)).toBe(false);
@@ -436,7 +449,10 @@ describe("ProviderAccountAutoSwitch", () => {
       expect(h.state.subscriptions).toBe(0);
       expect(h.state.probes).toEqual([]);
       expect(h.reactor.getState("codex")).toEqual({ state: "off" });
-      h.state.snapshot = { ...h.state.snapshot, config: { enabled: true, thresholdPercent: 10 } };
+      h.state.snapshot = {
+        ...h.state.snapshot,
+        config: { enabled: true, thresholdPercent: 10, weeklyThresholdPercent: 2 },
+      };
       yield* h.reactor.notify("codex");
       expect((yield* Queue.take(h.events))._tag).toBe("switched");
       expect(h.state.subscriptions).toBe(1);
@@ -511,7 +527,10 @@ describe("ProviderAccountAutoSwitch", () => {
       const h = yield* makeHarness({ used: 100, candidateUsed: 100, reset: 60_000 });
       yield* Queue.take(h.events);
       yield* completed(h.completions, 2);
-      h.state.snapshot = { ...h.state.snapshot, config: { enabled: false, thresholdPercent: 10 } };
+      h.state.snapshot = {
+        ...h.state.snapshot,
+        config: { enabled: false, thresholdPercent: 10, weeklyThresholdPercent: 2 },
+      };
       yield* h.reactor.clear("codex");
       yield* h.reactor.notify("codex");
       yield* completed(h.completions);

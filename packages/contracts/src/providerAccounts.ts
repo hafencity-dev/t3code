@@ -59,9 +59,17 @@ export const ProviderAccountAutoSwitchThresholdPercent = Schema.Int.check(
 export type ProviderAccountAutoSwitchThresholdPercent =
   typeof ProviderAccountAutoSwitchThresholdPercent.Type;
 
+/** Weekly quota left at which auto-switch moves on, kept low so weekly quota gets used up. */
+export const ProviderAccountAutoSwitchWeeklyThresholdPercent = Schema.Int.check(
+  Schema.isBetween({ minimum: 1, maximum: 25 }),
+);
+export type ProviderAccountAutoSwitchWeeklyThresholdPercent =
+  typeof ProviderAccountAutoSwitchWeeklyThresholdPercent.Type;
+
 export const ProviderAccountAutoSwitch = Schema.Struct({
   enabled: Schema.Boolean,
   thresholdPercent: ProviderAccountAutoSwitchThresholdPercent,
+  weeklyThresholdPercent: ProviderAccountAutoSwitchWeeklyThresholdPercent,
   state: Schema.Literals(["off", "watching", "pending", "waiting", "paused"]),
   message: Schema.optional(TrimmedNonEmptyString),
   pendingTargetAccountId: Schema.optional(ProviderAccountId),
@@ -114,6 +122,8 @@ export const ProviderAccountGroup = Schema.Struct({
   activeAccountId: Schema.optional(ProviderAccountId),
   accounts: Schema.Array(ProviderAccount),
   autoSwitch: ProviderAccountAutoSwitch,
+  /** Where auto-switch would move next, whether or not it is on; the "Best option" badge. */
+  nextAccountId: Schema.optional(ProviderAccountId),
   windowPrimer: Schema.optional(ProviderAccountWindowPrimer),
   warning: Schema.optional(TrimmedNonEmptyString),
 });
@@ -194,6 +204,7 @@ export const ProviderAccountsSetAutoSwitchInput = Schema.Struct({
   driver: ProviderAccountDriver,
   enabled: Schema.Boolean,
   thresholdPercent: Schema.optional(ProviderAccountAutoSwitchThresholdPercent),
+  weeklyThresholdPercent: Schema.optional(ProviderAccountAutoSwitchWeeklyThresholdPercent),
 });
 export type ProviderAccountsSetAutoSwitchInput = typeof ProviderAccountsSetAutoSwitchInput.Type;
 export const ProviderAccountsSetWindowPrimerInput = Schema.Struct({

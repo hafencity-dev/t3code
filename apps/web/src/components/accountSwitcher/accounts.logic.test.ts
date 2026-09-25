@@ -13,6 +13,7 @@ import {
   accountFreshness,
   accountPrimaryAction,
   autoSwitchInput,
+  nextAccountReason,
   autoSwitchNowBlockedReason,
   endRename,
   endSwitch,
@@ -32,7 +33,6 @@ import {
   autoRefreshAccountId,
   autoSwitchStatus,
   isUsageRefreshCoolingDown,
-  bestAccountId,
   formatAgo,
   orderedAccounts,
   plural,
@@ -129,8 +129,6 @@ describe("account choices", () => {
     });
     expect(remainingPercent(claude, now)).toBe(60);
     expect(accountTone(claude, now)).toBe("secondary");
-    // A low Fable weekly alone never recommends another account.
-    expect(bestAccountId([{ ...claude, active: true }, account("fresh", 0)], now)).toBeNull();
     // Without the all-model weekly, the model-scoped one fills the column.
     expect(accountUsageCellView([fable], "weekly", now, true).remaining).toBe(12);
     expect(
@@ -176,18 +174,22 @@ describe("account choices", () => {
     expect(remainingPercent(tight, NOW)).toBe(6);
     expect(accountTone(tight, NOW)).toBe("error");
   });
-  it("recommends only a ready, known, strictly better inactive account when active is low", () => {
-    const active = account("active", 75, { active: true });
-    const better = account("better", 30);
-    expect(
-      bestAccountId(
-        [active, account("signed-out", 0, { status: "signedOut" }), account("unknown"), better],
-        NOW,
-      ),
-    ).toBe(better.id);
-    expect(bestAccountId([account("active", 74, { active: true }), better], NOW)).toBeNull();
-    expect(bestAccountId([active, account("equal", 75)], NOW)).toBeNull();
-    expect(bestAccountId([account("active", undefined, { active: true }), better], NOW)).toBeNull();
+  it("explains the server's next account by its weekly reset", () => {
+    const next = account("next", undefined, {
+      usage: {
+        checkedAt: "2026-09-23T12:00:00Z",
+        windows: [
+          window(0),
+          { ...window(81), id: "weekly", kind: "weekly", resetsAt: "2026-09-28T01:30:00Z" },
+        ],
+      },
+    });
+    expect(nextAccountReason(next, NOW)).toBe(
+      "Next up: its weekly limit resets soonest (4d 13h) with enough left.",
+    );
+    expect(nextAccountReason(account("no-reset", 20), NOW)).toBe(
+      "Next up: its weekly limit resets soonest with enough left.",
+    );
   });
   it("does not recommend unavailable data or treat it as zero usage", () => {
     const unavailable = account("unavailable", 0, {
@@ -198,7 +200,6 @@ describe("account choices", () => {
       },
     });
     expect(remainingPercent(unavailable, NOW)).toBeNull();
-    expect(bestAccountId([account("active", 90, { active: true }), unavailable], NOW)).toBeNull();
   });
   it("uses warning and error thresholds and marks non-ready accounts as errors", () => {
     expect(accountTone(account("a", 90), NOW)).toBe("error");
@@ -603,10 +604,9 @@ describe("row state", () => {
     expect(switchBlockedReason({}, "other")).toBe("Another switch is in progress.");
     expect(switchBlockedReason({}, "idle")).toBeUndefined();
   });
-  it("never recommends or probes a duplicate and counts it once", () => {
+  it("never probes a duplicate and counts it once", () => {
     const active = account("active", 90, { active: true });
     const copy = account("copy", 10, { duplicateOf: active.id });
-    expect(bestAccountId([active, copy], NOW)).toBeNull();
     expect(
       autoRefreshAccountId([account("copy", undefined, { duplicateOf: active.id })], 0),
     ).toBeNull();
@@ -623,7 +623,13 @@ describe("auto-switch status", () => {
   ) => ({
     switchMode,
     accounts: [active, target],
-    autoSwitch: { enabled: true, thresholdPercent: 10, state: "watching" as const, ...autoSwitch },
+    autoSwitch: {
+      enabled: true,
+      thresholdPercent: 10,
+      weeklyThresholdPercent: 2,
+      state: "watching" as const,
+      ...autoSwitch,
+    },
   });
   it("explains the feature while off, per switch mode", () => {
     expect(autoSwitchStatus(group({ enabled: false, state: "off" }), undefined)).toEqual({
@@ -711,6 +717,7 @@ describe("account switch modes", () => {
       autoSwitch: {
         enabled: true,
         thresholdPercent: 10,
+        weeklyThresholdPercent: 2,
         state: "pending" as const,
         pendingTargetAccountId: target.id,
       },
@@ -942,13 +949,21 @@ describe("audit regressions", () => {
     expect(resolveAccountsDevice(null, [], true)).toEqual({ environmentId: null, offlineId: null });
   });
 
-  it("sends a threshold only when it changes", () => {
-    expect(autoSwitchInput("codex", false, 10)).toEqual({ driver: "codex", enabled: false });
-    expect(autoSwitchInput("codex", true, 10, 10)).toEqual({ driver: "codex", enabled: true });
-    expect(autoSwitchInput("codex", true, 10, 15)).toEqual({
+  it("sends only the thresholds that change", () => {
+    const current = { thresholdPercent: 10, weeklyThresholdPercent: 2 };
+    expect(autoSwitchInput("codex", false, current)).toEqual({ driver: "codex", enabled: false });
+    expect(
+      autoSwitchInput("codex", true, current, { thresholdPercent: 10, weeklyThresholdPercent: 2 }),
+    ).toEqual({ driver: "codex", enabled: true });
+    expect(autoSwitchInput("codex", true, current, { thresholdPercent: 15 })).toEqual({
       driver: "codex",
       enabled: true,
       thresholdPercent: 15,
+    });
+    expect(autoSwitchInput("codex", true, current, { weeklyThresholdPercent: 5 })).toEqual({
+      driver: "codex",
+      enabled: true,
+      weeklyThresholdPercent: 5,
     });
   });
 
@@ -977,8 +992,6 @@ describe("audit regressions", () => {
       usage: { checkedAt: measuredAt, windows: [resetWindow(0, "2026-09-23T12:10:00Z")] },
     });
     expect(remainingPercent(onlyPassed, now)).toBeNull();
-    // Unknown after a reset is never recommended.
-    expect(bestAccountId([account("active", 90, { active: true }), onlyPassed], now)).toBeNull();
     expect(usageWindowTooltipLine(resetWindow(95, "2026-09-23T12:10:00Z"), now, false)).toBe(
       "5h: reset, not checked yet",
     );
@@ -1060,21 +1073,6 @@ describe("audit regressions", () => {
     expect(
       shouldToastAutoSwitch(seen, laptop, { _tag: "blocked", driver: "codex", reason: "x" }),
     ).toBe(false);
-  });
-
-  it("breaks a headroom tie by the soonest weekly reset", () => {
-    const withWeekly = (name: string, resetsAt: string) =>
-      account(name, undefined, {
-        usage: {
-          checkedAt: measuredAt,
-          windows: [window(20), { ...window(10), id: "weekly", kind: "weekly", resetsAt }],
-        },
-      });
-    const later = withWeekly("a-later", "2026-09-28T12:00:00Z");
-    const sooner = withWeekly("z-sooner", "2026-09-25T12:00:00Z");
-    expect(bestAccountId([account("active", 90, { active: true }), later, sooner], now)).toBe(
-      sooner.id,
-    );
   });
 
   it("names the server's gate, budget included, as when checks resume", () => {

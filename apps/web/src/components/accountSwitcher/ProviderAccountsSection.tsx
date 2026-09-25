@@ -22,7 +22,6 @@ import {
   ACCOUNT_DRIVER_LABELS,
   accountFreshness,
   accountSwitchState,
-  bestAccountId,
   duplicateKeeperLabel,
   endRename,
   endSwitch,
@@ -88,7 +87,6 @@ export function ProviderAccountsSection({
     const next = pending.nextId && menuTriggers.current.get(pending.nextId);
     (next || addButtonRef.current)?.focus();
   }, [serverAccounts]);
-  const best = bestAccountId(accounts, now);
   const readyCount = readyAccountCount(accounts);
   const onSwitchStart = (accountId: ProviderAccountId) => setSwitchingId(accountId);
   const onSwitchEnd = (accountId: ProviderAccountId) =>
@@ -172,7 +170,7 @@ export function ProviderAccountsSection({
                     refreshing: refreshingIds.has(account.id),
                     cooldownUntil: cooldownUntil.get(account.id),
                   })}
-                  best={best === account.id}
+                  best={group.nextAccountId === account.id}
                   keeperLabel={duplicateKeeperLabel(account, group)}
                   renaming={renamingId === account.id}
                   signingIn={signingInId === account.id}

@@ -33,7 +33,8 @@ remove the account in use, switch to another one first.
 Select **Switch** on an account. Each account shows its 5-hour and weekly usage and when they reset.
 For Claude Code, **Weekly** is the all-model weekly limit; model-specific weekly limits (such as
 Fable) appear when you hover it and don't affect recommendations or automatic switching.
-**Best option** marks the account with the most headroom whose weekly limit resets soonest.
+**Best option** marks the account automatic switching would move to next: the one whose weekly
+limit resets soonest and still has enough 5-hour and weekly quota left.
 
 - **Claude Code** switches in place, like running `claude auth login` in a terminal. Running
   sessions keep going and use the new account from their next request. On macOS this can take up
@@ -48,15 +49,18 @@ new account the next time you switch.
 
 ## Automatic switching
 
-Turn on **Auto-switch** per provider and pick a threshold (10% by default). When the active account
-reaches the threshold on its 5-hour or weekly limit, T3 Code switches to the account whose weekly
-limit resets soonest and still has headroom, so no weekly quota expires unused. It also switches
-early, while the active account is still healthy, when another account's weekly limit resets sooner
-and it still has at least 20% of it left, so that quota is used up first. If that account's 5-hour
-limit is low, it switches once that limit resets.
+Turn on **Auto-switch** per provider. It has two thresholds: **5-hour at** (10% left by default)
+and **Weekly at** (2% left by default). The weekly threshold is low so each account's weekly quota
+gets used almost fully, while still switching before it runs out, so no chat stops mid-turn. When
+the active account reaches either threshold, T3 Code switches to the account whose weekly limit
+resets soonest and still has headroom, so no weekly quota expires unused. It also switches early,
+while the active account is still healthy, when another account's weekly limit resets sooner and
+it still has at least 20% of it left, so that quota is used up first. If that account's 5-hour
+limit is low, it switches once that limit resets. An early switch waits at least 5 minutes after
+the last switch.
 
 Automatic switching never interrupts a running Codex turn; it waits until the turn finishes. A
-manual switch does not pause it: once the account you picked reaches the threshold, it switches as
+manual switch does not pause it: once the account you picked reaches a threshold, it switches as
 usual. A toast explains every automatic switch.
 
 ## Start 5-hour windows automatically

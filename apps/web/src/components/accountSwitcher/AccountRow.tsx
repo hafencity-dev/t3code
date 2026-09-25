@@ -31,6 +31,7 @@ import {
   accountPrimaryAction,
   accountStatusMessage,
   accountSubtitle,
+  nextAccountReason,
   removeBlockedReason,
   renameRestoresFocus,
   shortPlanLabel,
@@ -292,7 +293,7 @@ export function AccountRow({
                   <TooltipTrigger render={<Badge variant="success" size="sm" />}>
                     Best option
                   </TooltipTrigger>
-                  <TooltipPopup>Most headroom, and its weekly limit resets soonest</TooltipPopup>
+                  <TooltipPopup>{nextAccountReason(account, now)}</TooltipPopup>
                 </Tooltip>
               ) : null}
             </>

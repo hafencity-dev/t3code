@@ -11,10 +11,9 @@ import type {
   ServerProvider,
 } from "@t3tools/contracts";
 import { Clock, DateTime, Effect, Fiber, Queue, Stream } from "effect";
-import { accountGatingWindows } from "@t3tools/shared/fork/accountUsageWindows";
 
 import type { ProviderAccountAutoSwitch as PersistedConfig } from "./ProviderAccountRegistry.ts";
-import { chooseNextAccount } from "./autoSwitchPolicy.ts";
+import { atAutoSwitchThreshold, chooseNextAccount } from "./autoSwitchPolicy.ts";
 
 export interface ProviderAccountAutoSwitchRead {
   readonly config: PersistedConfig;
@@ -68,7 +67,7 @@ export const makeProviderAccountAutoSwitch = Effect.fn("makeProviderAccountAutoS
       queue: yield* Queue.sliding<void>(1),
       generation: 0,
       enabled: false,
-      threshold: 10,
+      thresholds: { thresholdPercent: 10, weeklyThresholdPercent: 2 },
       needsIdle: false,
       usageKnown: false,
       recent: [] as number[],
@@ -126,8 +125,9 @@ export const makeProviderAccountAutoSwitch = Effect.fn("makeProviderAccountAutoS
           if (key === lastProviderKey && !becameKnown) return;
           lastProviderKey = key;
           const now = yield* Clock.currentTimeMillis;
-          const low = accountGatingWindows(provider.usageLimits?.windows ?? []).some(
-            (window) => window.kind !== "other" && 100 - window.usedPercent <= runtime.threshold,
+          const low = atAutoSwitchThreshold(
+            provider.usageLimits?.windows ?? [],
+            runtime.thresholds,
           );
           if (
             becameKnown ||
@@ -159,7 +159,7 @@ export const makeProviderAccountAutoSwitch = Effect.fn("makeProviderAccountAutoS
             yield* deps.read(driver);
           if (generation !== runtime.generation) return;
           runtime.enabled = config.enabled;
-          runtime.threshold = config.thresholdPercent;
+          runtime.thresholds = config;
           if (!config.enabled) {
             runtime.state = { state: "off" };
             runtime.needsIdle = false;
@@ -219,10 +219,7 @@ export const makeProviderAccountAutoSwitch = Effect.fn("makeProviderAccountAutoS
             group.switchMode === "restart" &&
             (active.status === "signedOut" ||
               active.status === "error" ||
-              accountGatingWindows(active.usage?.windows ?? []).some(
-                (window) =>
-                  window.kind !== "other" && 100 - window.usedPercent <= config.thresholdPercent,
-              ));
+              atAutoSwitchThreshold(active.usage?.windows ?? [], config));
           if (decision.kind === "probe") return decision;
           if (decision.kind === "stay") {
             const state =

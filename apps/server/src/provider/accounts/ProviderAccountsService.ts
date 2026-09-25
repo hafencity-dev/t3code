@@ -22,6 +22,7 @@ import {
 } from "@t3tools/contracts";
 import { Clock, Context, DateTime, Effect, Layer, PubSub, Queue, Semaphore, Stream } from "effect";
 import { makeProviderAccountAutoSwitch } from "./ProviderAccountAutoSwitch.ts";
+import { nextAutoSwitchAccountId } from "./autoSwitchPolicy.ts";
 import { makeProviderAccountWindowPrimer } from "./ProviderAccountWindowPrimer.ts";
 import {
   claudeWindowPrimeLaunch,
@@ -623,6 +624,19 @@ const make = (
             );
           });
           const { identities, duplicateOf } = accountIdentities(state.accounts, accounts, live);
+          const groupAccounts = state.accounts.map((entry, index) => {
+            const original = duplicateOf(entry);
+            return { ...accounts[index]!, ...(original ? { duplicateOf: original } : {}) };
+          });
+          const nextAccountId = nextAutoSwitchAccountId({
+            now,
+            config: automatic,
+            activeAccountId: ProviderAccountId.make(state.activeAccountId),
+            accounts: groupAccounts.map((account) => ({
+              ...account,
+              loginInProgress: login.isBusy(account.id),
+            })),
+          });
           const primer =
             driver === "claudeAgent" ? yield* io(() => registry.getWindowPrimer()) : undefined;
           const lastPrimed = Object.entries(primer?.primedAt ?? {})
@@ -636,6 +650,7 @@ const make = (
             autoSwitch: {
               enabled: automatic.enabled,
               thresholdPercent: automatic.thresholdPercent,
+              weeklyThresholdPercent: automatic.weeklyThresholdPercent,
               ...(automatic.enabled ? automaticState : {}),
               state: !automatic.enabled
                 ? ("off" as const)
@@ -666,10 +681,8 @@ const make = (
                   },
                 }
               : {}),
-            accounts: state.accounts.map((entry, index) => {
-              const original = duplicateOf(entry);
-              return { ...accounts[index]!, ...(original ? { duplicateOf: original } : {}) };
-            }),
+            ...(nextAccountId ? { nextAccountId } : {}),
+            accounts: groupAccounts,
             ...(warning ? { warning } : {}),
           };
           return { group, identities };
@@ -1385,6 +1398,9 @@ const make = (
           ...(input.thresholdPercent === undefined
             ? {}
             : { thresholdPercent: input.thresholdPercent }),
+          ...(input.weeklyThresholdPercent === undefined
+            ? {}
+            : { weeklyThresholdPercent: input.weeklyThresholdPercent }),
         }),
       );
       if (autoSwitch) {

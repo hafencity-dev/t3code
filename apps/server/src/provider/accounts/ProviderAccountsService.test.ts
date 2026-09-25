@@ -511,7 +511,8 @@ describe("ProviderAccountsService", () => {
             (group) =>
               !group.autoSwitch.enabled &&
               group.autoSwitch.state === "off" &&
-              group.autoSwitch.thresholdPercent === 10,
+              group.autoSwitch.thresholdPercent === 10 &&
+              group.autoSwitch.weeklyThresholdPercent === 2,
           ),
         ).toBe(true);
         const enabled = yield* service.setAutoSwitch({
@@ -522,6 +523,17 @@ describe("ProviderAccountsService", () => {
         expect(enabled.groups.find((group) => group.driver === "codex")?.autoSwitch).toMatchObject({
           enabled: true,
           thresholdPercent: 25,
+          weeklyThresholdPercent: 2,
+        });
+        // Only the sent threshold changes.
+        const weekly = yield* service.setAutoSwitch({
+          driver: "codex",
+          enabled: true,
+          weeklyThresholdPercent: 5,
+        });
+        expect(weekly.groups.find((group) => group.driver === "codex")?.autoSwitch).toMatchObject({
+          thresholdPercent: 25,
+          weeklyThresholdPercent: 5,
         });
         for (const thresholdPercent of [4, 51, 10.5]) {
           expect(
@@ -536,7 +548,11 @@ describe("ProviderAccountsService", () => {
           const registry = await createProviderAccountRegistry({ stateDir: config.stateDir });
           return registry.getAutoSwitch("codex");
         });
-        expect(persisted).toEqual({ enabled: false, thresholdPercent: 25 });
+        expect(persisted).toEqual({
+          enabled: false,
+          thresholdPercent: 25,
+          weeklyThresholdPercent: 5,
+        });
         expect(
           (yield* service.list()).groups.find((group) => group.driver === "codex")?.autoSwitch
             .state,
@@ -563,6 +579,7 @@ describe("ProviderAccountsService", () => {
         expect(persisted).toEqual({
           enabled: false,
           thresholdPercent: 10,
+          weeklyThresholdPercent: 2,
           lastManualSwitchAt: new Date(42_000).toISOString(),
         });
       }),

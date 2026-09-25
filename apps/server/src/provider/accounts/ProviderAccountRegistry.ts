@@ -45,6 +45,10 @@ export type ProviderAccountEntry = typeof Entry.Type;
 const AutoSwitch = Schema.Struct({
   enabled: Schema.Boolean,
   thresholdPercent: Schema.Int.check(Schema.isBetween({ minimum: 5, maximum: 50 })),
+  /** Files from before the separate weekly threshold omit it; reads default it to 2. */
+  weeklyThresholdPercent: Schema.optional(
+    Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 25 })),
+  ),
   lastSwitch: Schema.optional(
     Schema.Struct({
       at: Schema.String,
@@ -58,8 +62,10 @@ const AutoSwitch = Schema.Struct({
   lastManualSwitchAt: Schema.optional(Schema.String),
   // A legacy `manual` hold field from older builds is stripped by decode and dropped on write.
 });
-export type ProviderAccountAutoSwitch = typeof AutoSwitch.Type;
+type StoredAutoSwitch = typeof AutoSwitch.Type;
+export type ProviderAccountAutoSwitch = StoredAutoSwitch & { weeklyThresholdPercent: number };
 export type ProviderAccountAutoSwitchPatch = Partial<ProviderAccountAutoSwitch>;
+const defaultWeeklyThresholdPercent = 2;
 const WindowPrimer = Schema.Struct({
   enabled: Schema.Boolean,
   /** Epoch ms of each account's last successful window start, keyed by account id. */
@@ -221,7 +227,11 @@ export async function createProviderAccountRegistry(input: { stateDir: string })
     });
   }
   function getAutoSwitch(driver: ProviderAccountDriver): ProviderAccountAutoSwitch {
-    return structuredClone(stored.autoSwitch?.[driver] ?? { enabled: false, thresholdPercent: 10 });
+    const config = stored.autoSwitch?.[driver] ?? { enabled: false, thresholdPercent: 10 };
+    return structuredClone({
+      ...config,
+      weeklyThresholdPercent: config.weeklyThresholdPercent ?? defaultWeeklyThresholdPercent,
+    });
   }
   function getWindowPrimer(): ProviderAccountWindowPrimer {
     return structuredClone(stored.windowPrimer?.claudeAgent ?? { enabled: false });
@@ -259,10 +269,22 @@ export async function createProviderAccountRegistry(input: { stateDir: string })
             "Auto-switch threshold must be an integer between 5 and 50.",
           );
         }
+        const weeklyThresholdPercent =
+          patch.weeklyThresholdPercent ?? previous.weeklyThresholdPercent;
+        if (
+          !Number.isInteger(weeklyThresholdPercent) ||
+          weeklyThresholdPercent < 1 ||
+          weeklyThresholdPercent > 25
+        ) {
+          throw new ProviderAccountRegistryGuardError(
+            "Weekly auto-switch threshold must be an integer between 1 and 25.",
+          );
+        }
         const next: ProviderAccountAutoSwitch = {
           ...previous,
           enabled: patch.enabled ?? previous.enabled,
           thresholdPercent,
+          weeklyThresholdPercent,
           ...(patch.lastSwitch !== undefined ? { lastSwitch: patch.lastSwitch } : {}),
           ...(patch.lastManualSwitchAt !== undefined
             ? { lastManualSwitchAt: patch.lastManualSwitchAt }

@@ -70,36 +70,15 @@ export function accountTone(account: ProviderAccount, now: number) {
   return remaining !== null && remaining <= 25 ? "warning" : "secondary";
 }
 
-/** When the weekly (or monthly) window the column shows resets; unknown sorts last. */
-function weeklyResetAt(account: ProviderAccount) {
+/**
+ * Why the "Best option" account is next. The server picks it (`group.nextAccountId`) with the
+ * auto-switch ranking, so the badge and auto-switch never disagree.
+ */
+export function nextAccountReason(account: ProviderAccount, now: number) {
   const { tightest } = accountUsageCell(account.usage?.windows ?? [], "weekly");
   const at = tightest?.resetsAt ? Date.parse(tightest.resetsAt) : Number.NaN;
-  return Number.isFinite(at) ? at : Number.POSITIVE_INFINITY;
-}
-
-function rankedAccounts(accounts: readonly ProviderAccount[], now: number) {
-  return [...accounts].sort(
-    (a, b) =>
-      Number(b.active) - Number(a.active) ||
-      (remainingPercent(b, now) ?? -1) - (remainingPercent(a, now) ?? -1) ||
-      // Equal headroom: the one whose weekly limit resets soonest wastes the least quota.
-      weeklyResetAt(a) - weeklyResetAt(b) ||
-      a.label.localeCompare(b.label),
-  );
-}
-
-/** Shown only while the active account is low; never a duplicate or an unknown quota. */
-export function bestAccountId(accounts: readonly ProviderAccount[], now: number) {
-  const active = accounts.find((account) => account.active);
-  const remaining = active ? remainingPercent(active, now) : null;
-  if (remaining === null || remaining > 25) return null;
-  return (
-    rankedAccounts(accounts, now).find((account) => {
-      if (account.active || account.duplicateOf || account.status !== "ready") return false;
-      const candidate = remainingPercent(account, now);
-      return candidate !== null && candidate > remaining;
-    })?.id ?? null
-  );
+  const reset = Number.isFinite(at) && at > now ? ` (${formatDuration(at - now)})` : "";
+  return `Next up: its weekly limit resets soonest${reset} with enough left.`;
 }
 
 /** Stable display order: Default first, then the server's creation order. Never re-sorts. */
@@ -732,16 +711,32 @@ export function windowPrimerStatus(
   return last ?? "No signed-in account can start a window right now.";
 }
 
-/** Toggling sends no threshold, so a toggle never overwrites a threshold changed elsewhere. */
+type AutoSwitchThresholds = Pick<
+  ProviderAccountGroup["autoSwitch"],
+  "thresholdPercent" | "weeklyThresholdPercent"
+>;
+
+/**
+ * Sends only the thresholds that changed, so a toggle or one select never overwrites a
+ * threshold changed elsewhere.
+ */
 export function autoSwitchInput(
   driver: ProviderAccountDriver,
   enabled: boolean,
-  currentThreshold: number,
-  nextThreshold?: number,
+  current: AutoSwitchThresholds,
+  next: Partial<AutoSwitchThresholds> = {},
 ) {
-  return nextThreshold === undefined || nextThreshold === currentThreshold
-    ? { driver, enabled }
-    : { driver, enabled, thresholdPercent: nextThreshold };
+  return {
+    driver,
+    enabled,
+    ...(next.thresholdPercent === undefined || next.thresholdPercent === current.thresholdPercent
+      ? {}
+      : { thresholdPercent: next.thresholdPercent }),
+    ...(next.weeklyThresholdPercent === undefined ||
+    next.weeklyThresholdPercent === current.weeklyThresholdPercent
+      ? {}
+      : { weeklyThresholdPercent: next.weeklyThresholdPercent }),
+  };
 }
 
 /**

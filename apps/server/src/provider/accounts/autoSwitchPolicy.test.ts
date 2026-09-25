@@ -3,6 +3,7 @@ import { ProviderAccountId, type ServerProviderUsageWindow } from "@t3tools/cont
 import { describe, expect, it } from "vite-plus/test";
 import {
   chooseNextAccount,
+  nextAutoSwitchAccountId,
   type AutoSwitchAccountView,
   type AutoSwitchDecision,
   type AutoSwitchInput,
@@ -50,7 +51,7 @@ const stale = (value: AutoSwitchAccountView): AutoSwitchAccountView => ({
 });
 const input = (overrides: Partial<AutoSwitchInput> = {}): AutoSwitchInput => ({
   now,
-  config: { enabled: true, thresholdPercent: 10 },
+  config: { enabled: true, thresholdPercent: 10, weeklyThresholdPercent: 2 },
   active: low,
   candidates: [work],
   probed: new Set(),
@@ -128,9 +129,17 @@ const scenarios: ReadonlyArray<{ name: string; input: AutoSwitchInput; expected:
     expected: switchTo("Work"),
   },
   {
-    name: "09 weekly exhaustion triggers replacement",
-    input: input({ active: account("Personal", 80, 8) }),
+    name: "09 weekly at the default 2% triggers replacement",
+    input: input({ active: account("Personal", 80, 2) }),
     expected: switchTo("Work", "weekly"),
+  },
+  {
+    name: "09b weekly at 3% with a healthy session stays",
+    input: input({
+      active: account("Personal", 80, 3),
+      candidates: [account("Work", 60, 60, 72 * hour)],
+    }),
+    expected: stay("healthy"),
   },
   {
     name: "10 lowest model-scoped weekly controls eligibility",
@@ -141,7 +150,7 @@ const scenarios: ReadonlyArray<{ name: string; input: AutoSwitchInput; expected:
           checkedAt: iso(0),
           windows: [
             ...personal.usage!.windows,
-            { ...window("weekly", 5, 30 * hour), id: "model-weekly" },
+            { ...window("weekly", 2, 30 * hour), id: "model-weekly" },
           ],
         },
       },
@@ -167,7 +176,7 @@ const scenarios: ReadonlyArray<{ name: string; input: AutoSwitchInput; expected:
     expected: {
       kind: "stay",
       code: "healthy",
-      reason: "Personal has 80% session and 60% long-term quota left; no switch needed.",
+      reason: "Personal has 80% 5-hour and 60% weekly quota left; no switch needed.",
       // The Fable reset (30h) is not a deadline either; only the all-model weekly's is.
       wakeAt: now + 72 * hour + minute,
     },
@@ -191,7 +200,7 @@ const scenarios: ReadonlyArray<{ name: string; input: AutoSwitchInput; expected:
   {
     name: "11 exhausted candidate wakes at latest blocking reset",
     input: input({
-      active: account("Personal", 8, 8, 96 * hour),
+      active: account("Personal", 8, 2, 96 * hour),
       candidates: [account("Work", 0, 0, 4 * hour)],
     }),
     expected: stay("allExhausted", now + 4 * hour),
@@ -266,7 +275,7 @@ const scenarios: ReadonlyArray<{ name: string; input: AutoSwitchInput; expected:
   {
     name: "21 proactive target must have at least twenty percent long quota",
     input: input({
-      config: { enabled: true, thresholdPercent: 5 },
+      config: { enabled: true, thresholdPercent: 5, weeklyThresholdPercent: 2 },
       active: personal,
       candidates: [account("Work", 60, 19, 9 * hour)],
     }),
@@ -294,13 +303,13 @@ const scenarios: ReadonlyArray<{ name: string; input: AutoSwitchInput; expected:
     expected: switchTo("Work", "expiring"),
   },
   {
-    name: "25 proactive dwell lasts thirty minutes",
+    name: "25 proactive dwell lasts five minutes",
     input: input({
       active: personal,
       candidates: [account("Work", 60, 60, 9 * hour)],
-      lastSwitchAt: now - 10 * minute,
+      lastSwitchAt: now - 2 * minute,
     }),
-    expected: stay("dwell", now + 20 * minute),
+    expected: stay("dwell", now + 3 * minute),
   },
   {
     name: "26 four switches trip the breaker for proactive switches until the oldest expires",
@@ -390,8 +399,8 @@ describe("chooseNextAccount 32-scenario policy table", () => {
     const active = account("Personal", 80, 80, 5 * 24 * hour);
     const sooner = [account("Work", 60, 60, 3 * 24 * hour)];
     expect(
-      chooseNextAccount(input({ active, candidates: sooner, lastSwitchAt: now - 10 * minute })),
-    ).toMatchObject(stay("dwell", now + 20 * minute));
+      chooseNextAccount(input({ active, candidates: sooner, lastSwitchAt: now - 2 * minute })),
+    ).toMatchObject(stay("dwell", now + 3 * minute));
     const close = chooseNextAccount(
       input({ active, candidates: [account("Work", 60, 60, 5 * 24 * hour - 30 * minute)] }),
     );
@@ -420,10 +429,12 @@ describe("chooseNextAccount 32-scenario policy table", () => {
 
   it("dwell after a recent switch blocks only proactive rebalancing", () => {
     const expiring = [account("Work", 60, 60, 9 * hour)];
-    const lastSwitchAt = now - 10 * minute;
-    expect(
-      chooseNextAccount(input({ active: personal, candidates: expiring, lastSwitchAt })),
-    ).toMatchObject(stay("dwell", now + 20 * minute));
+    const lastSwitchAt = now - 2 * minute;
+    const dwell = chooseNextAccount(
+      input({ active: personal, candidates: expiring, lastSwitchAt }),
+    );
+    expect(dwell).toMatchObject(stay("dwell", now + 3 * minute));
+    expect(dwell.reason).toBe("Keeping Personal for at least 5 minutes after the last switch.");
     expect(
       chooseNextAccount(input({ active: low, candidates: expiring, lastSwitchAt })),
     ).toMatchObject(switchTo("Work"));
@@ -436,7 +447,7 @@ describe("chooseNextAccount 32-scenario policy table", () => {
       trigger: "signedOut",
     },
     {
-      active: { ...personal, usage: { checkedAt: iso(0), windows: [window("weekly", 8)] } },
+      active: { ...personal, usage: { checkedAt: iso(0), windows: [window("weekly", 2)] } },
       trigger: "weekly",
     },
   ])(
@@ -492,7 +503,7 @@ describe("chooseNextAccount 32-scenario policy table", () => {
   it("replaces a weekly-exhausted account whose session is still high", () => {
     expect(
       chooseNextAccount(
-        input({ active: account("Personal", 95, 8), candidates: [account("B", 15, 90)] }),
+        input({ active: account("Personal", 95, 2), candidates: [account("B", 15, 90)] }),
       ),
     ).toMatchObject(switchTo("B", "weekly"));
     // The session trigger keeps its ten-point improvement rule.
@@ -536,18 +547,18 @@ describe("chooseNextAccount 32-scenario policy table", () => {
   it("dwells after a manual switch for proactive rebalancing only", () => {
     const sooner = { active: personal, candidates: [account("Work", 60, 60, 9 * hour)] };
     expect(
-      chooseNextAccount(input({ ...sooner, lastManualSwitchAt: now - 5 * minute })),
-    ).toMatchObject(stay("dwell", now + 25 * minute));
+      chooseNextAccount(input({ ...sooner, lastManualSwitchAt: now - 2 * minute })),
+    ).toMatchObject(stay("dwell", now + 3 * minute));
     expect(
       chooseNextAccount(
-        input({ ...sooner, lastSwitchAt: now - 20 * minute, lastManualSwitchAt: now - 5 * minute }),
+        input({ ...sooner, lastSwitchAt: now - 10 * minute, lastManualSwitchAt: now - 2 * minute }),
       ),
-    ).toMatchObject(stay("dwell", now + 25 * minute));
+    ).toMatchObject(stay("dwell", now + 3 * minute));
     expect(chooseNextAccount(input({ lastManualSwitchAt: now - minute }))).toMatchObject(
       switchTo("Work"),
     );
     expect(
-      chooseNextAccount(input({ ...sooner, lastManualSwitchAt: now - 31 * minute })),
+      chooseNextAccount(input({ ...sooner, lastManualSwitchAt: now - 6 * minute })),
     ).toMatchObject(switchTo("Work", "expiring"));
   });
 
@@ -576,7 +587,7 @@ describe("chooseNextAccount 32-scenario policy table", () => {
         input({
           active: personal,
           candidates: [account("Work", 60, 60, 24 * hour)],
-          lastSwitchAt: now - 30 * minute,
+          lastSwitchAt: now - 5 * minute,
         }),
       ),
     ).toMatchObject(switchTo("Work", "expiring"));
@@ -625,7 +636,7 @@ describe("chooseNextAccount 32-scenario policy table", () => {
     expect(
       chooseNextAccount(
         input({
-          config: { enabled: false, thresholdPercent: 10 },
+          config: { enabled: false, thresholdPercent: 10, weeklyThresholdPercent: 2 },
           active: account("Personal", 0),
           candidates: [stale(work)],
         }),
@@ -637,5 +648,144 @@ describe("chooseNextAccount 32-scenario policy table", () => {
     const decision: AutoSwitchDecision = chooseNextAccount(input());
     if (decision.kind === "switch") expect(decision.targetAccountId).toBe(work.id);
     else throw new Error("Expected replacement account");
+  });
+});
+
+describe("separate 5-hour and weekly thresholds", () => {
+  const thresholds = (thresholdPercent: number, weeklyThresholdPercent: number) => ({
+    enabled: true,
+    thresholdPercent,
+    weeklyThresholdPercent,
+  });
+
+  it("switches at the weekly threshold and explains it by the target's weekly reset", () => {
+    const decision = chooseNextAccount(
+      input({
+        active: account("Work", 90, 2, 5 * 24 * hour),
+        candidates: [account("Personal", 80, 64, 72 * hour)],
+      }),
+    );
+    expect(decision).toMatchObject(switchTo("Personal", "weekly"));
+    expect(decision.reason).toBe(
+      "Work has 2% of its weekly limit left; switching to Personal (weekly resets in 3d, 64% left).",
+    );
+    const session = chooseNextAccount(input());
+    expect(session.reason).toBe(
+      "Personal has 8% of its 5-hour limit left; switching to Work (5-hour 60% left; weekly resets in 2d, 60% left).",
+    );
+  });
+
+  it("uses each threshold only for its own window", () => {
+    // Work resets later than the active account, so no proactive switch muddies the result.
+    const candidates = [account("Work", 80, 80, 120 * hour)];
+    const decide = (session: number, weekly: number, config: AutoSwitchInput["config"]) =>
+      chooseNextAccount(
+        input({ config, active: account("Personal", session, weekly, 96 * hour), candidates }),
+      );
+    expect(decide(80, 5, thresholds(10, 5))).toMatchObject(switchTo("Work", "weekly"));
+    expect(decide(80, 6, thresholds(10, 5))).toMatchObject(stay("healthy"));
+    // The weekly threshold never applies to the 5-hour window, nor the reverse.
+    expect(decide(8, 50, thresholds(10, 5))).toMatchObject(switchTo("Work", "session"));
+    expect(decide(15, 50, thresholds(20, 2))).toMatchObject(switchTo("Work", "session"));
+    expect(decide(80, 15, thresholds(20, 2))).toMatchObject(stay("healthy"));
+  });
+
+  it("still switches on a hard 0% below a lower threshold", () => {
+    const candidates = [account("Work", 80, 80, 72 * hour)];
+    expect(
+      chooseNextAccount(
+        input({ config: thresholds(5, 1), active: account("Personal", 80, 0), candidates }),
+      ),
+    ).toMatchObject(switchTo("Work", "weekly"));
+    expect(
+      chooseNextAccount(
+        input({ config: thresholds(5, 1), active: account("Personal", 0, 80), candidates }),
+      ),
+    ).toMatchObject(switchTo("Work", "session"));
+  });
+
+  it("keeps a nearly spent weekly out of the strict tier", () => {
+    const active = account("Personal", 90, 2, 5 * 24 * hour);
+    const nearlySpent = account("Spent", 90, 3, 24 * hour);
+    const healthy = account("Work", 90, 40, 72 * hour);
+    // 3% is below 2% + the 10-point margin, so the later-resetting healthy account wins.
+    expect(chooseNextAccount(input({ active, candidates: [nearlySpent, healthy] }))).toMatchObject(
+      switchTo("Work", "weekly"),
+    );
+    // Alone, it is still better than running out: the relaxed tier only needs more than 2%.
+    expect(chooseNextAccount(input({ active, candidates: [nearlySpent] }))).toMatchObject(
+      switchTo("Spent", "weekly"),
+    );
+    expect(
+      chooseNextAccount(input({ active, candidates: [account("Out", 90, 2, 24 * hour)] })),
+    ).toMatchObject(stay("allExhausted"));
+  });
+
+  it("never switches to a duplicate of another saved login", () => {
+    expect(
+      chooseNextAccount(
+        input({
+          candidates: [{ ...account("Copy", 90, 90, hour), duplicateOf: id("Personal") }, work],
+        }),
+      ),
+    ).toMatchObject(switchTo("Work"));
+  });
+});
+
+describe("nextAutoSwitchAccountId", () => {
+  const config = { thresholdPercent: 10, weeklyThresholdPercent: 2 };
+  const next = (accounts: AutoSwitchAccountView[], activeAccountId = accounts[0]!.id) =>
+    nextAutoSwitchAccountId({ now, config, activeAccountId, accounts });
+
+  it("picks the earliest weekly reset with enough left, not the most headroom", () => {
+    const day = 24 * hour;
+    expect(
+      next([
+        account("hauke", 93, 11, 2 * day + 21 * hour),
+        account("marius.gill", 88, 53, 6 * day),
+        account("claude2", 100, 19, 4 * day + 13 * hour),
+        account("marius", 100, 0, hour + 48 * minute),
+      ]),
+    ).toBe(id("claude2"));
+  });
+
+  it("never picks an exhausted, signed-out, signing-in, duplicate, or unmeasured account", () => {
+    const active = account("Active", 50, 50);
+    expect(next([active, account("Out", 100, 0, hour)])).toBeUndefined();
+    expect(next([active, account("Low", 100, 11, hour)])).toBeUndefined();
+    expect(
+      next([
+        active,
+        { ...account("SignedOut", 90, 90, hour), status: "signedOut" },
+        { ...account("SigningIn", 90, 90, hour), loginInProgress: true },
+        { ...account("Copy", 90, 90, hour), duplicateOf: active.id },
+        { ...account("Unknown"), usage: undefined },
+      ]),
+    ).toBeUndefined();
+    expect(next([active])).toBeUndefined();
+    expect(
+      nextAutoSwitchAccountId({ now, config, activeAccountId: undefined, accounts: [work] }),
+    ).toBeUndefined();
+  });
+
+  it("breaks a deadline tie by weekly, then 5-hour quota left, then id", () => {
+    const active = account("Active", 50, 50);
+    expect(
+      next([active, account("A", 90, 40, 48 * hour), account("B", 30, 60, 48 * hour + minute)]),
+    ).toBe(id("B"));
+    expect(next([active, account("A", 40, 60, 48 * hour), account("B", 90, 60, 48 * hour)])).toBe(
+      id("B"),
+    );
+    expect(next([active, account("B", 60, 60, 48 * hour), account("A", 60, 60, 48 * hour)])).toBe(
+      id("A"),
+    );
+  });
+
+  it("matches the account a threshold switch moves to", () => {
+    const active = account("Personal", 8, 50, 96 * hour);
+    const candidates = [account("Later", 95, 95, 72 * hour), work, account("Spent", 90, 5, hour)];
+    const decision = chooseNextAccount(input({ active, candidates }));
+    expect(decision).toMatchObject(switchTo("Work"));
+    expect(next([active, ...candidates])).toBe(id("Work"));
   });
 });

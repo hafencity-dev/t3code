@@ -223,7 +223,12 @@ it.effect("a command resolves only after the mounted list shows its outcome", ()
                 active: true,
               },
             ],
-            autoSwitch: { enabled: false, thresholdPercent: 10, state: "off" as const },
+            autoSwitch: {
+              enabled: false,
+              thresholdPercent: 10,
+              weeklyThresholdPercent: 2,
+              state: "off" as const,
+            },
           },
         ],
       });

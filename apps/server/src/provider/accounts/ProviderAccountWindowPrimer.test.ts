@@ -90,7 +90,7 @@ const makeHarness = Effect.fnUntraced(function* (options: {
       switchMode: "hot",
       instanceId: "claudeAgent",
       activeAccountId: state.accounts.find((item) => item.active)!.id,
-      autoSwitch: { enabled: false, thresholdPercent: 10, state: "off" },
+      autoSwitch: { enabled: false, thresholdPercent: 10, weeklyThresholdPercent: 2, state: "off" },
       accounts: state.accounts,
     });
   const read = (): Effect.Effect<WindowPrimerRead> =>
