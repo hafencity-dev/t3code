@@ -103,6 +103,8 @@ export function createProviderAccountActivityLog(input: { stateDir: string }) {
   }
   return {
     filePath,
+    /** Resolves once every queued write has finished; appends are never awaited by callers. */
+    settled: () => queue,
     /** Rejects on I/O failure; callers log and swallow it so no action fails on the log. */
     append: (record: ProviderAccountActivityRecord, atMs: number) =>
       serialized(async () => {

@@ -120,7 +120,8 @@ function claudeCredentialLocation(state: {
   };
 }
 
-const io = <A>(operation: () => Promise<A>) =>
+/** Like `io`, but interruption abandons the promise; only for waits a finalizer aborts. */
+const interruptibleIo = <A>(operation: () => Promise<A>) =>
   Effect.tryPromise({ try: operation, catch: (cause) => cause }).pipe(
     Effect.catch((cause) => {
       if (
@@ -142,6 +143,12 @@ const io = <A>(operation: () => Promise<A>) =>
       );
     }),
   );
+/**
+ * A storage step, once started, finishes before its fiber can be interrupted. Interrupting it
+ * mid-write would release the account mutation (or close the service scope) while the write
+ * still runs underneath.
+ */
+const io = <A>(operation: () => Promise<A>) => Effect.uninterruptible(interruptibleIo(operation));
 
 function effectiveEnvironment(settings: ServerSettings, driver: ProviderAccountDriver) {
   return mergeProviderInstanceEnvironment(
@@ -302,6 +309,8 @@ const make = (
     const autoEvents = yield* PubSub.unbounded<ProviderAccountAutoSwitchEvent>();
     yield* Effect.addFinalizer(() => PubSub.shutdown(autoEvents));
     const activity = createProviderAccountActivityLog({ stateDir: config.stateDir });
+    // Registered before any fiber is forked, so it runs after they are all interrupted.
+    yield* Effect.addFinalizer(() => Effect.promise(() => activity.settled()));
     const runActivityFork = Effect.runForkWith(yield* Effect.context<never>());
     /**
      * Records at an action's commit point. The write is queued in call order but never awaited,
@@ -418,7 +427,7 @@ const make = (
               commit: (result) => commitClaudeSwitch(registry, result),
             }),
           catch: (cause) => cause,
-        }),
+        }).pipe(Effect.uninterruptible),
       );
       if (outcome._tag === "Failure") {
         const cause = outcome.failure;
@@ -1256,7 +1265,7 @@ const make = (
               await promise.catch(() => {});
             }),
           );
-          yield* io(() => promise).pipe(
+          yield* interruptibleIo(() => promise).pipe(
             Effect.catch(() =>
               Queue.offer(queue, {
                 _tag: "failed",

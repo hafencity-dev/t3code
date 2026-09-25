@@ -26,6 +26,11 @@ import { ProviderRegistry, type ProviderRegistryShape } from "../Services/Provid
 import type { ProviderInstance } from "../ProviderDriver.ts";
 import { ProviderAccountLogin, type ProviderAccountLoginOptions } from "./ProviderAccountLogin.ts";
 import { createProviderAccountRegistry } from "./ProviderAccountRegistry.ts";
+import {
+  ACTIVITY_KEEP,
+  ACTIVITY_REWRITE_AT,
+  createProviderAccountActivityLog,
+} from "./ProviderAccountActivityLog.ts";
 import { switchClaudeCredentials } from "./ClaudeCredentialSwitch.ts";
 import {
   claudeTerminalLogoutMessage,
@@ -1976,6 +1981,81 @@ describe("ProviderAccountsService", () => {
         { pending: true },
       ),
     );
+
+    // Activity writes are never awaited by the action; closing the service still lands them.
+    it.effect("finishes queued activity writes before the service closes", () =>
+      run(
+        Effect.gen(function* () {
+          const service = yield* ProviderAccountsService;
+          yield* service.rename({ accountId: seeded!.id, label: "Closing" });
+        }),
+        true,
+        {
+          // A full log: the rename's append rewrites the file, a slow, durable write.
+          before: async () => {
+            const log = createProviderAccountActivityLog({
+              stateDir: NodePath.join(root, "state/userdata"),
+            });
+            await log.append(
+              {
+                driver: "codex",
+                kind: "account.removed",
+                accountId: ProviderAccountId.make("old"),
+                labels: { account: "Old" },
+                outcome: "ok",
+              },
+              0,
+            );
+            const line = await NodeFSP.readFile(log.filePath, "utf8");
+            await NodeFSP.writeFile(log.filePath, line.repeat(ACTIVITY_REWRITE_AT));
+          },
+        },
+      ).pipe(
+        Effect.andThen(
+          Effect.promise(async () => ({
+            log: await NodeFSP.readFile(activityFile(), "utf8"),
+            files: await NodeFSP.readdir(NodePath.dirname(activityFile())),
+          })),
+        ),
+        Effect.map(({ log, files }) => {
+          expect(log.trim().split("\n")).toHaveLength(ACTIVITY_KEEP);
+          expect(log).toContain('"account.renamed"');
+          expect(files.filter((file) => file.endsWith(".tmp"))).toEqual([]);
+        }),
+      ),
+    );
+
+    // An interrupted action must not let go of the account mutation (or the service scope)
+    // while its storage step still runs underneath.
+    it.effect("an interrupted action finishes its storage step first", () => {
+      const started = Promise.withResolvers<void>();
+      let finished = false;
+      return run(
+        Effect.gen(function* () {
+          const service = yield* ProviderAccountsService;
+          const removing = yield* service.remove({ accountId: seeded!.id }).pipe(Effect.forkScoped);
+          yield* Effect.promise(() => started.promise);
+          yield* Fiber.interrupt(removing);
+          expect(finished).toBe(true);
+          const renamed = yield* service.rename({ accountId: seeded!.id, label: "Kept" });
+          expect(
+            codexGroup(renamed).accounts.find((account) => account.id === seeded!.id)?.label,
+          ).toBe("Kept");
+        }),
+        true,
+        {
+          login: (options) => {
+            const login = new ProviderAccountLogin(options);
+            login.logout = async () => {
+              started.resolve();
+              await NodeFSP.readFile(activityFile(), "utf8").catch(() => "");
+              finished = true;
+            };
+            return login;
+          },
+        },
+      );
+    });
 
     it.effect("logs a usage rate limit once per backoff period", () => {
       const probe: Probe = (() =>
