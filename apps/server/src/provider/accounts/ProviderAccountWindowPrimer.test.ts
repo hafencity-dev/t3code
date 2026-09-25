@@ -80,7 +80,7 @@ const makeHarness = Effect.fnUntraced(function* (options: {
     enabled: options.enabled ?? true,
     accounts: options.accounts,
     primedAt: new Map<ProviderAccountId, number>(),
-    primes: [] as { id: ProviderAccountId; active: boolean; at: number }[],
+    primes: [] as { id: ProviderAccountId; active: boolean; at: number; mutationFree: boolean }[],
     refreshes: [] as { id: ProviderAccountId; force: boolean; at: number }[],
     failPrime: options.failPrime ?? false,
   };
@@ -114,12 +114,17 @@ const makeHarness = Effect.fnUntraced(function* (options: {
         );
       }),
     prime: (target) =>
-      Effect.gen(function* () {
-        const now = yield* Clock.currentTimeMillis;
-        state.primes.push({ id: target.id, active: target.active, at: now });
-        if (state.failPrime)
-          return yield* new ProviderAccountError({ message: "Claude returned an error." });
-      }),
+      Effect.succeed(
+        Effect.gen(function* () {
+          const now = yield* Clock.currentTimeMillis;
+          // The request runs outside the account mutation, under the account's own hold.
+          const mutationFree = yield* mutation.takeIfAvailable(1);
+          if (mutationFree) yield* mutation.release(1);
+          state.primes.push({ id: target.id, active: target.active, at: now, mutationFree });
+          if (state.failPrime)
+            return yield* new ProviderAccountError({ message: "Claude returned an error." });
+        }),
+      ),
     persistPrimed: (id, at) => Effect.sync(() => state.primedAt.set(id, at)),
     // Receipt when a start asks for the account mutation, before it holds it.
     withMutation: (effect) =>
@@ -212,7 +217,9 @@ describe("ProviderAccountWindowPrimer", () => {
       yield* h.evaluated;
       // Usage from before the reset is only an inference: one probe, then the start.
       expect(h.state.refreshes).toEqual([{ id: work, force: false, at: HOUR + MINUTE }]);
-      expect(h.state.primes).toEqual([{ id: work, active: false, at: HOUR + MINUTE }]);
+      expect(h.state.primes).toEqual([
+        { id: work, active: false, at: HOUR + MINUTE, mutationFree: true },
+      ]);
       expect(h.state.primedAt.get(work)).toBe(HOUR + MINUTE);
       // One post-start refresh so the new window shows up.
       yield* TestClock.adjust(1_000);
@@ -316,6 +323,23 @@ describe("ProviderAccountWindowPrimer", () => {
         yield* h.evaluated;
         expect(h.state.primes.map(({ at }) => at)).toEqual(expected);
       }
+    }).pipe(Effect.scoped),
+  );
+
+  // S13: the CLI request never holds the global account mutation; the plan and the record do.
+  it.effect("sends a start outside the account mutation, then records it under the mutation", () =>
+    Effect.gen(function* () {
+      const h = yield* makeHarness({
+        accounts: [
+          account(personal, { usage: usage(0, 20 * HOUR) }),
+          account(work, { usage: usage(0) }),
+        ],
+      });
+      yield* h.evaluated;
+      expect(h.state.primes.map(({ id, mutationFree }) => ({ id, mutationFree }))).toEqual([
+        { id: work, mutationFree: true },
+      ]);
+      expect(h.state.primedAt.get(work)).toBe(0);
     }).pipe(Effect.scoped),
   );
 

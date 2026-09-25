@@ -12,6 +12,8 @@ const usageFreshMs = 5 * minute;
 const proactiveMinLongLeftPercent = 20;
 const proactiveDwellMs = 30 * minute;
 const maxProbe = 2;
+/** A reset settles this long before the new window shows up in usage. */
+const resetGraceMs = minute;
 
 export interface AutoSwitchAccountView {
   readonly id: ProviderAccountId;
@@ -31,6 +33,8 @@ export interface AutoSwitchInput {
   readonly probeWakeAt?: ReadonlyMap<ProviderAccountId, number>;
   readonly recentAutoSwitchAts: ReadonlyArray<number>;
   readonly lastSwitchAt?: number;
+  /** A manual switch delays only proactive rebalancing, like an automatic one. */
+  readonly lastManualSwitchAt?: number;
 }
 
 export type AutoSwitchDecision =
@@ -96,6 +100,7 @@ function summarize(
     sessionLeft,
     longLeft,
     sessionResetAt,
+    longResetAt: Math.min(...longs.map((window) => window.reset ?? Infinity)),
     deadline: Math.min(
       ...longs
         .filter((window) => window.left > threshold)
@@ -156,8 +161,10 @@ export function chooseNextAccount(input: AutoSwitchInput): AutoSwitchDecision {
   const hasHeadroom = (candidate: Summary, strict: boolean) =>
     candidate.sessionLeft >= threshold + (strict ? targetMarginPercent : 1) &&
     candidate.longLeft >= threshold + (strict ? targetMarginPercent : 1) &&
+    // Relaxed session headroom only matters when the session is what ran low.
     (strict ||
       hard ||
+      need !== "session" ||
       !current.hasSession ||
       candidate.sessionLeft >= current.sessionLeft + targetMarginPercent);
   const rank = (strict: boolean) =>
@@ -256,11 +263,15 @@ export function chooseNextAccount(input: AutoSwitchInput): AutoSwitchDecision {
       `Keeping ${active.label}: ${recent.length} automatic switches in the last hour; pausing early rotation.`,
       Math.min(...recent) + hour,
     );
-  if (input.lastSwitchAt !== undefined && now - input.lastSwitchAt < proactiveDwellMs)
+  const lastSwitchAt = Math.max(
+    input.lastSwitchAt ?? -Infinity,
+    input.lastManualSwitchAt ?? -Infinity,
+  );
+  if (now - lastSwitchAt < proactiveDwellMs)
     return stay(
       "dwell",
       `Keeping ${active.label} for at least 30 minutes after the last switch.`,
-      input.lastSwitchAt + proactiveDwellMs,
+      lastSwitchAt + proactiveDwellMs,
     );
   // Use up quota that resets sooner first. A fresh reset moves an account's deadline a week
   // out, so it stops being preferred on its own.
@@ -284,9 +295,20 @@ export function chooseNextAccount(input: AutoSwitchInput): AutoSwitchDecision {
       .map((candidate) => candidate.sessionResetAt)
       .filter((at) => at > now),
   );
+  // A weekly reset moves a deadline, which can make proactive rebalancing worthwhile.
+  const weeklyWakeAt = Math.min(
+    ...[
+      current,
+      ...candidates.filter(
+        (candidate) => candidate.known && !input.probeBlocked?.has(candidate.account.id),
+      ),
+    ]
+      .map((summary) => summary.longResetAt + resetGraceMs)
+      .filter((at) => at > now),
+  );
   return stay(
     "healthy",
     `${active.label} has ${current.sessionLeft}% session and ${current.longLeft}% long-term quota left; no switch needed.`,
-    sessionWakeAt,
+    Math.min(sessionWakeAt, weeklyWakeAt),
   );
 }

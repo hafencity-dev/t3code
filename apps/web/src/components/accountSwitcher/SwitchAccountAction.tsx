@@ -49,7 +49,8 @@ export function SwitchAccountAction({
   busy?: boolean;
   disabledReason?: string | undefined;
   onStart?: (accountId: ProviderAccountId) => void;
-  onEnd?: () => void;
+  /** Called with this button's account id, so the caller clears only its own switch. */
+  onEnd?: (accountId: ProviderAccountId) => void;
   onSwitched?: () => void;
 }) {
   const switchAccount = useAtomCommand(providerAccountsEnvironment.switchAccount, {
@@ -92,7 +93,7 @@ export function SwitchAccountAction({
     } finally {
       pending.current = false;
       setSwitching(false);
-      onEnd?.();
+      onEnd?.(accountId);
     }
   };
   const showSwitching = (switching && running === null) || busy;

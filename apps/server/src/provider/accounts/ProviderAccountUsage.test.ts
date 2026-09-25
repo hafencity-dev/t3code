@@ -51,6 +51,24 @@ describe("provider account usage admission", () => {
     }),
   );
 
+  // S3: only a call that produced a new successful measurement reports it as measured.
+  it.effect("reports whether a refresh measured anything", () =>
+    Effect.gen(function* () {
+      let fail = false;
+      const cache = makeAccountUsageCache({
+        probe: () => (fail ? Effect.fail(new Error("probe failed")) : measuredNow),
+      });
+      expect((yield* cache.refreshMeasured(refresh)).measured).toBe(true);
+      // Inside the 60s floor the gate returns the retained numbers without probing.
+      const gated = yield* cache.refreshMeasured(refresh);
+      expect(gated.measured).toBe(false);
+      expect(gated.usage).toMatchObject({ status: "ready" });
+      yield* TestClock.adjust(minute);
+      fail = true;
+      expect((yield* cache.refreshMeasured(refresh)).measured).toBe(false);
+    }),
+  );
+
   it.effect("enforces a 60-second forced floor, then permits manual refresh", () =>
     Effect.gen(function* () {
       let calls = 0;

@@ -20,6 +20,8 @@ import {
   runStreamInEnvironment,
 } from "./runtime.ts";
 
+const COMMAND_SETTLE_TIMEOUT_MS = 10_000;
+
 /** Increment attempt for an explicit retry; reconnecting never restarts a login. */
 export interface ProviderAccountLoginRequest extends ProviderAccountsStartLoginInput {
   readonly attempt: number;
@@ -66,10 +68,31 @@ export function createProviderAccountsEnvironmentAtoms<R, E>(
       .pipe(Atom.setIdleTTL(0), Atom.withLabel(`environment-data:provider-accounts:login:${key}`));
   });
 
+  /**
+   * Refreshes the mounted list and waits for its next settled result, so a command resolves
+   * only once the UI can show its outcome: controls never re-enable over the old state. An
+   * unmounted list has nothing on screen to catch up; the bound keeps a list that can't load
+   * (a dropped connection) from holding the command open.
+   */
   const onSettled = (
     { environmentId }: { readonly environmentId: EnvironmentId },
     registry: AtomRegistry.AtomRegistry,
-  ) => invalidate(environmentId, registry);
+  ) =>
+    Effect.suspend(() => {
+      const atom = list({ environmentId, input: {} });
+      if (!registry.getNodes().has(atom)) return Effect.void;
+      const before = registry.get(atom);
+      registry.refresh(atom);
+      const settled = (result: typeof before) =>
+        result !== before && result._tag !== "Initial" && !result.waiting;
+      return Effect.callback<void>((resume) => {
+        if (settled(registry.get(atom))) return resume(Effect.void);
+        const cancel = registry.subscribe(atom, (result) => {
+          if (settled(result)) resume(Effect.void);
+        });
+        return Effect.sync(cancel);
+      }).pipe(Effect.timeoutOption(COMMAND_SETTLE_TIMEOUT_MS), Effect.asVoid);
+    });
 
   return {
     list,

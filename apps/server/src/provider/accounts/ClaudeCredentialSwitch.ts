@@ -9,18 +9,31 @@ import {
   withClaudeCredentialLocks,
 } from "./ClaudeCredentialLock.ts";
 import { syncDirectory } from "./durableFs.ts";
+import { hasIdentity, type AccountIdentity } from "./accountIdentity.ts";
 
 type JsonObject = Record<string, unknown>;
-export type ClaudeCredentialIdentity = { email?: string; accountUuid?: string };
+/** `workspaceId` carries Claude's organizationUuid. */
+export type ClaudeCredentialIdentity = AccountIdentity;
 export type ClaudeCredentialSwitchResult = {
   activeAccountId: string;
   sourceAccountId: string;
   originalSourceAccountId: string;
   externalIdentity?: ClaudeCredentialIdentity;
+  /** The active home was signed out in a terminal: the source moved away with no token. */
+  sourceSignedOut?: true;
+};
+/** Recovery found a journal it abandoned; every store was left untouched. */
+export type ClaudeCredentialSwitchAbandoned = {
+  abandoned: true;
+  phase: ClaudeCredentialSwitchPhase;
+  reason: string;
+  journalPath: string;
 };
 export class ClaudeCredentialSwitchError extends Error {
   override readonly name = "ClaudeCredentialSwitchError";
 }
+/** The journal's authority cannot be re-established; retrying can never resolve it. */
+export class ClaudeCredentialSwitchUnrecoverableError extends ClaudeCredentialSwitchError {}
 
 type Location = { home: string; configDir?: string };
 export interface ClaudeCredentialAdapter {
@@ -80,6 +93,7 @@ type Journal = {
   /** Identity observed in the active config at preparation; never token material. */
   sourceIdentity: ClaudeCredentialIdentity;
   externalIdentity?: ClaudeCredentialIdentity;
+  sourceSignedOut?: true;
   /** Non-secret lineage fingerprints; recovery only deletes a store copy that matches. */
   sourceFingerprint?: string;
   targetFingerprint?: string;
@@ -329,6 +343,9 @@ function identity(config: JsonObject): ClaudeCredentialIdentity {
   return {
     ...(typeof account.emailAddress === "string" ? { email: account.emailAddress } : {}),
     ...(typeof account.accountUuid === "string" ? { accountUuid: account.accountUuid } : {}),
+    ...(typeof account.organizationUuid === "string"
+      ? { workspaceId: account.organizationUuid }
+      : {}),
   };
 }
 /** Identity recorded in a Claude global config (`.claude.json`); unreadable configs have none. */
@@ -339,12 +356,15 @@ export async function readClaudeConfigIdentity(path: string): Promise<ClaudeCred
 function identityEquals(left: ClaudeCredentialIdentity, right: ClaudeCredentialIdentity) {
   return (
     left.accountUuid === right.accountUuid &&
-    left.email?.toLowerCase() === right.email?.toLowerCase()
+    left.email?.toLowerCase() === right.email?.toLowerCase() &&
+    // Journals from before organizations were recorded carry none; they still compare.
+    !(left.workspaceId && right.workspaceId && left.workspaceId !== right.workspaceId)
   );
 }
 function sameIdentity(left: JsonObject, right: JsonObject) {
   const a = identity(left);
   const b = identity(right);
+  if (a.workspaceId && b.workspaceId && a.workspaceId !== b.workspaceId) return false;
   return b.accountUuid
     ? a.accountUuid === b.accountUuid
     : Boolean(b.email && a.email?.toLowerCase() === b.email.toLowerCase());
@@ -397,6 +417,7 @@ function result(journal: Journal): ClaudeCredentialSwitchResult {
     sourceAccountId: journal.sourceAccountId,
     originalSourceAccountId: journal.originalSourceAccountId,
     ...(journal.externalIdentity ? { externalIdentity: journal.externalIdentity } : {}),
+    ...(journal.sourceSignedOut ? { sourceSignedOut: true as const } : {}),
   };
 }
 async function validateLocations(input: Context, source: string, target: string) {
@@ -467,7 +488,7 @@ async function finish(
   if (journal.phase === "prepared") {
     const activeConfig = await readJson(journal.activeConfigPath);
     if (!identityEquals(identity(activeConfig), journal.sourceIdentity)) {
-      throw new ClaudeCredentialSwitchError(
+      throw new ClaudeCredentialSwitchUnrecoverableError(
         "Claude active identity changed during interrupted switching; recovery left untouched.",
       );
     }
@@ -482,7 +503,7 @@ async function finish(
     if (currentFingerprint !== undefined && currentFingerprint !== journal.sourceFingerprint) {
       const activeConfig = await readJson(journal.activeConfigPath);
       if (!identityEquals(identity(activeConfig), journal.sourceIdentity)) {
-        throw new ClaudeCredentialSwitchError(
+        throw new ClaudeCredentialSwitchUnrecoverableError(
           "Claude active credentials changed during interrupted switching; recovery left untouched.",
         );
       }
@@ -495,7 +516,7 @@ async function finish(
   if (journal.phase === "activating") {
     const targetToken = token(await credentials.read(target));
     if (!targetToken)
-      throw new ClaudeCredentialSwitchError(
+      throw new ClaudeCredentialSwitchUnrecoverableError(
         "Claude target account has no saved credentials; recovery is required.",
       );
     const current = await credentials.read(active);
@@ -512,7 +533,7 @@ async function finish(
       // The credentials write may or may not have landed before a refresh rotated the
       // token; only a target identity in the config (written after credentials) proves
       // it did. Without that, authority cannot be established: delete nothing.
-      throw new ClaudeCredentialSwitchError(
+      throw new ClaudeCredentialSwitchUnrecoverableError(
         "Claude active credentials changed during interrupted switching; recovery left untouched.",
       );
     }
@@ -522,25 +543,21 @@ async function finish(
     assertHeld();
     await persistPhase(context, journal, "activated", deps, assertHeld);
   }
-  if (["activated", "checked-out", "committed"].includes(journal.phase)) {
+  // Checked out and committed, the credentials already moved; only the registry commit remains,
+  // so those phases skip this check and a later terminal login is filed by reconcile instead.
+  if (journal.phase === "activated") {
     const activeConfig = await readJson(journal.activeConfigPath);
     const targetConfig = await readJson(NodePath.join(target.home, ".claude.json"));
     if (!sameIdentity(activeConfig, targetConfig) || !token(await credentials.read(active))) {
-      throw new ClaudeCredentialSwitchError(
+      throw new ClaudeCredentialSwitchUnrecoverableError(
         "Claude active identity changed during interrupted switching; recovery left untouched.",
       );
     }
-  }
-  if (journal.phase === "activated") {
-    if (!token(await credentials.read(active)))
-      throw new ClaudeCredentialSwitchError(
-        "Claude active credentials are missing; recovery is required.",
-      );
     const checkedOut = await credentials.read(target);
     const storeFingerprint = fingerprint(token(checkedOut));
     // Only the duplicate we moved may be removed; anything else was written by someone else.
     if (storeFingerprint !== undefined && storeFingerprint !== journal.targetFingerprint) {
-      throw new ClaudeCredentialSwitchError(
+      throw new ClaudeCredentialSwitchUnrecoverableError(
         "Claude target store credentials changed during interrupted switching; recovery left untouched.",
       );
     }
@@ -593,7 +610,24 @@ export async function switchClaudeCredentials(
         observed,
         fingerprint: JSON.stringify(config.oauthAccount),
         external: false,
+        signedOut: false,
       };
+    // A terminal `claude auth logout`: no identity is not a new account. The source leaves
+    // with no token; a token without any identity is not ours to file anywhere.
+    if (!hasIdentity(observed)) {
+      if (token(await adapter(deps).read(activeLocation(input))))
+        throw new ClaudeCredentialSwitchError(
+          "Claude active account changed outside the application.",
+        );
+      return {
+        store: input.sourceStore,
+        accountId: input.sourceAccountId,
+        observed,
+        fingerprint: JSON.stringify(config.oauthAccount),
+        external: false,
+        signedOut: true,
+      };
+    }
     if (!input.resolveSource)
       throw new ClaudeCredentialSwitchError(
         "Claude active account changed outside the application.",
@@ -605,6 +639,7 @@ export async function switchClaudeCredentials(
       observed,
       fingerprint: JSON.stringify(config.oauthAccount),
       external: true,
+      signedOut: false,
     };
   });
   const sourceStore = discovered.store;
@@ -674,6 +709,7 @@ export async function switchClaudeCredentials(
         originalSourceAccountId: input.sourceAccountId,
         sourceIdentity: discovered.observed,
         ...(discovered.external ? { externalIdentity: discovered.observed } : {}),
+        ...(discovered.signedOut ? { sourceSignedOut: true as const } : {}),
         ...(sourceFingerprint === undefined ? {} : { sourceFingerprint }),
         targetFingerprint: fingerprint(targetToken)!,
       };
@@ -689,8 +725,15 @@ export async function switchClaudeCredentials(
   }
 }
 
-/** Recovery never trusts persisted paths without comparing the current configured home/root. */
-export async function recoverClaudeCredentialSwitch(input: Context, deps: Dependencies = {}) {
+/**
+ * Recovery never trusts persisted paths without comparing the current configured home/root.
+ * A journal whose authority can't be re-established is abandoned: every store stays as it is
+ * and the journal is kept as `claude-credential-switch.abandoned-<ts>.json` for evidence.
+ */
+export async function recoverClaudeCredentialSwitch(
+  input: Context,
+  deps: Dependencies = {},
+): Promise<ClaudeCredentialSwitchResult | ClaudeCredentialSwitchAbandoned | undefined> {
   const value = await readJson(NodePath.join(input.stateDir, journalName));
   if (!Object.keys(value).length) return undefined;
   if (
@@ -733,7 +776,25 @@ export async function recoverClaudeCredentialSwitch(input: Context, deps: Depend
         );
       }
       await validateLocations(input, journal.sourceStore, journal.targetStore);
-      return finish(input, journal, deps, assertHeld);
+      try {
+        return await finish(input, journal, deps, assertHeld);
+      } catch (error) {
+        if (!(error instanceof ClaudeCredentialSwitchUnrecoverableError)) throw error;
+        const journalPath = NodePath.join(input.stateDir, journalName);
+        const abandonedPath = NodePath.join(
+          input.stateDir,
+          `claude-credential-switch.abandoned-${new Date().toISOString().replaceAll(/[:.]/gu, "-")}.json`,
+        );
+        assertHeld();
+        await NodeFSP.rename(journalPath, abandonedPath);
+        await syncDirectory(input.stateDir);
+        return {
+          abandoned: true,
+          phase: journal.phase,
+          reason: error.message,
+          journalPath: abandonedPath,
+        } satisfies ClaudeCredentialSwitchAbandoned;
+      }
     },
   );
 }

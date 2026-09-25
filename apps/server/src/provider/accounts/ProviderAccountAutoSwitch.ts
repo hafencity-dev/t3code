@@ -33,9 +33,10 @@ export interface ProviderAccountAutoSwitchDependencies {
   readonly read: (
     driver: ProviderAccountDriver,
   ) => Effect.Effect<ProviderAccountAutoSwitchRead, ProviderAccountError>;
+  /** Resolves to the ids that got a new measurement; the others count as failed probes. */
   readonly refresh: (
     accountIds: readonly ProviderAccountId[],
-  ) => Effect.Effect<unknown, ProviderAccountError>;
+  ) => Effect.Effect<ReadonlyArray<ProviderAccountId>, ProviderAccountError>;
   /** Unlocked switch with interruptRunning:false; only restart-mode groups check busy. */
   readonly switchAccount: (
     accountId: ProviderAccountId,
@@ -209,6 +210,9 @@ export const makeProviderAccountAutoSwitch = Effect.fn("makeProviderAccountAutoS
             ...(probeWakeAt ? { probeWakeAt } : {}),
             recentAutoSwitchAts: runtime.recent,
             ...(config.lastSwitch ? { lastSwitchAt: Date.parse(config.lastSwitch.at) } : {}),
+            ...(config.lastManualSwitchAt
+              ? { lastManualSwitchAt: Date.parse(config.lastManualSwitchAt) }
+              : {}),
           });
           runtime.needsIdle =
             group.switchMode === "restart" &&
@@ -257,6 +261,19 @@ export const makeProviderAccountAutoSwitch = Effect.fn("makeProviderAccountAutoS
           // this mutation; a turn starting between that check and settings patch is a v1 race.
           const switched = yield* deps.switchAccount(target.id).pipe(
             Effect.as(true),
+            Effect.catchTag("ProviderAccountError", (error) =>
+              Effect.gen(function* () {
+                runtime.pendingKey = undefined;
+                runtime.state = {
+                  state: "paused",
+                  message: `Couldn't switch to ${target.label}: ${error.message}`,
+                };
+                yield* Effect.logWarning("Provider account auto-switch could not switch", {
+                  driver,
+                });
+                return false;
+              }),
+            ),
             Effect.catchTag("ProviderAccountBusyError", (error) =>
               Effect.gen(function* () {
                 if (group.switchMode === "hot") return yield* error;
@@ -308,14 +325,12 @@ export const makeProviderAccountAutoSwitch = Effect.fn("makeProviderAccountAutoS
       if (ids.length === 0) return;
       remainingProbes = (remainingProbes ?? 0) - ids.length;
       for (const id of ids) probed.add(id);
-      // Network probes deliberately do not own the mutation semaphore.
-      yield* deps.refresh(ids).pipe(
-        Effect.catch(() =>
-          Effect.sync(() => {
-            for (const id of ids) failed.add(id);
-          }),
-        ),
-      );
+      // Network probes deliberately do not own the mutation semaphore. A probe that was
+      // skipped (gated, stale) measured nothing, so its retained data must not look fresh.
+      const measured = yield* deps
+        .refresh(ids)
+        .pipe(Effect.catch(() => Effect.succeed<ReadonlyArray<ProviderAccountId>>([])));
+      for (const id of ids) if (!measured.includes(id)) failed.add(id);
     }
   });
   for (const driver of drivers) {

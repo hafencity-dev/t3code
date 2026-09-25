@@ -6,6 +6,7 @@ import * as NodeStream from "node:stream";
 import { describe, expect, it, vi } from "@effect/vitest";
 import {
   ProviderAccountLogin,
+  ProviderAccountLoginError,
   ProviderAccountLoginParser,
   type PreparedProviderAccountLogin,
   type ProviderAccountLoginEvent,
@@ -97,11 +98,14 @@ const claudePrompt =
 const codexPrompt =
   "\nWelcome to Codex [v\x1b[90m0.155.1\x1b[0m]\n\x1b[90mOpenAI's command-line coding agent\x1b[0m\n\nFollow these steps to sign in with ChatGPT using device code authorization:\n\n1. Open this link in your browser and sign in to your account\n   \x1b[94mhttps://auth.openai.com/codex/device\x1b[0m\n\n2. Enter this one-time code \x1b[90m(expires in 15 minutes)\x1b[0m\n   \x1b[94mABCD-EFGHI\x1b[0m\n\n\x1b[90mContinue only if you started this login in Codex. If a website or another person gave you this code, cancel.\x1b[0m\n";
 
-function codexAuth() {
+function codexAuth(workspace?: string) {
   const payload = Buffer.from(
     JSON.stringify({
       email: "person@example.test",
-      "https://api.openai.com/auth": { chatgpt_plan_type: "plus" },
+      "https://api.openai.com/auth": {
+        chatgpt_plan_type: "plus",
+        ...(workspace ? { chatgpt_account_id: workspace } : {}),
+      },
     }),
   ).toString("base64url");
   return JSON.stringify({
@@ -457,6 +461,21 @@ describe("ProviderAccountLogin", () => {
     expect(f.cleanup).not.toHaveBeenCalled();
   });
 
+  // S9: the ChatGPT workspace is part of a Codex identity.
+  it("reads the ChatGPT workspace from Codex ID-token claims", async () => {
+    const f = fixture({ readAuthFile: async () => codexAuth("ws-team") });
+    const account = { ...f.account, driver: "codex" as const };
+    f.prepare.mockResolvedValue(account);
+    const running = f.start();
+    (await f.spawned.promise).emit("close", 0, null);
+    await running;
+    expect(f.complete).toHaveBeenCalledWith(account, {
+      email: "person@example.test",
+      plan: "plus",
+      workspaceId: "ws-team",
+    });
+  });
+
   it("reports unsupported keyring storage when Codex writes no auth file", async () => {
     const f = fixture({
       readAuthFile: async () => {
@@ -520,6 +539,24 @@ describe("ProviderAccountLogin", () => {
     item.child.emit("close", 1, null);
     await expect(logout).rejects.toThrow("Provider logout failed. The account was not removed.");
     expect(f.cleanup).not.toHaveBeenCalled();
+  });
+
+  // S10: an account with no credentials left is already logged out; removal may proceed.
+  it("treats a logout of an account that is not logged in as done", async () => {
+    const item = fakeChild();
+    const f = fixture({ spawn: () => item.child });
+    const logout = f.login.logout(f.account);
+    item.child.stdout.write("Not logged in.\n");
+    item.child.emit("close", 1, null);
+    await expect(logout).resolves.toBeUndefined();
+  });
+
+  // S10: code and session errors carry a typed, safe message the service passes through.
+  it("rejects codes for unknown sessions with a typed, safe error", async () => {
+    const f = fixture();
+    const error = await f.login.submitCode("owner", "missing", "code").catch((cause) => cause);
+    expect(error).toBeInstanceOf(ProviderAccountLoginError);
+    expect(error.message).toBe("Sign-in session not found.");
   });
 
   it("skips home creation entirely when the stream was already cancelled", async () => {

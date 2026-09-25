@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 import {
+  EnvironmentId,
   ProviderAccountId,
   ProviderInstanceId,
   ProviderDriverKind,
@@ -11,6 +12,18 @@ import {
 import {
   accountFreshness,
   accountPrimaryAction,
+  autoSwitchInput,
+  autoSwitchNowBlockedReason,
+  endRename,
+  endSwitch,
+  loginWizardView,
+  nextLoginPrompt,
+  renameRestoresFocus,
+  resolveAccountsDevice,
+  shouldToastAutoSwitch,
+  usageResetCheckWillRun,
+  usageResetKey,
+  usageWindowTooltipLine,
   accountStatusMessage,
   accountSubtitle,
   accountTone,
@@ -45,6 +58,8 @@ const window = (usedPercent: number): ServerProviderUsageWindow => ({
   label: "5h",
   usedPercent,
 });
+/** Fixture windows carry no reset time, so any clock works for them. */
+const NOW = Date.parse("2026-09-23T12:30:00Z");
 function account(
   id: string,
   used?: number,
@@ -87,19 +102,23 @@ describe("account choices", () => {
   });
   it("labels resets, and marks a passed reset as waiting for a check", () => {
     const now = Date.parse("2026-09-23T12:00:00Z");
-    expect(usageResetLabel(window(10), now)).toBeNull();
-    expect(usageResetLabel({ ...window(10), resetsAt: "2026-09-23T15:30:00Z" }, now)).toBe(
+    expect(usageResetLabel(window(10), now, true)).toBeNull();
+    expect(usageResetLabel({ ...window(10), resetsAt: "2026-09-23T15:30:00Z" }, now, true)).toBe(
       "in 3h 30m",
     );
-    expect(usageResetLabel({ ...window(10), resetsAt: "2026-09-23T11:00:00Z" }, now)).toBe(
+    expect(usageResetLabel({ ...window(10), resetsAt: "2026-09-23T11:00:00Z" }, now, true)).toBe(
       "Resets now · checking…",
+    );
+    // No check will run: never promise one.
+    expect(usageResetLabel({ ...window(10), resetsAt: "2026-09-23T11:00:00Z" }, now, false)).toBe(
+      "Reset · not checked yet",
     );
   });
   it("never shows a stale percent next to a reset that already passed", () => {
     const now = Date.parse("2026-09-23T12:00:00Z");
     const weekly = { ...window(100), id: "weekly", kind: "weekly" as const };
     expect(
-      accountUsageCellView([{ ...weekly, resetsAt: "2026-09-23T11:00:00Z" }], "weekly", now),
+      accountUsageCellView([{ ...weekly, resetsAt: "2026-09-23T11:00:00Z" }], "weekly", now, true),
     ).toMatchObject({
       remaining: null,
       reset: "Resets now · checking…",
@@ -107,7 +126,7 @@ describe("account choices", () => {
       tone: "default",
     });
     expect(
-      accountUsageCellView([{ ...weekly, resetsAt: "2026-09-24T12:00:00Z" }], "weekly", now),
+      accountUsageCellView([{ ...weekly, resetsAt: "2026-09-24T12:00:00Z" }], "weekly", now, true),
     ).toMatchObject({ remaining: 0, reset: "in 1d 0h", resetPending: false, tone: "error" });
   });
   it("uses the tightest window, not an average", () => {
@@ -117,23 +136,21 @@ describe("account choices", () => {
         windows: [window(20), { ...window(94), id: "weekly", kind: "weekly" }],
       },
     });
-    expect(remainingPercent(tight)).toBe(6);
-    expect(accountTone(tight)).toBe("error");
+    expect(remainingPercent(tight, NOW)).toBe(6);
+    expect(accountTone(tight, NOW)).toBe("error");
   });
   it("recommends only a ready, known, strictly better inactive account when active is low", () => {
     const active = account("active", 75, { active: true });
     const better = account("better", 30);
     expect(
-      bestAccountId([
-        active,
-        account("signed-out", 0, { status: "signedOut" }),
-        account("unknown"),
-        better,
-      ]),
+      bestAccountId(
+        [active, account("signed-out", 0, { status: "signedOut" }), account("unknown"), better],
+        NOW,
+      ),
     ).toBe(better.id);
-    expect(bestAccountId([account("active", 74, { active: true }), better])).toBeNull();
-    expect(bestAccountId([active, account("equal", 75)])).toBeNull();
-    expect(bestAccountId([account("active", undefined, { active: true }), better])).toBeNull();
+    expect(bestAccountId([account("active", 74, { active: true }), better], NOW)).toBeNull();
+    expect(bestAccountId([active, account("equal", 75)], NOW)).toBeNull();
+    expect(bestAccountId([account("active", undefined, { active: true }), better], NOW)).toBeNull();
   });
   it("does not recommend unavailable data or treat it as zero usage", () => {
     const unavailable = account("unavailable", 0, {
@@ -143,14 +160,14 @@ describe("account choices", () => {
         unavailable: { reason: "probeFailed" },
       },
     });
-    expect(remainingPercent(unavailable)).toBeNull();
-    expect(bestAccountId([account("active", 90, { active: true }), unavailable])).toBeNull();
+    expect(remainingPercent(unavailable, NOW)).toBeNull();
+    expect(bestAccountId([account("active", 90, { active: true }), unavailable], NOW)).toBeNull();
   });
   it("uses warning and error thresholds and marks non-ready accounts as errors", () => {
-    expect(accountTone(account("a", 90))).toBe("error");
-    expect(accountTone(account("a", 75))).toBe("warning");
-    expect(accountTone(account("a", 74))).toBe("secondary");
-    expect(accountTone(account("a", undefined, { status: "pending" }))).toBe("error");
+    expect(accountTone(account("a", 90), NOW)).toBe("error");
+    expect(accountTone(account("a", 75), NOW)).toBe("warning");
+    expect(accountTone(account("a", 74), NOW)).toBe("secondary");
+    expect(accountTone(account("a", undefined, { status: "pending" }), NOW)).toBe("error");
   });
 });
 
@@ -226,20 +243,23 @@ describe("sidebar account badges", () => {
   const group = (accounts: readonly ProviderAccount[]) => ({ driver: "codex" as const, accounts });
   it("hides a single healthy default and empty groups", () => {
     expect(
-      shouldShowAccountBadge(group([account("default", 20, { active: true })]), [provider()]),
+      shouldShowAccountBadge(group([account("default", 20, { active: true })]), [provider()], NOW),
     ).toBe(false);
     expect(
-      shouldShowAccountBadge(group([account("default", undefined, { active: true })]), [
-        provider(),
-      ]),
+      shouldShowAccountBadge(
+        group([account("default", undefined, { active: true })]),
+        [provider()],
+        NOW,
+      ),
     ).toBe(false);
-    expect(shouldShowAccountBadge(group([]), [provider()])).toBe(false);
+    expect(shouldShowAccountBadge(group([]), [provider()], NOW)).toBe(false);
   });
   it("shows multiple saved accounts or an active account needing attention", () => {
     expect(
       shouldShowAccountBadge(
         group([account("default", 20, { active: true }), account("work", 10)]),
         [provider()],
+        NOW,
       ),
     ).toBe(true);
     for (const active of [
@@ -249,22 +269,28 @@ describe("sidebar account badges", () => {
       account("signed-out", undefined, { active: true, status: "signedOut" }),
       account("pending", undefined, { active: true, status: "pending" }),
     ]) {
-      expect(shouldShowAccountBadge(group([active]), [provider()])).toBe(true);
+      expect(shouldShowAccountBadge(group([active]), [provider()], NOW)).toBe(true);
     }
   });
   it("never shows badges for missing or disabled default instances", () => {
     const accounts = group([account("default", 99, { active: true }), account("work", 20)]);
-    expect(shouldShowAccountBadge(accounts, [])).toBe(false);
-    expect(shouldShowAccountBadge(accounts, [provider({ enabled: false })])).toBe(false);
+    expect(shouldShowAccountBadge(accounts, [], NOW)).toBe(false);
+    expect(shouldShowAccountBadge(accounts, [provider({ enabled: false })], NOW)).toBe(false);
     expect(
-      shouldShowAccountBadge(accounts, [
-        provider({ instanceId: ProviderInstanceId.make("codex-work") }),
-      ]),
+      shouldShowAccountBadge(
+        accounts,
+        [provider({ instanceId: ProviderInstanceId.make("codex-work") })],
+        NOW,
+      ),
     ).toBe(false);
   });
   it("does not tint a single healthy active account for an inactive account's status", () => {
     expect(
-      shouldShowAccountBadge(group([account("inactive", 99, { status: "error" })]), [provider()]),
+      shouldShowAccountBadge(
+        group([account("inactive", 99, { status: "error" })]),
+        [provider()],
+        NOW,
+      ),
     ).toBe(false);
   });
 });
@@ -394,7 +420,7 @@ describe("freshness", () => {
       narrowText: "Checked 3m ago",
       tone: "muted",
       canRefresh: false,
-      refreshTooltip: "You can refresh again in 2m",
+      refreshTooltip: "Checks resume in 2m",
     });
     expect(state?.text).not.toContain("Retry");
     expect(accountFreshness(fresh, now + 3 * 60_000, idle)).toMatchObject({
@@ -543,7 +569,7 @@ describe("row state", () => {
   it("never recommends or probes a duplicate and counts it once", () => {
     const active = account("active", 90, { active: true });
     const copy = account("copy", 10, { duplicateOf: active.id });
-    expect(bestAccountId([active, copy])).toBeNull();
+    expect(bestAccountId([active, copy], NOW)).toBeNull();
     expect(
       autoRefreshAccountId([account("copy", undefined, { duplicateOf: active.id })], 0),
     ).toBeNull();
@@ -816,5 +842,216 @@ describe("windowPrimerStatus", () => {
     expect(windowPrimerStatus({ enabled: true }, accounts, now)).toBe(
       "No signed-in account can start a window right now.",
     );
+  });
+});
+
+describe("audit regressions", () => {
+  const id = (value: string) => ProviderAccountId.make(value);
+  const now = Date.parse("2026-09-23T12:30:00Z");
+  const measuredAt = "2026-09-23T12:00:00Z";
+  const resetWindow = (usedPercent: number, resetsAt: string): ServerProviderUsageWindow => ({
+    ...window(usedPercent),
+    resetsAt,
+  });
+
+  it("keeps the sign-in prompt on screen while the account is verified", () => {
+    const browser = { _tag: "browser", url: "https://claude.ai/x", needsCode: true } as const;
+    let prompt = nextLoginPrompt(null, { _tag: "started", loginId: "l", accountId: id("a") });
+    expect(loginWizardView({ started: true, prompt, event: undefined, error: null })).toEqual({
+      kind: "gettingLink",
+    });
+    prompt = nextLoginPrompt(prompt, browser);
+    prompt = nextLoginPrompt(prompt, { _tag: "verifying" });
+    expect(prompt).toBe(browser);
+    expect(
+      loginWizardView({ started: true, prompt, event: { _tag: "verifying" }, error: null }),
+    ).toEqual({ kind: "prompt", prompt: browser, verifying: true });
+    // Verifying before any prompt reads as checking, never as fetching a link.
+    expect(
+      loginWizardView({ started: true, prompt: null, event: { _tag: "verifying" }, error: null }),
+    ).toEqual({ kind: "verifying" });
+    expect(loginWizardView({ started: false, prompt, event: undefined, error: null }).kind).toBe(
+      "name",
+    );
+    expect(
+      loginWizardView({ started: true, prompt, event: { _tag: "verifying" }, error: "Lost" }),
+    ).toEqual({ kind: "failed", message: "Lost" });
+    expect(
+      loginWizardView({
+        started: true,
+        prompt,
+        event: { _tag: "completed", accountId: id("a") },
+        error: null,
+      }).kind,
+    ).toBe("completed");
+  });
+
+  it("pins the dialog's device: a drop reads as offline and never jumps to another", () => {
+    const laptop = EnvironmentId.make("laptop");
+    const server = EnvironmentId.make("server");
+    expect(resolveAccountsDevice(laptop, [server], true)).toEqual({
+      environmentId: null,
+      offlineId: laptop,
+    });
+    expect(resolveAccountsDevice(laptop, [server, laptop], true)).toEqual({
+      environmentId: laptop,
+      offlineId: null,
+    });
+    // Closed, the sidebar follows the first connected device.
+    expect(resolveAccountsDevice(laptop, [server], false)).toEqual({
+      environmentId: server,
+      offlineId: null,
+    });
+    expect(resolveAccountsDevice(null, [], true)).toEqual({ environmentId: null, offlineId: null });
+  });
+
+  it("sends a threshold only when it changes", () => {
+    expect(autoSwitchInput("codex", false, 10)).toEqual({ driver: "codex", enabled: false });
+    expect(autoSwitchInput("codex", true, 10, 10)).toEqual({ driver: "codex", enabled: true });
+    expect(autoSwitchInput("codex", true, 10, 15)).toEqual({
+      driver: "codex",
+      enabled: true,
+      thresholdPercent: 15,
+    });
+  });
+
+  it("blocks Switch now while any switch runs, and a switch ending clears only itself", () => {
+    const target = id("b");
+    expect(autoSwitchNowBlockedReason({}, null, target)).toBeUndefined();
+    expect(autoSwitchNowBlockedReason({}, id("c"), target)).toBe("Another switch is in progress.");
+    expect(autoSwitchNowBlockedReason({}, target, target)).toBeUndefined();
+    expect(autoSwitchNowBlockedReason({ warning: "Paused" }, null, target)).toBe(
+      "Switching is paused. See the warning above.",
+    );
+    expect(endSwitch(id("c"), target)).toBe(id("c"));
+    expect(endSwitch(target, target)).toBeNull();
+  });
+
+  it("never counts a window whose reset passed as current quota", () => {
+    const passed = account("a", undefined, {
+      usage: {
+        checkedAt: measuredAt,
+        windows: [resetWindow(95, "2026-09-23T12:10:00Z"), { ...window(40), id: "weekly" }],
+      },
+    });
+    expect(remainingPercent(passed, now)).toBe(60);
+    expect(accountTone(passed, now)).toBe("secondary");
+    const onlyPassed = account("b", undefined, {
+      usage: { checkedAt: measuredAt, windows: [resetWindow(0, "2026-09-23T12:10:00Z")] },
+    });
+    expect(remainingPercent(onlyPassed, now)).toBeNull();
+    // Unknown after a reset is never recommended.
+    expect(bestAccountId([account("active", 90, { active: true }), onlyPassed], now)).toBeNull();
+    expect(usageWindowTooltipLine(resetWindow(95, "2026-09-23T12:10:00Z"), now, false)).toBe(
+      "5h: reset, not checked yet",
+    );
+    expect(usageWindowTooltipLine(window(40), now, false)).toBe("5h: 60% left");
+  });
+
+  it("says checking after a reset only when a check will run", () => {
+    const stale = (overrides: Partial<ProviderAccount> = {}) =>
+      account("a", undefined, {
+        usage: { checkedAt: measuredAt, windows: [resetWindow(80, "2026-09-23T12:10:00Z")] },
+        ...overrides,
+      });
+    const key = usageResetKey(stale({ active: true }), now);
+    expect(key).not.toBeNull();
+    // The active account gets exactly one live refresh per measurement.
+    expect(usageResetCheckWillRun(stale({ active: true }), now, new Set())).toBe(true);
+    expect(usageResetCheckWillRun(stale({ active: true }), now, new Set([key!]))).toBe(false);
+    expect(usageResetCheckWillRun(stale(), now, new Set())).toBe(true);
+    expect(
+      usageResetCheckWillRun(
+        stale({ usageRefresh: { nextAllowedAt: "2026-09-23T12:40:00Z" } }),
+        now,
+        new Set(),
+      ),
+    ).toBe(false);
+    expect(usageResetCheckWillRun(stale({ status: "signedOut" }), now, new Set())).toBe(false);
+    // Measured after the reset: nothing is stale, nothing will run.
+    const measuredLater = account("a", undefined, {
+      usage: {
+        checkedAt: "2026-09-23T12:20:00Z",
+        windows: [resetWindow(80, "2026-09-23T12:10:00Z")],
+      },
+    });
+    expect(usageResetKey(measuredLater, now)).toBeNull();
+  });
+
+  it("offers Switch to keeper only for a ready keeper, otherwise a blocked Remove", () => {
+    const codex = account("copy", 0, { active: true, duplicateOf: id("keeper") });
+    const signedOutKeeper = account("keeper", 0, { status: "signedOut" });
+    expect(accountPrimaryAction(codex, { accounts: [signedOutKeeper, codex] }, "idle")).toEqual({
+      kind: "remove",
+    });
+    expect(removeBlockedReason(codex, false)).toBe("Switch to another account first.");
+    const readyKeeper = account("keeper", 0);
+    expect(accountPrimaryAction(codex, { accounts: [readyKeeper, codex] }, "idle")).toEqual({
+      kind: "switchToKeeper",
+      keeper: readyKeeper,
+    });
+  });
+
+  it("ends only the row's own rename and restores focus only for Enter and Escape", () => {
+    expect(endRename(id("a"), id("a"))).toBeNull();
+    expect(endRename(id("b"), id("a"))).toBe(id("b"));
+    expect(endRename(null, id("a"))).toBeNull();
+    expect(renameRestoresFocus("enter")).toBe(true);
+    expect(renameRestoresFocus("escape")).toBe(true);
+    expect(renameRestoresFocus("blur")).toBe(false);
+  });
+
+  it("toasts each auto-switch once per device, across remounts", () => {
+    const seen = new Map<string, string>();
+    const laptop = EnvironmentId.make("laptop");
+    const switched = {
+      _tag: "switched",
+      driver: "codex",
+      fromAccountId: id("a"),
+      toAccountId: id("b"),
+      toLabel: "B",
+      trigger: "session",
+      reason: "A ran low.",
+      at: "2026-09-23T12:00:00Z",
+    } as const;
+    expect(shouldToastAutoSwitch(seen, laptop, switched)).toBe(true);
+    expect(shouldToastAutoSwitch(seen, laptop, switched)).toBe(false);
+    expect(shouldToastAutoSwitch(seen, EnvironmentId.make("server"), switched)).toBe(true);
+    expect(shouldToastAutoSwitch(seen, laptop, { ...switched, at: "2026-09-23T13:00:00Z" })).toBe(
+      true,
+    );
+    expect(
+      shouldToastAutoSwitch(seen, laptop, { _tag: "blocked", driver: "codex", reason: "x" }),
+    ).toBe(false);
+  });
+
+  it("breaks a headroom tie by the soonest weekly reset", () => {
+    const withWeekly = (name: string, resetsAt: string) =>
+      account(name, undefined, {
+        usage: {
+          checkedAt: measuredAt,
+          windows: [window(20), { ...window(10), id: "weekly", kind: "weekly", resetsAt }],
+        },
+      });
+    const later = withWeekly("a-later", "2026-09-28T12:00:00Z");
+    const sooner = withWeekly("z-sooner", "2026-09-25T12:00:00Z");
+    expect(bestAccountId([account("active", 90, { active: true }), later, sooner], now)).toBe(
+      sooner.id,
+    );
+  });
+
+  it("names the server's gate, budget included, as when checks resume", () => {
+    const gated = account("work", 40, {
+      usage: { checkedAt: "2026-09-23T12:28:00Z", windows: [window(40)] },
+      usageRefresh: { nextAllowedAt: "2026-09-23T12:40:00Z" },
+    });
+    expect(accountFreshness(gated, now, { refreshing: false })).toMatchObject({
+      canRefresh: false,
+      refreshTooltip: "Checks resume in 10m",
+    });
+    // A longer client cooldown is the binding wait.
+    expect(
+      accountFreshness(gated, now, { refreshing: false, cooldownUntil: now + 15 * 60_000 }),
+    ).toMatchObject({ refreshTooltip: "You can refresh again in 15m" });
   });
 });

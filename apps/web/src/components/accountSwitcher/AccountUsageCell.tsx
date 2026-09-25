@@ -1,8 +1,7 @@
 import type { ServerProviderUsageWindow } from "@t3tools/contracts";
-import { formatResetsIn } from "@t3tools/shared/usageLimits";
 import { cn } from "../../lib/utils";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
-import { accountUsageCellView, type UsageCellKind } from "./accounts.logic";
+import { accountUsageCellView, usageWindowTooltipLine, type UsageCellKind } from "./accounts.logic";
 
 const CELL_LABELS = { session: "5-hour", weekly: "Weekly" } as const;
 
@@ -22,12 +21,20 @@ export function AccountUsageCell({
   kind,
   windows,
   now,
+  checking,
 }: {
   kind: UsageCellKind;
   windows: readonly ServerProviderUsageWindow[];
   now: number;
+  /** A check for a passed reset will actually run. */
+  checking: boolean;
 }) {
-  const { all, remaining, reset, resetPending, tone } = accountUsageCellView(windows, kind, now);
+  const { all, remaining, reset, resetPending, tone } = accountUsageCellView(
+    windows,
+    kind,
+    now,
+    checking,
+  );
   const label = CELL_LABELS[kind];
   return (
     <Tooltip>
@@ -52,7 +59,7 @@ export function AccountUsageCell({
               role="progressbar"
               aria-label={
                 resetPending
-                  ? `${label} limit: reset, checking again`
+                  ? `${label} limit: reset, ${checking ? "checking again" : "not checked yet"}`
                   : remaining === null
                     ? `${label} limit: not reported`
                     : `${label} limit: ${remaining}% left${reset ? `, resets ${reset}` : ""}`
@@ -77,15 +84,9 @@ export function AccountUsageCell({
           `No ${kind === "session" ? "5-hour" : "weekly"} limit reported`
         ) : (
           <div className="grid gap-0.5">
-            {all.map((window) => {
-              const resets = formatResetsIn(window, now);
-              return (
-                <span key={window.id}>
-                  {window.label}: {Math.round(100 - window.usedPercent)}% left
-                  {resets ? `, ${resets}` : ""}
-                </span>
-              );
-            })}
+            {all.map((window) => (
+              <span key={window.id}>{usageWindowTooltipLine(window, now, checking)}</span>
+            ))}
           </div>
         )}
       </TooltipPopup>

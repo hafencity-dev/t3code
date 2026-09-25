@@ -31,6 +31,8 @@ export interface PreparedProviderAccountLogin {
 export interface ProviderAccountLoginIdentity {
   readonly email: string;
   readonly plan?: string;
+  /** Codex chatgpt_account_id: a team seat and a personal plan under one email differ. */
+  readonly workspaceId?: string;
 }
 
 export type ProviderAccountLoginEvent =
@@ -119,7 +121,10 @@ const CodexAuth = Schema.Struct({ tokens: Schema.Struct({ id_token: Schema.Strin
 const CodexClaims = Schema.Struct({
   email: Schema.String,
   "https://api.openai.com/auth": Schema.optional(
-    Schema.Struct({ chatgpt_plan_type: Schema.optional(Schema.String) }),
+    Schema.Struct({
+      chatgpt_plan_type: Schema.optional(Schema.String),
+      chatgpt_account_id: Schema.optional(Schema.String),
+    }),
   ),
 });
 
@@ -127,7 +132,14 @@ const decodeClaudeStatus = Schema.decodeUnknownSync(Schema.fromJsonString(Claude
 const decodeCodexAuth = Schema.decodeUnknownSync(Schema.fromJsonString(CodexAuth));
 const decodeCodexClaims = Schema.decodeUnknownSync(Schema.fromJsonString(CodexClaims));
 
-class LoginFailure extends Error {}
+/** A sign-in, code, cancel or logout failure whose message is safe to show; never CLI output. */
+export class ProviderAccountLoginError extends Error {
+  override readonly name = "ProviderAccountLoginError";
+}
+const LoginFailure = ProviderAccountLoginError;
+/** Logging out an account that has no credentials left is already the goal. */
+const notLoggedIn =
+  /not (?:currently )?(?:logged|signed) in|no (?:stored |saved )?credentials|not authenticated/iu;
 
 /** Promise lifecycle adapter; the RPC stream owns its AbortSignal and awaits teardown. */
 export class ProviderAccountLogin {
@@ -251,15 +263,15 @@ export class ProviderAccountLogin {
   async submitCode(owner: string, loginId: string, code: string): Promise<void> {
     const session = this.#owned(owner, loginId);
     if (!session.acceptsCode || !session.child || session.controller.signal.aborted)
-      throw new Error("This sign-in is not waiting for a code.");
+      throw new LoginFailure("This sign-in is not waiting for a code.");
     // eslint-disable-next-line no-control-regex -- Reject line injection into CLI stdin.
     if (!code.trim() || code.length > 8192 || /[\r\n\x00]/u.test(code))
-      throw new Error("Invalid sign-in code.");
+      throw new LoginFailure("Invalid sign-in code.");
     const child = session.child;
     session.acceptsCode = false;
     await new Promise<void>((resolve, reject) => {
       child.stdin.write(`${code.trim()}\n`, (error) =>
-        error ? reject(new Error("Unable to submit sign-in code.")) : resolve(),
+        error ? reject(new LoginFailure("Unable to submit sign-in code.")) : resolve(),
       );
     });
   }
@@ -272,7 +284,7 @@ export class ProviderAccountLogin {
 
   #owned(owner: string, loginId: string): LoginSession {
     const session = this.#sessions.get(loginId);
-    if (!session || session.owner !== owner) throw new Error("Sign-in session not found.");
+    if (!session || session.owner !== owner) throw new LoginFailure("Sign-in session not found.");
     return session;
   }
 
@@ -393,7 +405,12 @@ export class ProviderAccountLogin {
     const claims = decodeCodexClaims(Buffer.from(payload, "base64url").toString("utf8"));
     if (!claims.email.trim()) throw new LoginFailure("Codex did not report an account email.");
     const plan = claims["https://api.openai.com/auth"]?.chatgpt_plan_type;
-    return { email: claims.email.trim(), ...(plan ? { plan } : {}) };
+    const workspaceId = claims["https://api.openai.com/auth"]?.chatgpt_account_id?.trim();
+    return {
+      email: claims.email.trim(),
+      ...(plan ? { plan } : {}),
+      ...(workspaceId ? { workspaceId } : {}),
+    };
   }
 
   isBusy(accountId: string): boolean {
@@ -418,14 +435,22 @@ export class ProviderAccountLogin {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 5000);
     timer.unref();
+    // Inspected only for "not logged in"; never logged or forwarded.
+    let output = "";
     try {
       const code = await this.#run(
         account,
         account.driver === "claudeAgent" ? ["auth", "logout"] : ["logout"],
         this.#environment(account),
         controller.signal,
-      );
-      if (code !== 0)
+        undefined,
+        (chunk) => {
+          output = (output + chunk).slice(-4_096);
+        },
+      ).catch(() => {
+        throw new LoginFailure("Provider logout failed. The account was not removed.");
+      });
+      if (code !== 0 && !notLoggedIn.test(output))
         throw new LoginFailure("Provider logout failed. The account was not removed.");
     } finally {
       clearTimeout(timer);

@@ -248,22 +248,23 @@ export const makeAccountUsageCache = <E, R>(dependencies: {
   const canProbe = (id: ProviderAccountId, now: number, previous?: AccountUsage) =>
     !pending.has(id) && now >= nextAllowedAt(id, now, previous);
 
-  const refresh = Effect.fn("providerAccounts.refreshCachedUsage")(function* (input: {
+  /** `measured` is true only when this call produced (or joined) a new successful measurement. */
+  const refreshMeasured = Effect.fn("providerAccounts.refreshCachedUsage")(function* (input: {
     readonly id: ProviderAccountId;
     readonly active: boolean;
     readonly previous?: AccountUsage;
     readonly force?: boolean;
   }) {
-    if (input.active) return input.previous;
-    const effect = yield* lock.withPermit(
+    if (input.active) return { usage: input.previous, measured: false };
+    const { effect, probing } = yield* lock.withPermit(
       Effect.gen(function* () {
         const prior = newest(cache.get(input.id), input.previous);
         if (prior) cache.set(input.id, prior);
         const inFlight = pending.get(input.id);
-        if (inFlight) return inFlight;
+        if (inFlight) return { effect: inFlight, probing: true };
         const now = yield* Clock.currentTimeMillis;
         if (now < Math.max(accountAt(prior, now, input.force), budgetAt(now)))
-          return Effect.succeed(prior);
+          return { effect: Effect.succeed(prior), probing: false };
         // Reserve the attempt before releasing the admission lock, not after the probe finishes.
         while (attempts.length && attempts[0]!.at <= now - ACCOUNT_USAGE_TTL_MS) attempts.shift();
         const attempt = { at: now };
@@ -335,11 +336,20 @@ export const makeAccountUsageCache = <E, R>(dependencies: {
         );
         pending.set(input.id, memo);
         pendingUntil.set(input.id, now + ACCOUNT_USAGE_TTL_MS);
-        return memo;
+        return { effect: memo, probing: true };
       }),
     );
-    return yield* effect;
+    const usage = yield* effect;
+    return { usage, measured: probing && usage !== undefined && !usage.lastFailureKind };
   });
+  const refresh = (input: Parameters<typeof refreshMeasured>[0]) =>
+    refreshMeasured(input).pipe(Effect.map(({ usage }) => usage));
 
-  return { refresh, canProbe, nextAllowedAt, forget: (id: ProviderAccountId) => cache.delete(id) };
+  return {
+    refresh,
+    refreshMeasured,
+    canProbe,
+    nextAllowedAt,
+    forget: (id: ProviderAccountId) => cache.delete(id),
+  };
 };

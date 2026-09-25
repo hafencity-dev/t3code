@@ -192,3 +192,117 @@ it.effect(
       }),
     ),
 );
+
+it.effect("a command resolves only after the mounted list shows its outcome", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const target = new PrimaryConnectionTarget({
+        environmentId: EnvironmentId.make("accounts"),
+        label: "Accounts",
+        httpBaseUrl: "https://example.test",
+        wsBaseUrl: "wss://example.test",
+      });
+      let label = "Before";
+      // Once the rename landed, the next list read blocks until the test releases it.
+      let gated = false;
+      const listCalled = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const snapshot = () => ({
+        groups: [
+          {
+            driver: "codex" as const,
+            switchMode: "restart" as const,
+            instanceId: "codex",
+            accounts: [
+              {
+                id: ProviderAccountId.make("work"),
+                driver: "codex" as const,
+                label,
+                kind: "managed" as const,
+                status: "ready" as const,
+                active: true,
+              },
+            ],
+            autoSwitch: { enabled: false, thresholdPercent: 10, state: "off" as const },
+          },
+        ],
+      });
+      const client = {
+        [WS_METHODS.providerAccountsList]: () =>
+          Effect.gen(function* () {
+            if (gated) {
+              yield* Deferred.succeed(listCalled, undefined);
+              yield* Deferred.await(release);
+            }
+            return snapshot();
+          }),
+        [WS_METHODS.providerAccountsRename]: () =>
+          Effect.sync(() => {
+            label = "After";
+            gated = true;
+            return snapshot();
+          }),
+      } as unknown as WsRpcProtocolClient;
+      const supervisor = EnvironmentSupervisor.of({
+        target,
+        state: yield* SubscriptionRef.make<SupervisorConnectionState>({
+          ...AVAILABLE_CONNECTION_STATE,
+          phase: "connected",
+        }),
+        session: yield* SubscriptionRef.make(Option.some({ client } as RpcSession)),
+        prepared: yield* SubscriptionRef.make(Option.none<PreparedConnection>()),
+        connect: Effect.void,
+        disconnect: Effect.void,
+        retryNow: Effect.void,
+      });
+      const environments = EnvironmentRegistry.of({
+        run: (_id, effect) => Effect.provideService(effect, EnvironmentSupervisor, supervisor),
+        runStream: (_id, stream) =>
+          Stream.provideService(stream, EnvironmentSupervisor, supervisor),
+        followStream: (_id, stream) =>
+          Stream.provideService(stream, EnvironmentSupervisor, supervisor),
+      } as EnvironmentRegistry["Service"]);
+      const atoms = createProviderAccountsEnvironmentAtoms(
+        Atom.runtime(Layer.succeed(EnvironmentRegistry, environments)),
+      );
+      const registry = yield* Effect.acquireRelease(Effect.sync(AtomRegistry.make), (registry) =>
+        Effect.sync(() => registry.dispose()),
+      );
+      const list = atoms.list({ environmentId: target.environmentId, input: {} });
+      registry.mount(list);
+      const shownLabel = () => {
+        const result = registry.get(list);
+        return AsyncResult.isSuccess(result) ? result.value.groups[0]?.accounts[0]?.label : null;
+      };
+      yield* AtomRegistry.toStream(registry, list).pipe(
+        Stream.filter((result) => AsyncResult.isSuccess(result) && !result.waiting),
+        Stream.runHead,
+      );
+      expect(shownLabel()).toBe("Before");
+
+      let labelAtResolve: string | null | undefined;
+      const renamed = atoms.rename
+        .run(registry, {
+          environmentId: target.environmentId,
+          input: { accountId: ProviderAccountId.make("work"), label: "After" },
+        })
+        .then((result) => {
+          labelAtResolve = shownLabel();
+          return result;
+        });
+      // The list refresh is in flight and still shows the old label. Give a command that
+      // doesn't wait every chance to resolve anyway; passing never depends on this.
+      yield* Deferred.await(listCalled);
+      yield* Effect.raceFirst(
+        Effect.promise(() => renamed),
+        Effect.yieldNow.pipe(Effect.repeat({ times: 20 })),
+      );
+      expect(labelAtResolve).toBeUndefined();
+      expect(shownLabel()).toBe("Before");
+      yield* Deferred.succeed(release, undefined);
+      const result = yield* Effect.promise(() => renamed);
+      expect(result._tag).toBe("Success");
+      expect(labelAtResolve).toBe("After");
+    }),
+  ),
+);

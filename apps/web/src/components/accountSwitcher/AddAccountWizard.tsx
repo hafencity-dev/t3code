@@ -33,7 +33,12 @@ import { QRCodeSvg } from "../ui/qr-code";
 import { Spinner } from "../ui/spinner";
 import { toastManager } from "../ui/toast";
 import { WizardFooter, WizardHeader, WizardPanel, WizardPopup, WizardSteps } from "../ui/wizard";
-import { ACCOUNT_DRIVER_LABELS } from "./accounts.logic";
+import {
+  ACCOUNT_DRIVER_LABELS,
+  loginWizardView,
+  nextLoginPrompt,
+  type LoginPrompt,
+} from "./accounts.logic";
 import { providerAccountsEnvironment } from "./state";
 import { SwitchAccountAction } from "./SwitchAccountAction";
 
@@ -139,7 +144,7 @@ export function AddAccountWizard({
   group: ProviderAccountGroup;
   account?: ProviderAccount | undefined;
   onSwitchStart?: (accountId: ProviderAccountId) => void;
-  onSwitchEnd?: () => void;
+  onSwitchEnd?: (accountId: ProviderAccountId) => void;
 }) {
   const driver = group.driver;
   const provider = ACCOUNT_DRIVER_LABELS[driver];
@@ -162,6 +167,8 @@ export function AddAccountWizard({
     relogin ? createAttempt("") : null,
   );
   const [loginId, setLoginId] = useState<string | null>(null);
+  // The last link or code stays visible while the account is verified after sign-in.
+  const [prompt, setPrompt] = useState<LoginPrompt | null>(null);
   const registry = useContext(RegistryContext);
   const [code, setCode] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -174,15 +181,16 @@ export function AddAccountWizard({
   const cancelLogin = useAtomCommand(providerAccountsEnvironment.cancelLogin, {
     reportFailure: false,
   });
-  // Capture the login id from the subscription, not a React render that may batch events.
+  // Capture the login id and prompt from the subscription, not a render that may batch events.
   useEffect(() => {
     if (!eventAtom) return;
     return registry.subscribe(
       eventAtom,
       (result) => {
-        if (result._tag === "Success" && result.value._tag === "started") {
-          setLoginId(result.value.loginId);
-        }
+        if (result._tag !== "Success") return;
+        const loginEvent = result.value;
+        if (loginEvent._tag === "started") setLoginId(loginEvent.loginId);
+        setPrompt((previous) => nextLoginPrompt(previous, loginEvent));
       },
       { immediate: true },
     );
@@ -190,9 +198,16 @@ export function AddAccountWizard({
   const start = () => {
     setCode("");
     setLoginId(null);
+    setPrompt(null);
     setEventAtom(createAttempt(name.trim()));
   };
-  const completed = event?._tag === "completed" ? event : null;
+  const view = loginWizardView({
+    started: eventAtom !== null || relogin,
+    prompt,
+    event,
+    error: events.error,
+  });
+  const completed = view.kind === "completed" ? view.completed : null;
   const close = () => {
     // Unsubscribing also cancels the server process, including before started arrives.
     if (!completed && loginId) void cancelLogin({ environmentId, input: { loginId } });
@@ -214,8 +229,9 @@ export function AddAccountWizard({
       });
     }
   };
-  const failed = events.error ?? (event?._tag === "failed" ? event.message : null);
-  const link = event?._tag === "browser" || event?._tag === "deviceCode" ? event : null;
+  const failed = view.kind === "failed" ? view.message : null;
+  const link = view.kind === "prompt" ? view.prompt : null;
+  const verifying = view.kind === "prompt" && view.verifying;
   const steps = relogin ? ["Sign in", "Done"] : ["Name", "Sign in", "Done"];
   const currentStep = completed ? steps.length - 1 : eventAtom || relogin ? steps.length - 2 : 0;
   const active = group.accounts.find((candidate) => candidate.active);
@@ -242,7 +258,7 @@ export function AddAccountWizard({
           <WizardSteps steps={steps} currentStep={currentStep} />
         </WizardHeader>
         <WizardPanel>
-          {!eventAtom && !relogin ? (
+          {view.kind === "name" ? (
             <form
               id={`${nameId}-form`}
               className="grid gap-4"
@@ -296,9 +312,9 @@ export function AddAccountWizard({
               </div>
             </div>
           ) : !link ? (
-            <p className="flex items-center gap-2 text-sm text-muted-foreground">
+            <p className="flex items-center gap-2 text-sm text-muted-foreground" role="status">
               <Spinner size="sm" />
-              Getting a sign-in link…
+              {view.kind === "verifying" ? "Checking the account…" : "Getting a sign-in link…"}
             </p>
           ) : (
             <div className="grid gap-4">
@@ -361,7 +377,7 @@ export function AddAccountWizard({
                                 <Button
                                   size="xs"
                                   type="submit"
-                                  disabled={!code.trim() || !loginId || submitting}
+                                  disabled={!code.trim() || !loginId || submitting || verifying}
                                 >
                                   {submitting ? <Spinner /> : null}
                                   Confirm
@@ -383,7 +399,7 @@ export function AddAccountWizard({
                 </div>
               </div>
               <p className="flex items-center gap-2 text-xs text-muted-foreground" role="status">
-                {event?._tag === "verifying" ? (
+                {verifying ? (
                   <>
                     <Spinner size="xs" />
                     Checking the account…
@@ -450,7 +466,7 @@ export function AddAccountWizard({
               </Button>
               <Button onClick={start}>Try again</Button>
             </>
-          ) : !eventAtom && !relogin ? (
+          ) : view.kind === "name" ? (
             <>
               <Button variant="outline" onClick={close}>
                 Cancel

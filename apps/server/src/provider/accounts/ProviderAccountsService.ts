@@ -44,9 +44,12 @@ import { materializeCodexAccountHome } from "./CodexAccountHome.ts";
 import { inactiveClaudeProbeEnvironment } from "./ClaudeAccountHome.ts";
 import {
   ProviderAccountLogin,
+  ProviderAccountLoginError,
   type PreparedProviderAccountLogin,
   type ProviderAccountLoginOptions,
 } from "./ProviderAccountLogin.ts";
+import { hasIdentity, identityKeeper, keeperRank, sameAccountIdentity } from "./accountIdentity.ts";
+import { makeProviderAccountHolds } from "./ProviderAccountHolds.ts";
 import {
   createProviderAccountRegistry,
   ProviderAccountRegistryGuardError,
@@ -68,6 +71,7 @@ import {
   recoverClaudeCredentialSwitch,
   claudeCredentialSwitchJournalPath,
   ClaudeCredentialSwitchError,
+  type ClaudeCredentialSwitchAbandoned,
   readClaudeConfigIdentity,
   type ClaudeCredentialIdentity,
   type ClaudeCredentialSwitchResult,
@@ -80,6 +84,8 @@ const claudeHomeChangedWarning =
 /** A terminal `claude auth login` overwrote this account's token in the active home. */
 export const claudeTerminalSignedOutMessage =
   "Signed out by a sign-in in the terminal. Sign in again to use this account.";
+/** A terminal `claude auth logout` left the active home without any account. */
+export const claudeTerminalLogoutMessage = "Signed out in the terminal.";
 const claudeBarrierWarning = (reason: string) =>
   `A previous Claude account switch didn't finish: ${reason} Accounts are locked until it's resolved.`;
 
@@ -112,7 +118,8 @@ const io = <A>(operation: () => Promise<A>) =>
     Effect.catch((cause) => {
       if (
         cause instanceof ProviderAccountRegistryGuardError ||
-        cause instanceof ClaudeCredentialSwitchError
+        cause instanceof ClaudeCredentialSwitchError ||
+        cause instanceof ProviderAccountLoginError
       ) {
         return Effect.fail(new ProviderAccountError({ message: cause.message }));
       }
@@ -140,6 +147,7 @@ function accountFromEntry(
   entry: ProviderAccountEntry,
   active: boolean,
   provider?: ServerProvider,
+  usageRefresh?: ProviderAccount["usageRefresh"],
 ): ProviderAccount {
   const metadata = entry.lastUsage;
   // The live Claude snapshot describes whoever is signed in to the active home. It belongs to
@@ -150,8 +158,10 @@ function accountFromEntry(
     Boolean(metadata?.email && provider?.auth.email) &&
     provider!.auth.email!.toLowerCase() !== metadata!.email!.toLowerCase();
   const snapshot = (entry.status === "error" && entry.message) || foreign ? undefined : provider;
+  // A recorded sign-out (such as a terminal logout) outranks a snapshot taken before it.
   const status =
-    entry.status === "pending" || (entry.status === "error" && entry.message)
+    entry.status === "pending" ||
+    ((entry.status === "error" || entry.status === "signedOut") && entry.message)
       ? entry.status
       : snapshot?.auth.status === "unauthenticated"
         ? "signedOut"
@@ -173,38 +183,30 @@ function accountFromEntry(
     ...(usage ? { usage } : {}),
     ...(entry.message ? { message: entry.message } : {}),
     // The active account's usage is live and never probed, so it has no probe backoff.
-    ...(!active && metadata?.nextAllowedAt !== undefined
-      ? {
-          usageRefresh: {
-            nextAllowedAt: new Date(metadata.nextAllowedAt).toISOString(),
-            rateLimited: metadata.lastFailureKind === "rateLimited",
-          },
-        }
-      : {}),
+    ...(!active && usageRefresh ? { usageRefresh } : {}),
   };
 }
 
-/** Account uuid wins when both sides know it; otherwise emails compare case-insensitively. */
-function sameAccountIdentity(left: ClaudeCredentialIdentity, right: ClaudeCredentialIdentity) {
-  if (left.accountUuid && right.accountUuid) return left.accountUuid === right.accountUuid;
-  return Boolean(left.email && right.email?.toLowerCase() === left.email.toLowerCase());
-}
-const hasIdentity = (identity: ClaudeCredentialIdentity) =>
-  Boolean(identity.email || identity.accountUuid);
 /** The identity an entry recorded from its own sign-in; never the live home's. */
 const storedIdentity = (entry: ProviderAccountEntry): ClaudeCredentialIdentity => ({
   ...(entry.lastUsage?.email ? { email: entry.lastUsage.email } : {}),
   ...(entry.lastUsage?.accountUuid ? { accountUuid: entry.lastUsage.accountUuid } : {}),
+  ...(entry.lastUsage?.workspaceId ? { workspaceId: entry.lastUsage.workspaceId } : {}),
 });
-/** Which saved account keeps an identity: Default, then ready accounts, then the oldest. */
-const keeperRank = (entry: Pick<ProviderAccountEntry, "kind" | "status" | "message">) =>
-  entry.status === "error" && entry.message
-    ? 2
-    : entry.kind === "default"
-      ? 0
-      : entry.status === "ready"
-        ? 1
-        : 2;
+/** The saved account that owns a live identity, by the keeper rule. */
+const keeperOf = (
+  entries: ReadonlyArray<ProviderAccountEntry>,
+  identity: ClaudeCredentialIdentity,
+  excludeId?: string,
+) => identityKeeper(entries, identity, storedIdentity, excludeId);
+/** The usage the cache compares against; pending entries count as errored. */
+const previousUsage = (entry: ProviderAccountEntry): AccountUsage | undefined =>
+  entry.lastUsage
+    ? { ...entry.lastUsage, status: entry.status === "pending" ? "error" : entry.status }
+    : undefined;
+/** An inactive Claude account's own store. Never the active home or the shared home. */
+const claudeStoreOf = (entry: ProviderAccountEntry) =>
+  entry.storePath ?? (entry.kind === "managed" ? entry.homePath : undefined);
 
 /**
  * Best known identity per account. The active Claude account prefers the active home's live
@@ -297,7 +299,13 @@ const make = (
       registry: Awaited<ReturnType<typeof createProviderAccountRegistry>>,
       result: ClaudeCredentialSwitchResult,
     ) => {
-      if (result.externalIdentity) {
+      // A terminal logout moved the source away with no token; it is signed out, not replaced.
+      if (result.sourceSignedOut)
+        await registry.update(result.sourceAccountId, {
+          status: "signedOut",
+          message: claudeTerminalLogoutMessage,
+        });
+      if (result.externalIdentity && hasIdentity(result.externalIdentity)) {
         await registry.update(result.originalSourceAccountId, {
           status: "signedOut",
           message: claudeTerminalSignedOutMessage,
@@ -358,6 +366,16 @@ const make = (
         return;
       }
       claudeBarrier = undefined;
+      if (outcome.success && "abandoned" in outcome.success) {
+        const abandoned: ClaudeCredentialSwitchAbandoned = outcome.success;
+        // Every store was left as it was; reconcile files whatever the active home now holds.
+        yield* Effect.logWarning("Abandoned an unrecoverable Claude credential switch", {
+          phase: abandoned.phase,
+          reason: abandoned.reason,
+          journalPath: abandoned.journalPath,
+        });
+        return;
+      }
       if (outcome.success) yield* refreshClaudeSnapshot;
     });
     const registryEffect = registryLoad.withPermit(
@@ -498,6 +516,13 @@ const make = (
         return identity;
       });
 
+    const claudeJournalPending = Effect.promise(() =>
+      NodeFSP.stat(claudeCredentialSwitchJournalPath(config.stateDir)).then(
+        () => true,
+        () => false,
+      ),
+    );
+
     const listDetailed = Effect.fn("providerAccounts.listDetailed")(function* () {
       const providerSnapshots = yield* providers.getProviders;
       const groups = yield* Effect.forEach(["claudeAgent", "codex"] as const, (driver) =>
@@ -522,13 +547,22 @@ const make = (
           const captured = state.accounts.find((entry) => entry.id === state.activeAccountId);
           const live = driver === "claudeAgent" ? yield* liveClaudeIdentity(state) : undefined;
           // Capture Default's first known identity so a later terminal login cannot silently
-          // become the saved Default account when its credentials are checked back in.
+          // become the saved Default account when its credentials are checked back in. Never
+          // while a switch journal owns the active home, nor another saved account's identity.
           const capturedEmail = live?.email ?? snapshot?.auth.email;
+          const capturedIdentity: ClaudeCredentialIdentity = live?.email
+            ? live
+            : capturedEmail
+              ? { email: capturedEmail }
+              : {};
           if (
             driver === "claudeAgent" &&
             captured?.kind === "default" &&
             !captured.lastUsage?.email &&
-            capturedEmail
+            capturedEmail &&
+            claudeBarrier === undefined &&
+            !(yield* claudeJournalPending) &&
+            !keeperOf(state.accounts, capturedIdentity, captured.id)
           ) {
             yield* io(() =>
               registry.update(captured.id, {
@@ -537,6 +571,7 @@ const make = (
                   checkedAt: snapshot?.checkedAt ?? new Date().toISOString(),
                   email: capturedEmail,
                   ...(live?.email && live.accountUuid ? { accountUuid: live.accountUuid } : {}),
+                  ...(live?.email && live.workspaceId ? { workspaceId: live.workspaceId } : {}),
                 },
               }),
             );
@@ -560,13 +595,33 @@ const make = (
           ]
             .filter(Boolean)
             .join(" ");
-          const accounts = state.accounts.map((entry) =>
-            accountFromEntry(
+          const now = yield* Clock.currentTimeMillis;
+          const accounts = state.accounts.map((entry) => {
+            const active = entry.id === state.activeAccountId;
+            // When a manual check may run next, including the shared probe budget.
+            const nextAllowedAt = active
+              ? 0
+              : cache.nextAllowedAt(
+                  ProviderAccountId.make(entry.id),
+                  now,
+                  previousUsage(entry),
+                  true,
+                );
+            const rateLimited = entry.lastUsage?.lastFailureKind === "rateLimited";
+            return accountFromEntry(
               entry,
-              entry.id === state.activeAccountId,
-              entry.id === state.activeAccountId ? snapshot : undefined,
-            ),
-          );
+              active,
+              active ? snapshot : undefined,
+              nextAllowedAt > now || entry.lastUsage?.lastFailureKind
+                ? {
+                    ...(nextAllowedAt > 0
+                      ? { nextAllowedAt: DateTime.formatIso(DateTime.makeUnsafe(nextAllowedAt)) }
+                      : {}),
+                    rateLimited,
+                  }
+                : undefined,
+            );
+          });
           const { identities, duplicateOf } = accountIdentities(state.accounts, accounts, live);
           const primer =
             driver === "claudeAgent" ? yield* io(() => registry.getWindowPrimer()) : undefined;
@@ -635,39 +690,43 @@ const make = (
     const reconcileClaudeUnlocked = Effect.fn("providerAccounts.reconcileClaude")(function* () {
       const registry = yield* registryEffect;
       // An unfinished switch owns the active home until recovery resolves it.
-      const journaled = yield* Effect.promise(() =>
-        NodeFSP.stat(claudeCredentialSwitchJournalPath(config.stateDir)).then(
-          () => true,
-          () => false,
-        ),
-      );
-      if (journaled || claudeBarrier !== undefined) return false;
+      if ((yield* claudeJournalPending) || claudeBarrier !== undefined) return false;
       const state = yield* groupState("claudeAgent");
       if (state.warning) return false;
       const active = state.accounts.find((entry) => entry.id === state.activeAccountId);
       // A sign-in into the active home finishes through its own completion.
       if (!active || active.kind === "external" || login.isBusy(active.id)) return false;
       const live = yield* liveClaudeIdentity(state);
-      if (!hasIdentity(live)) return false;
       const known = storedIdentity(active);
-      // Default's first identity is captured from the live home, not reconciled.
-      if (!hasIdentity(known) && active.kind === "default") return false;
-      const activeMatches = hasIdentity(known) && sameAccountIdentity(known, live);
-      const keeper = state.accounts
-        .filter(
-          (entry) =>
-            entry.kind !== "external" &&
-            entry.status !== "pending" &&
-            !(entry.status === "error" && entry.message) &&
-            hasIdentity(storedIdentity(entry)) &&
-            sameAccountIdentity(storedIdentity(entry), live),
+      // A terminal logout: the active account is signed out; nothing else changes.
+      if (!hasIdentity(live)) {
+        if (
+          !hasIdentity(known) ||
+          (active.status === "signedOut" && active.message) ||
+          (active.status === "error" && active.message)
         )
-        .toSorted(
-          (left, right) =>
-            keeperRank(left) - keeperRank(right) || left.createdAt.localeCompare(right.createdAt),
-        )[0];
+          return false;
+        yield* io(() =>
+          registry.update(active.id, { status: "signedOut", message: claudeTerminalLogoutMessage }),
+        );
+        yield* Effect.logInfo("The active Claude account was signed out in the terminal");
+        yield* changed("claudeAgent");
+        return true;
+      }
+      const keeper = keeperOf(state.accounts, live);
+      // Default's first identity is captured from the live home, unless it is another
+      // saved account's: then the selection moves to that account like any terminal login.
+      if (!hasIdentity(known) && active.kind === "default" && !keeper) return false;
+      const activeMatches = hasIdentity(known) && sameAccountIdentity(known, live);
       // The active account is the live identity's keeper, or the only account that knows it.
-      if (activeMatches && (!keeper || keeper.id === active.id)) return false;
+      if (activeMatches && (!keeper || keeper.id === active.id)) {
+        // Signed back in after a terminal logout.
+        if (active.status !== "signedOut" || active.message !== claudeTerminalLogoutMessage)
+          return false;
+        yield* io(() => registry.update(active.id, { status: "ready", message: null }));
+        yield* changed("claudeAgent");
+        return true;
+      }
       // Unknown active identity and no saved match: the live login may well be its own.
       if (!activeMatches && !keeper && !hasIdentity(known)) return false;
       const target =
@@ -690,6 +749,9 @@ const make = (
       yield* io(async () => {
         // An empty store is the checked-out state; the next switch-away files the live token.
         await registry.ensureClaudeStore(target.id);
+        // The previous account leaves checked out too: an inactive account always has its own
+        // store, so it never signs in or probes through the active home.
+        await registry.ensureClaudeStore(active.id);
         if (keeper) await registry.update(target.id, { status: "ready", message: null });
         await registry.setClaudeActiveAccount(target.id);
         // A conflicting sign-in keeps its own, more specific message.
@@ -729,6 +791,8 @@ const make = (
       return (yield* listDetailed()).snapshot;
     });
 
+    // Probes and window starts hold their account; a switch waits for them and blocks new ones.
+    const holds = makeProviderAccountHolds();
     const cache = makeAccountUsageCache({
       probe: (id: ProviderAccountId) =>
         Effect.gen(function* () {
@@ -736,10 +800,18 @@ const make = (
           const entry = yield* io(() => registry.get(id));
           const state = yield* groupState(entry.driver);
           const generation = checkoutGeneration[entry.driver];
-          const homePath = entry.storePath ?? (entry.homePath || state.sharedHome);
+          const homePath =
+            entry.driver === "claudeAgent"
+              ? claudeStoreOf(entry)
+              : entry.homePath || state.sharedHome;
+          // refreshUsage never asks for a Claude account without a store; fail closed anyway.
+          if (homePath === undefined)
+            return yield* Effect.fail(
+              new AccountUsageProbeStaleError("Account has no saved store to probe."),
+            );
           const input = { homePath, cwd: config.cwd };
-          const result = yield* (
-            state.driver === "claudeAgent"
+          const result = yield* holds.shared(entry.id)(
+            (state.driver === "claudeAgent"
               ? probe({
                   ...input,
                   driver: state.driver,
@@ -752,7 +824,8 @@ const make = (
                   settings: state.settings,
                   environment: state.environment,
                 })
-          ).pipe(Effect.provide(context));
+            ).pipe(Effect.provide(context)),
+          );
           // The store was probed before a checkout moved its credentials; drop the result.
           if (
             generation !== checkoutGeneration[entry.driver] ||
@@ -766,10 +839,13 @@ const make = (
         }),
     });
 
-    const refreshUsage = Effect.fn("providerAccounts.refreshUsage")(function* (
+    /** Also reports which accounts got a new measurement, for the auto-switch policy. */
+    const refreshUsageMeasured = Effect.fn("providerAccounts.refreshUsageMeasured")(function* (
       input: ProviderAccountsRefreshUsageInput,
+      notifyAutoSwitch: boolean,
     ) {
       const registry = yield* registryEffect;
+      const measured = new Set<ProviderAccountId>();
       const snapshot = yield* list();
       const claudeGroup = snapshot.groups.find((group) => group.driver === "claudeAgent");
       if (claudeGroup?.accounts.some((account) => !account.active))
@@ -787,18 +863,16 @@ const make = (
             )
               return;
             const entry = yield* io(() => registry.get(account.id));
-            const previous: AccountUsage | undefined = entry.lastUsage
-              ? {
-                  ...entry.lastUsage,
-                  status: entry.status === "pending" ? "error" : entry.status,
-                }
-              : undefined;
-            const result = yield* cache.refresh({
+            // An inactive Claude account is probed in its own store or not at all.
+            if (entry.driver === "claudeAgent" && claudeStoreOf(entry) === undefined) return;
+            const previous = previousUsage(entry);
+            const { usage: result, measured: fresh } = yield* cache.refreshMeasured({
               id: account.id,
               active: false,
               ...(previous ? { previous } : {}),
               ...(input.force === undefined ? {} : { force: input.force }),
             });
+            if (fresh) measured.add(account.id);
             // A probe measures usage; the identity stays the one the account signed in with.
             // Probes report no account uuid and may omit the email.
             if (result)
@@ -812,8 +886,19 @@ const make = (
         { concurrency: 2 },
       );
       if (windowPrimer) yield* windowPrimer.notify;
-      return yield* list();
+      // New candidate numbers can change the auto-switch decision; its own probes re-read.
+      if (notifyAutoSwitch && autoSwitch)
+        for (const driver of ["claudeAgent", "codex"] as const)
+          if (
+            snapshot.groups
+              .find((group) => group.driver === driver)
+              ?.accounts.some((account) => measured.has(account.id))
+          )
+            yield* autoSwitch.notify(driver);
+      return { snapshot: yield* list(), measured };
     });
+    const refreshUsage = (input: ProviderAccountsRefreshUsageInput) =>
+      refreshUsageMeasured(input, true).pipe(Effect.map(({ snapshot }) => snapshot));
 
     const deleteManagedHome = (entry: {
       accountId: string;
@@ -867,9 +952,13 @@ const make = (
               }
               const claudeActive =
                 entry.driver === "claudeAgent" && entry.id === state.activeAccountId;
+              // An inactive Claude account signs in to its own store, created (empty) if needed.
               const homePath = claudeActive
                 ? state.currentHome
-                : (entry.storePath ?? (entry.homePath || state.sharedHome));
+                : entry.driver === "claudeAgent"
+                  ? (claudeStoreOf(entry) ??
+                    (yield* io(() => registry.ensureClaudeStore(entry.id))).storePath!)
+                  : entry.homePath || state.sharedHome;
               const environment =
                 claudeActive && state.settings.homePath.trim()
                   ? { ...state.environment, CLAUDE_CONFIG_DIR: state.currentHome }
@@ -904,12 +993,19 @@ const make = (
               const written: ClaudeCredentialIdentity = writtenPath
                 ? yield* Effect.promise(() => readClaudeConfigIdentity(writtenPath))
                 : {};
+              const writtenMatches = written.email?.toLowerCase() === identity.email.toLowerCase();
+              const workspaceId =
+                account.driver === "codex"
+                  ? identity.workspaceId
+                  : writtenMatches
+                    ? written.workspaceId
+                    : undefined;
               const signedIn: ClaudeCredentialIdentity = {
                 email: identity.email,
-                ...(written.accountUuid &&
-                written.email?.toLowerCase() === identity.email.toLowerCase()
+                ...(written.accountUuid && writtenMatches
                   ? { accountUuid: written.accountUuid }
                   : {}),
+                ...(workspaceId ? { workspaceId } : {}),
               };
               const accounts =
                 snapshot.groups.find((group) => group.driver === account.driver)?.accounts ?? [];
@@ -1041,6 +1137,17 @@ const make = (
       if (entry.driver === "claudeAgent" && state.warning)
         return yield* new ProviderAccountError({ message: state.warning });
       if (state.activeAccountId === entry.id) return yield* list();
+      // In-flight probes and window starts of either account finish first; new ones wait.
+      return yield* holds.exclusive([state.activeAccountId, entry.id])(
+        switchHeld(input, entry, state),
+      );
+    });
+    const switchHeld = Effect.fn("providerAccounts.switchHeld")(function* (
+      input: ProviderAccountsSwitchInput,
+      entry: ProviderAccountEntry,
+      state: Effect.Success<ReturnType<typeof groupState>>,
+    ) {
+      const registry = yield* registryEffect;
       if (entry.driver === "claudeAgent") {
         if (login.isBusy(state.activeAccountId))
           return yield* new ProviderAccountError({
@@ -1093,19 +1200,14 @@ const make = (
               ? { expectedAccountUuid: source.lastUsage.accountUuid }
               : {}),
             resolveSource: async (identity) => {
-              // A terminal login as an account we already know reuses that account's
-              // store: the live token supersedes whatever stale copy it holds.
-              const known = state.accounts.find(
-                (candidate) =>
-                  candidate.id !== source.id &&
-                  candidate.kind !== "external" &&
-                  (identity.accountUuid
-                    ? candidate.lastUsage?.accountUuid === identity.accountUuid
-                    : Boolean(
-                        identity.email &&
-                        candidate.lastUsage?.email?.toLowerCase() === identity.email.toLowerCase(),
-                      )),
-              );
+              // No identity is a terminal logout, never a new account.
+              if (!hasIdentity(identity))
+                throw new ClaudeCredentialSwitchError(
+                  "Claude active account changed outside the application.",
+                );
+              // A terminal login as an account we already know reuses its keeper's store:
+              // the live token supersedes whatever stale copy it holds.
+              const known = keeperOf(state.accounts, identity, source.id);
               if (known) {
                 const reused = await registry.ensureClaudeStore(known.id);
                 return { accountId: reused.id, store: reused.storePath! };
@@ -1186,9 +1288,19 @@ const make = (
     const switchAccount = Effect.fn("providerAccounts.switch")(function* (
       input: ProviderAccountsSwitchInput,
     ) {
+      const before = yield* registryEffect.pipe(
+        Effect.flatMap((registry) => io(() => registry.get(input.accountId))),
+      );
+      const wasActive = (yield* groupState(before.driver)).activeAccountId === before.id;
       const snapshot = yield* switchAccountUnlocked(input);
       const group = snapshot.groups.find((entry) => entry.activeAccountId === input.accountId)!;
       // A manual switch is just a switch: the next evaluation uses the new account's numbers.
+      // Its time only delays proactive rebalancing, so auto-switch can't revert it right away.
+      if (!wasActive) {
+        const registry = yield* registryEffect;
+        const at = DateTime.formatIso(yield* DateTime.now);
+        yield* io(() => registry.updateAutoSwitch(group.driver, { lastManualSwitchAt: at }));
+      }
       if (autoSwitch) {
         yield* autoSwitch.clear(group.driver);
         yield* autoSwitch.notify(group.driver);
@@ -1325,9 +1437,7 @@ const make = (
           for (const account of group.accounts) {
             if (account.active) continue;
             const entry = yield* io(() => registry.get(account.id));
-            const previous: AccountUsage | undefined = entry.lastUsage
-              ? { ...entry.lastUsage, status: entry.status === "pending" ? "error" : entry.status }
-              : undefined;
+            const previous = previousUsage(entry);
             // A successful cached measurement remains selectable during the normal probe TTL.
             const usage = account.usage;
             const fresh =
@@ -1354,7 +1464,10 @@ const make = (
               .map((account) => account.id),
           };
         }),
-      refresh: (accountIds) => refreshUsage({ accountIds }),
+      refresh: (accountIds) =>
+        refreshUsageMeasured({ accountIds }, false).pipe(
+          Effect.map(({ measured }) => accountIds.filter((id) => measured.has(id))),
+        ),
       switchAccount: (accountId) => switchAccountUnlocked({ accountId, interruptRunning: false }),
       persistLastSwitch: (driver, lastSwitch) =>
         Effect.gen(function* () {
@@ -1384,7 +1497,10 @@ const make = (
       "CLAUDE_CODE_USE_BEDROCK",
       "CLAUDE_CODE_USE_VERTEX",
     ];
-    /** Runs under the account mutation, so no credential move or checkout can interleave. */
+    /**
+     * Validates under the account mutation and takes the account's hold in the caller's scope,
+     * so no credential move or checkout can interleave with the returned request.
+     */
     const primeClaudeWindow = Effect.fn("providerAccounts.primeClaudeWindow")(function* (
       account: ProviderAccount,
     ) {
@@ -1412,13 +1528,16 @@ const make = (
         stateDir: config.stateDir,
       });
       yield* io(() => NodeFSP.mkdir(launch.cwd, { recursive: true, mode: 0o700 }));
-      const result = yield* Effect.promise((signal) => runPrime(launch, { signal }));
-      if (!result.ok) {
-        // Only the classified reason; prompts and CLI output are never logged.
-        yield* Effect.logWarning("Claude window start failed", { reason: result.reason, active });
-        return yield* new ProviderAccountError({ message: primeFailureMessages[result.reason] });
-      }
-      yield* Effect.logInfo("Started a Claude 5-hour window", { active });
+      yield* holds.sharedScoped(entry.id);
+      return Effect.gen(function* () {
+        const result = yield* Effect.promise((signal) => runPrime(launch, { signal }));
+        if (!result.ok) {
+          // Only the classified reason; prompts and CLI output are never logged.
+          yield* Effect.logWarning("Claude window start failed", { reason: result.reason, active });
+          return yield* new ProviderAccountError({ message: primeFailureMessages[result.reason] });
+        }
+        yield* Effect.logInfo("Started a Claude 5-hour window", { active });
+      });
     });
     windowPrimer = yield* makeProviderAccountWindowPrimer({
       read: () =>
@@ -1432,15 +1551,7 @@ const make = (
           for (const account of group?.accounts ?? []) {
             if (account.active) continue;
             const entry = yield* io(() => registry.get(account.id));
-            previous.set(
-              account.id,
-              entry.lastUsage
-                ? {
-                    ...entry.lastUsage,
-                    status: entry.status === "pending" ? "error" : entry.status,
-                  }
-                : undefined,
-            );
+            previous.set(account.id, previousUsage(entry));
           }
           const billing = apiBillingKeys.filter((key) => Boolean(state.environment[key]));
           const blocked =

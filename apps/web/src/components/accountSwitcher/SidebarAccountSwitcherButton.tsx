@@ -1,94 +1,46 @@
 import { useAtomValue } from "@effect/atom-react";
-import type {
-  EnvironmentId,
-  ProviderAccountAutoSwitchEvent,
-  ProviderAccountDriver,
-} from "@t3tools/contracts";
+import type { EnvironmentId } from "@t3tools/contracts";
 import { TriangleAlertIcon, UsersIcon } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { environmentPresentations } from "../../state/presentation";
 import { useEnvironmentQuery } from "../../state/query";
 import { ClaudeAI, OpenAI } from "../Icons";
 import { Badge } from "../ui/badge";
 import { Dialog } from "../ui/dialog";
-import { toastManager } from "../ui/toast";
 import { SidebarMenu, SidebarMenuButton, SidebarMenuItem } from "../ui/sidebar";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
-import { AutoSwitchSubscription } from "./AutoSwitchSubscription";
+import { autoSwitchEventsAtom } from "./AutoSwitchSubscription";
 import { AccountSwitcherDialog } from "./AccountSwitcherDialog";
 import {
   ACCOUNT_DRIVERS,
   ACCOUNT_DRIVER_LABELS,
   accountTone,
-  autoSwitchToastTitle,
   remainingPercent,
   providerAccountsUsageKey,
+  resolveAccountsDevice,
   shouldShowAccountBadge,
 } from "./accounts.logic";
 import { providerAccountsEnvironment } from "./state";
 
 export function SidebarAccountSwitcherButton() {
   const presentations = useAtomValue(environmentPresentations.presentationsAtom);
+  const autoEvents = useAtomValue(autoSwitchEventsAtom);
   const [selectedDevice, setSelectedDevice] = useState<EnvironmentId | null>(null);
   const [open, setOpen] = useState(false);
-  const [autoEvents, setAutoEvents] = useState<
-    ReadonlyMap<
-      EnvironmentId,
-      Partial<Record<ProviderAccountDriver, ProviderAccountAutoSwitchEvent>>
-    >
-  >(new Map());
-  const lastAutoSwitch = useRef(new Map<string, string>());
-  const connectedLabels = useRef(new Map<EnvironmentId, string>());
-  const onAutoEvent = useCallback(
-    (environmentId: EnvironmentId, event: ProviderAccountAutoSwitchEvent) => {
-      // `changed` only invalidates the list in client-runtime. Future tags are not notifications.
-      if (event._tag !== "switched" && event._tag !== "pending" && event._tag !== "blocked") return;
-      if (event._tag === "switched") {
-        const scope = `${environmentId}:${event.driver}`;
-        const key = `${event.at}:${event.toAccountId}`;
-        // Retain deduplication across disconnect/reconnect subscription remounts.
-        if (lastAutoSwitch.current.get(scope) === key) return;
-        lastAutoSwitch.current.set(scope, key);
-        // More than one device: name the one that switched.
-        const connected = connectedLabels.current;
-        toastManager.add({
-          type: "success",
-          title: autoSwitchToastTitle(
-            event.driver,
-            event.toLabel,
-            connected.size > 1 ? connected.get(environmentId) : undefined,
-          ),
-          description: event.reason,
-        });
-      }
-      setAutoEvents((previous) =>
-        new Map(previous).set(environmentId, {
-          ...previous.get(environmentId),
-          [event.driver]: event,
-        }),
-      );
-    },
-    [],
-  );
   const connected = [...presentations].filter(
     ([, presentation]) =>
       presentation.connection.phase === "connected" && presentation.serverConfig !== null,
   );
-  const connectedKey = JSON.stringify(
-    connected.map(([id, presentation]) => [id, presentation.entry.target.label]),
+  // While the dialog is open a device that drops stays selected and reads as offline.
+  const { environmentId, offlineId } = resolveAccountsDevice(
+    selectedDevice,
+    connected.map(([id]) => id),
+    open,
   );
-  useEffect(() => {
-    connectedLabels.current = new Map(JSON.parse(connectedKey) as [EnvironmentId, string][]);
-  }, [connectedKey]);
-  // A device the user picked that went offline stays selected until it reconnects.
-  const offline =
-    selectedDevice && !connected.some(([id]) => id === selectedDevice)
-      ? presentations.get(selectedDevice)
-      : undefined;
-  const selected = offline
-    ? undefined
-    : (connected.find(([id]) => id === selectedDevice) ?? connected[0]);
-  const environmentId = selected?.[0] ?? null;
+  const selected = connected.find(([id]) => id === environmentId);
+  const offlineLabel = offlineId
+    ? (presentations.get(offlineId)?.entry.target.label ?? "This device")
+    : undefined;
   const query = useEnvironmentQuery(
     environmentId ? providerAccountsEnvironment.list({ environmentId, input: {} }) : null,
   );
@@ -96,8 +48,7 @@ export function SidebarAccountSwitcherButton() {
     id,
     label: presentation.entry.target.label,
   }));
-  if (offline && selectedDevice)
-    devices.push({ id: selectedDevice, label: offline.entry.target.label });
+  if (offlineId && offlineLabel) devices.push({ id: offlineId, label: offlineLabel });
   const providers = selected?.[1].serverConfig?.providers ?? [];
   const usageKey = providerAccountsUsageKey(providers);
   const observedUsage = useRef<{ environmentId: EnvironmentId | null; key: string } | null>(null);
@@ -112,31 +63,37 @@ export function SidebarAccountSwitcherButton() {
     return () => clearTimeout(timer);
   }, [environmentId, usageKey, refreshAccounts, observedUsage]);
   const groups = query.data?.groups ?? [];
+  // oxlint-disable-next-line react/purity -- No timer while the dialog is closed: tones are re-read on every list or provider update.
+  const now = Date.now();
   const activeAccounts = ACCOUNT_DRIVERS.flatMap((driver) => {
     const group = groups.find((group) => group.driver === driver);
-    if (!group || !shouldShowAccountBadge(group, providers)) return [];
+    if (!group || !shouldShowAccountBadge(group, providers, now)) return [];
     const active = group.accounts.find((account) => account.active);
     return [{ driver, active }];
   });
   const warning = activeAccounts.flatMap(({ driver, active }) => {
-    if (!active || accountTone(active) === "secondary") return [];
-    const remaining = remainingPercent(active);
+    if (!active || accountTone(active, now) === "secondary") return [];
+    const remaining = remainingPercent(active, now);
     return [
       `${ACCOUNT_DRIVER_LABELS[driver]}: ${active.status !== "ready" ? "Not ready" : `${Math.round(remaining ?? 0)}% left`}`,
     ];
   });
   return (
     <>
-      {connected.map(([id]) => (
-        <AutoSwitchSubscription key={id} environmentId={id} onEvent={onAutoEvent} />
-      ))}
       <div className="px-2">
         <SidebarMenu>
           <SidebarMenuItem>
             <Tooltip>
               <TooltipTrigger
                 render={
-                  <SidebarMenuButton aria-haspopup="dialog" onClick={() => setOpen(true)}>
+                  <SidebarMenuButton
+                    aria-haspopup="dialog"
+                    onClick={() => {
+                      // Pin what the sidebar shows now; a drop while open reads as offline.
+                      setSelectedDevice(environmentId);
+                      setOpen(true);
+                    }}
+                  >
                     <UsersIcon />
                     <span className="shrink-0">Accounts</span>
                     <span className="ml-auto flex min-w-0 gap-1 group-data-[collapsible=icon]:hidden">
@@ -152,7 +109,7 @@ export function SidebarAccountSwitcherButton() {
                             key={driver}
                             className="min-w-0 shrink"
                             size="sm"
-                            variant={active ? accountTone(active) : "error"}
+                            variant={active ? accountTone(active, now) : "error"}
                           >
                             <Mark className="size-3" />
                             {!active || active.status !== "ready" ? (
@@ -178,9 +135,9 @@ export function SidebarAccountSwitcherButton() {
       <Dialog open={open} onOpenChange={setOpen}>
         {open ? (
           <AccountSwitcherDialog
-            key={(offline ? selectedDevice : environmentId) ?? "disconnected"}
-            environmentId={offline ? selectedDevice : environmentId}
-            offlineDeviceLabel={offline?.entry.target.label}
+            key={offlineId ?? environmentId ?? "disconnected"}
+            environmentId={offlineId ?? environmentId}
+            offlineDeviceLabel={offlineLabel}
             devices={devices}
             onDeviceChange={setSelectedDevice}
             groups={groups}

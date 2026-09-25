@@ -32,6 +32,7 @@ import {
   accountStatusMessage,
   accountSubtitle,
   removeBlockedReason,
+  renameRestoresFocus,
   shortPlanLabel,
   switchBlockedReason,
   type AccountFreshness,
@@ -100,6 +101,8 @@ function StatusMessage({
   );
 }
 
+type RenameEnd = Parameters<typeof renameRestoresFocus>[0];
+
 function RenameInput({
   account,
   environmentId,
@@ -107,10 +110,12 @@ function RenameInput({
 }: {
   account: ProviderAccount;
   environmentId: EnvironmentId;
-  onDone: () => void;
+  onDone: (how: RenameEnd) => void;
 }) {
   const [name, setName] = useState(account.label);
   const [saving, setSaving] = useState(false);
+  // State lags a render; the ref stops a blur during the request from saving twice.
+  const savingRef = useRef(false);
   const settled = useRef(false);
   // Blur only counts once the input owns focus: the closing menu may briefly hold it.
   const armed = useRef(false);
@@ -124,19 +129,22 @@ function RenameInput({
     return () => cancelAnimationFrame(id);
   }, []);
   const rename = useAtomCommand(providerAccountsEnvironment.rename, { reportFailure: false });
-  const finish = () => {
+  const finish = (how: RenameEnd) => {
+    if (settled.current) return;
     settled.current = true;
-    onDone();
+    onDone(how);
   };
-  const save = async () => {
-    if (saving || settled.current) return;
+  const save = async (how: Exclude<RenameEnd, "escape">) => {
+    if (savingRef.current || settled.current) return;
     const label = name.trim();
     // An empty or unchanged value reverts to the old label.
-    if (!label || label === account.label) return finish();
+    if (!label || label === account.label) return finish(how);
+    savingRef.current = true;
     setSaving(true);
     const result = await rename({ environmentId, input: { accountId: account.id, label } });
+    savingRef.current = false;
     setSaving(false);
-    if (result._tag === "Success") finish();
+    if (result._tag === "Success") finish(how);
     else if (!isAtomCommandInterrupted(result)) {
       const error = squashAtomCommandFailure(result);
       toastManager.add({
@@ -144,6 +152,8 @@ function RenameInput({
         title: "Couldn't rename account",
         description: error instanceof Error ? error.message : "Please try again.",
       });
+      // Keep editing so the name can be fixed or the rename cancelled with Escape.
+      inputRef.current?.focus();
     }
   };
   return (
@@ -151,7 +161,7 @@ function RenameInput({
       className="min-w-0 flex-1"
       onSubmit={(event) => {
         event.preventDefault();
-        void save();
+        void save("enter");
       }}
     >
       <Input
@@ -159,18 +169,20 @@ function RenameInput({
         aria-label="Account name"
         maxLength={40}
         value={name}
-        disabled={saving}
+        // Read-only, not disabled: a disabled input drops focus mid-save.
+        readOnly={saving}
+        aria-busy={saving || undefined}
         ref={inputRef}
         onChange={(event) => setName(event.target.value)}
         onBlur={() => {
-          if (armed.current) void save();
+          if (armed.current) void save("blur");
         }}
         onKeyDown={(event) => {
           if (event.key !== "Escape") return;
           // Escape closes the rename, never the dialog.
           event.stopPropagation();
           event.preventDefault();
-          finish();
+          finish("escape");
         }}
       />
     </form>
@@ -188,6 +200,7 @@ export function AccountRow({
   keeperLabel,
   renaming,
   signingIn,
+  resetChecking,
   switchState,
   menuTriggerRef,
   onRenameStart,
@@ -207,12 +220,14 @@ export function AccountRow({
   keeperLabel: string;
   renaming: boolean;
   signingIn: boolean;
+  /** A passed reset will actually be checked; otherwise the cells never say `checking…`. */
+  resetChecking: boolean;
   switchState: SwitchState;
   menuTriggerRef: Ref<HTMLButtonElement>;
   onRenameStart: () => void;
-  onRenameEnd: () => void;
+  onRenameEnd: (how: RenameEnd) => void;
   onSwitchStart: (accountId: ProviderAccountId) => void;
-  onSwitchEnd: () => void;
+  onSwitchEnd: (accountId: ProviderAccountId) => void;
   onRefresh: () => void;
   onSignIn: () => void;
   onRemove: () => void;
@@ -223,6 +238,23 @@ export function AccountRow({
   const primary = accountPrimaryAction(account, group, switchState);
   const switchReason = switchBlockedReason(group, switchState);
   const subtitle = accountSubtitle(account);
+  const removeReason = removeBlockedReason(account, signingIn);
+  const removeButton = (
+    <Button
+      variant="destructive-outline"
+      size="xs"
+      className="w-full"
+      aria-label={`Remove ${account.label}, same account as ${keeperLabel}`}
+      // aria-disabled keeps the button focusable so its reason stays reachable.
+      aria-disabled={removeReason ? true : undefined}
+      onClick={() => {
+        if (!removeReason) onRemove();
+      }}
+    >
+      <Trash2Icon />
+      Remove
+    </Button>
+  );
   const ariaLabel = [account.label, account.active ? "active" : null, message?.text]
     .filter(Boolean)
     .join(", ");
@@ -283,8 +315,18 @@ export function AccountRow({
             </p>
           ) : (
             <div className={NARROW_USAGE}>
-              <AccountUsageCell kind="session" windows={windows} now={now} />
-              <AccountUsageCell kind="weekly" windows={windows} now={now} />
+              <AccountUsageCell
+                kind="session"
+                windows={windows}
+                now={now}
+                checking={resetChecking}
+              />
+              <AccountUsageCell
+                kind="weekly"
+                windows={windows}
+                now={now}
+                checking={resetChecking}
+              />
             </div>
           )}
           <div className={cn("min-w-0", NARROW_CHECKED)}>
@@ -326,17 +368,14 @@ export function AccountRow({
               {`Switch to ${primary.keeper.label}`}
             </SwitchAccountAction>
           ) : primary.kind === "remove" ? (
-            <Button
-              variant="destructive-outline"
-              size="xs"
-              className="w-full"
-              aria-label={`Remove ${account.label}, same account as ${keeperLabel}`}
-              disabled={signingIn}
-              onClick={onRemove}
-            >
-              <Trash2Icon />
-              Remove
-            </Button>
+            removeReason ? (
+              <Tooltip>
+                <TooltipTrigger render={removeButton} />
+                <TooltipPopup>{removeReason}</TooltipPopup>
+              </Tooltip>
+            ) : (
+              removeButton
+            )
           ) : primary.kind === "signIn" ? (
             <Button variant="outline" size="xs" className="w-full" onClick={onSignIn}>
               Sign in
@@ -351,7 +390,7 @@ export function AccountRow({
         <AccountActionsMenu
           account={account}
           triggerRef={menuTriggerRef}
-          removeBlockedReason={removeBlockedReason(account, signingIn)}
+          removeBlockedReason={removeReason}
           editBlockedReason={switchState === "self" ? "Wait for the switch to finish." : undefined}
           onRename={onRenameStart}
           onSignIn={onSignIn}

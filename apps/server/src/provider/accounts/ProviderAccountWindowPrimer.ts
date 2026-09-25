@@ -8,6 +8,7 @@ import type {
   ServerProvider,
 } from "@t3tools/contracts";
 import { Clock, DateTime, Effect, Fiber, Queue, Stream } from "effect";
+import type * as Scope from "effect/Scope";
 
 /** A window counts as running until this long after its reset, so the reset has settled. */
 export const WINDOW_PRIMER_GRACE_MS = 60_000;
@@ -110,8 +111,14 @@ export interface ProviderAccountWindowPrimerDependencies {
     account: ProviderAccount,
     force: boolean,
   ) => Effect.Effect<unknown, ProviderAccountError>;
-  /** Sends the request. Called while holding the account mutation, after a fresh re-check. */
-  readonly prime: (account: ProviderAccount) => Effect.Effect<void, ProviderAccountError>;
+  /**
+   * Called under the account mutation after a fresh re-check: validates the account and takes
+   * its in-flight hold in the current scope. The returned request runs after the mutation is
+   * released, while that hold keeps a switch off the account.
+   */
+  readonly prime: (
+    account: ProviderAccount,
+  ) => Effect.Effect<Effect.Effect<void, ProviderAccountError>, ProviderAccountError, Scope.Scope>;
   readonly persistPrimed: (
     accountId: ProviderAccountId,
     at: number,
@@ -182,21 +189,43 @@ export const makeProviderAccountWindowPrimer = Effect.fn("makeProviderAccountWin
         (staleProbedAt.get(account.id) ?? Number.NEGATIVE_INFINITY) + WINDOW_PRIMER_MIN_INTERVAL_MS,
       );
 
-    /** Starts one account's window under the account mutation, or does nothing if it changed. */
+    /**
+     * Plans one account's start under the account mutation, sends it under the account's own
+     * hold (never the global mutation), then records the outcome under the mutation again.
+     * Does nothing if the account changed before the plan.
+     */
     const primeOne = Effect.fnUntraced(function* (accountId: ProviderAccountId, owner: number) {
+      // The hold is released when this scope closes, before the mutation is taken again.
+      const planned = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const plan = yield* deps.withMutation(
+            Effect.gen(function* () {
+              if (owner !== generation) return undefined;
+              const read = yield* deps.read();
+              const account = read.group?.accounts.find((item) => item.id === accountId);
+              if (!read.enabled || read.blocked || !account || owner !== generation)
+                return undefined;
+              const now = yield* Clock.currentTimeMillis;
+              if (planWindowPrime(account, now, accountState(read, account)).kind !== "prime")
+                return undefined;
+              const failures = attempts.get(accountId)?.failures ?? 0;
+              // Reserve the attempt first: the cap holds even if this fiber is interrupted.
+              attempts.set(accountId, { failures, nextAt: now + WINDOW_PRIMER_MIN_INTERVAL_MS });
+              return { account, now, failures, request: yield* Effect.result(deps.prime(account)) };
+            }),
+          );
+          if (!plan) return undefined;
+          const result =
+            plan.request._tag === "Failure"
+              ? plan.request
+              : yield* Effect.result(plan.request.success);
+          return { ...plan, result };
+        }),
+      );
+      if (!planned) return false;
+      const { account, now, failures, result } = planned;
       return yield* deps.withMutation(
         Effect.gen(function* () {
-          if (owner !== generation) return false;
-          const read = yield* deps.read();
-          const account = read.group?.accounts.find((item) => item.id === accountId);
-          if (!read.enabled || read.blocked || !account || owner !== generation) return false;
-          const now = yield* Clock.currentTimeMillis;
-          if (planWindowPrime(account, now, accountState(read, account)).kind !== "prime")
-            return false;
-          const failures = attempts.get(accountId)?.failures ?? 0;
-          // Reserve the attempt first: the cap holds even if this fiber is interrupted.
-          attempts.set(accountId, { failures, nextAt: now + WINDOW_PRIMER_MIN_INTERVAL_MS });
-          const result = yield* Effect.result(deps.prime(account));
           const finishedAt = yield* Clock.currentTimeMillis;
           if (result._tag === "Failure") {
             const next = failures + 1;
@@ -206,6 +235,8 @@ export const makeProviderAccountWindowPrimer = Effect.fn("makeProviderAccountWin
                 finishedAt +
                 WINDOW_PRIMER_BACKOFF_MS[Math.min(next, WINDOW_PRIMER_BACKOFF_MS.length) - 1]!,
             });
+            // Cleared (e.g. disabled) while the request ran: no stale failure message.
+            if (owner !== generation) return true;
             failure = `Couldn't start ${account.label}'s 5-hour window. ${result.failure.message}`;
             yield* setState({ ...state, message: failure });
             return true;
@@ -218,6 +249,8 @@ export const makeProviderAccountWindowPrimer = Effect.fn("makeProviderAccountWin
                 Effect.logWarning("Could not record a Claude window start; it may repeat once."),
               ),
             );
+          // The window started either way; only a still-current evaluation shows it.
+          if (owner !== generation) return true;
           pendingRefresh.add(accountId);
           failure = undefined;
           const { message: _cleared, ...rest } = state;

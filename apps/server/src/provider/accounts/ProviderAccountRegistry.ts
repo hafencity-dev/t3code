@@ -15,6 +15,8 @@ export type ProviderAccountDriver = typeof Driver.Type;
 const LastUsage = Schema.Struct({
   email: Schema.optional(Schema.String),
   accountUuid: Schema.optional(Schema.String),
+  /** Claude organizationUuid or Codex chatgpt_account_id; part of the account's identity. */
+  workspaceId: Schema.optional(Schema.String),
   plan: Schema.optional(Schema.String),
   usage: Schema.optional(ServerProviderUsageLimits),
   checkedAt: Schema.String,
@@ -52,6 +54,8 @@ const AutoSwitch = Schema.Struct({
       reason: Schema.String,
     }),
   ),
+  /** Last manual switch; only delays proactive rebalancing, never a threshold switch. */
+  lastManualSwitchAt: Schema.optional(Schema.String),
   // A legacy `manual` hold field from older builds is stripped by decode and dropped on write.
 });
 export type ProviderAccountAutoSwitch = typeof AutoSwitch.Type;
@@ -260,6 +264,9 @@ export async function createProviderAccountRegistry(input: { stateDir: string })
           enabled: patch.enabled ?? previous.enabled,
           thresholdPercent,
           ...(patch.lastSwitch !== undefined ? { lastSwitch: patch.lastSwitch } : {}),
+          ...(patch.lastManualSwitchAt !== undefined
+            ? { lastManualSwitchAt: patch.lastManualSwitchAt }
+            : {}),
         };
         await persist({ ...stored, autoSwitch: { ...stored.autoSwitch, [driver]: next } });
         return getAutoSwitch(driver);
@@ -407,6 +414,7 @@ export async function createProviderAccountRegistry(input: { stateDir: string })
             checkedAt: _,
             email: _email,
             accountUuid: _accountUuid,
+            workspaceId: _workspaceId,
             plan: _plan,
             usage,
             ...attempt

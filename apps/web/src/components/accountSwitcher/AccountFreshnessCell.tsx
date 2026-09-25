@@ -20,8 +20,11 @@ export function AccountFreshnessCell({
       variant="ghost-muted"
       size="icon-xs"
       aria-label={`${freshness.refreshTooltip} for ${label}`}
-      disabled={!freshness.canRefresh}
-      onClick={onRefresh}
+      // aria-disabled, not disabled: the button stays focusable so its reason is reachable.
+      aria-disabled={freshness.canRefresh ? undefined : true}
+      onClick={() => {
+        if (freshness.canRefresh) onRefresh();
+      }}
     >
       <RefreshIcon refreshing={freshness.refreshing} />
     </Button>
@@ -43,14 +46,7 @@ export function AccountFreshnessCell({
   return (
     <div className="flex min-w-0 items-center gap-1">
       <Tooltip>
-        {/* A disabled button can't take focus; the wrapper keeps its reason reachable. */}
-        <TooltipTrigger
-          render={
-            <span className="inline-flex" {...(freshness.canRefresh ? {} : { tabIndex: 0 })} />
-          }
-        >
-          {button}
-        </TooltipTrigger>
+        <TooltipTrigger render={button} />
         <TooltipPopup>{freshness.refreshTooltip}</TooltipPopup>
       </Tooltip>
       {freshness.tooltip ? (

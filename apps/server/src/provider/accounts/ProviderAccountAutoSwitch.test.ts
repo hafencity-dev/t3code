@@ -97,6 +97,8 @@ const makeHarness = Effect.fnUntraced(function* (options?: {
   blockRefresh?: boolean;
   failSwitch?: boolean;
   probeBlockedUntil?: number;
+  /** The refresh runs but its probes measure nothing (gated or dropped). */
+  unmeasured?: boolean;
 }) {
   const events = yield* Queue.unbounded<ProviderAccountAutoSwitchEvent>();
   const completions = yield* Queue.unbounded<void>();
@@ -170,6 +172,7 @@ const makeHarness = Effect.fnUntraced(function* (options?: {
         if (options?.blockRefresh) yield* Deferred.await(probeRelease);
         if (options?.failRefresh)
           return yield* new ProviderAccountError({ message: "Probe failed" });
+        if (options?.unmeasured) return [];
         const now = yield* Clock.currentTimeMillis;
         state.snapshot = {
           ...state.snapshot,
@@ -185,6 +188,7 @@ const makeHarness = Effect.fnUntraced(function* (options?: {
             ),
           },
         };
+        return ids;
       }),
     switchAccount: (id) =>
       Effect.gen(function* () {
@@ -570,10 +574,67 @@ describe("ProviderAccountAutoSwitch", () => {
       expect(yield* Queue.size(h.completions)).toBe(0);
     }).pipe(Effect.scoped),
   );
+  // S3: a probe that ran but measured nothing never promotes retained numbers to fresh.
+  it.effect("an unmeasured probe is treated as failed, not as a fresh measurement", () =>
+    Effect.gen(function* () {
+      const h = yield* makeHarness({ unmeasured: true });
+      expect((yield* Queue.take(h.events))._tag).toBe("blocked");
+      yield* completed(h.completions, 3);
+      expect(h.state.probes).toEqual([[work]]);
+      expect(h.state.switches).toEqual([]);
+    }).pipe(Effect.scoped),
+  );
+
+  // S5: a healthy stay re-evaluates at the next weekly reset, which can make rotation worthwhile.
+  it.effect("wakes at the active account's weekly reset and then rebalances", () =>
+    Effect.gen(function* () {
+      const h = yield* makeHarness({ used: 10 });
+      yield* completed(h.completions, 2);
+      const weekly = (reset: number, used: number) => ({
+        id: "weekly",
+        label: "Weekly",
+        kind: "weekly" as const,
+        usedPercent: used,
+        resetsAt: new Date(reset).toISOString(),
+      });
+      h.state.snapshot = {
+        ...h.state.snapshot,
+        group: {
+          ...h.state.snapshot.group,
+          accounts: h.state.snapshot.group.accounts.map((account) => ({
+            ...account,
+            usage: {
+              ...account.usage!,
+              windows: [
+                ...account.usage!.windows,
+                account.active ? weekly(3_600_000, 50) : weekly(5_400_000, 10),
+              ],
+            },
+          })),
+        },
+      };
+      yield* h.reactor.notify("codex");
+      yield* completed(h.completions);
+      expect(h.state.switches).toEqual([]);
+      expect(h.reactor.getState("codex")).toMatchObject({
+        state: "watching",
+        wakeAt: new Date(3_660_000).toISOString(),
+      });
+      yield* TestClock.adjust(3_660_000);
+      expect(yield* Queue.take(h.events)).toMatchObject({ _tag: "switched", trigger: "expiring" });
+      expect(h.state.switches).toEqual([work]);
+    }).pipe(Effect.scoped),
+  );
+
   it.effect("a switch failure does not kill the worker", () =>
     Effect.gen(function* () {
       const h = yield* makeHarness({ failSwitch: true });
       yield* completed(h.completions, 3);
+      // S10: the reason names the target and the switch error, not a generic check failure.
+      expect(h.reactor.getState("codex")).toEqual({
+        state: "paused",
+        message: "Couldn't switch to Work: Switch failed",
+      });
       h.state.failSwitch = false;
       yield* h.reactor.notify("codex");
       expect((yield* Queue.take(h.events))._tag).toBe("switched");

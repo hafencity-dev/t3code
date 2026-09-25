@@ -1,15 +1,17 @@
 import { defaultInstanceIdForDriver, ProviderDriverKind } from "@t3tools/contracts";
 import type {
+  EnvironmentId,
   ProviderAccount,
   ProviderAccountAutoSwitchEvent,
   ProviderAccountDriver,
   ProviderAccountGroup,
   ProviderAccountId,
+  ProviderAccountLoginEvent,
   ProviderAccountWindowPrimer,
   ServerProvider,
   ServerProviderUsageWindow,
 } from "@t3tools/contracts";
-import { formatDuration } from "@t3tools/shared/usageLimits";
+import { formatDuration, formatResetsIn } from "@t3tools/shared/usageLimits";
 
 export const ACCOUNT_DRIVERS = ["claudeAgent", "codex"] as const;
 export const ACCOUNT_DRIVER_LABELS = { claudeAgent: "Claude Code", codex: "Codex" } as const;
@@ -47,42 +49,52 @@ export function shortPlanLabel(plan: string) {
   return short || plan;
 }
 
-/** Unknown usage must never look like unused quota or become the recommended account. */
-export function remainingPercent(account: ProviderAccount): number | null {
-  if (!account.usage || account.usage.unavailable || account.usage.windows.length === 0)
-    return null;
-  return 100 - Math.max(...account.usage.windows.map((window) => window.usedPercent));
+/**
+ * Unknown usage must never look like unused quota or become the recommended account. A
+ * window whose reset has passed no longer counts: its number describes a window that ended.
+ */
+export function remainingPercent(account: ProviderAccount, now: number): number | null {
+  if (!account.usage || account.usage.unavailable) return null;
+  const current = account.usage.windows.filter((window) => !windowResetPassed(window, now));
+  if (current.length === 0) return null;
+  return 100 - Math.max(...current.map((window) => window.usedPercent));
 }
 
-export function accountTone(account: ProviderAccount) {
-  const remaining = remainingPercent(account);
+export function accountTone(account: ProviderAccount, now: number) {
+  const remaining = remainingPercent(account, now);
   if (account.status !== "ready" || (remaining !== null && remaining <= 10)) return "error";
   return remaining !== null && remaining <= 25 ? "warning" : "secondary";
 }
 
-function rankedAccounts(accounts: readonly ProviderAccount[]) {
+/** When the tightest weekly (or monthly) window resets; unknown sorts last. */
+function weeklyResetAt(account: ProviderAccount) {
+  const { tightest } = accountUsageCell(account.usage?.windows ?? [], "weekly");
+  const at = tightest?.resetsAt ? Date.parse(tightest.resetsAt) : Number.NaN;
+  return Number.isFinite(at) ? at : Number.POSITIVE_INFINITY;
+}
+
+function rankedAccounts(accounts: readonly ProviderAccount[], now: number) {
   return [...accounts].sort(
     (a, b) =>
       Number(b.active) - Number(a.active) ||
-      (remainingPercent(b) ?? -1) - (remainingPercent(a) ?? -1) ||
+      (remainingPercent(b, now) ?? -1) - (remainingPercent(a, now) ?? -1) ||
+      // Equal headroom: the one whose weekly limit resets soonest wastes the least quota.
+      weeklyResetAt(a) - weeklyResetAt(b) ||
       a.label.localeCompare(b.label),
   );
 }
 
 /** Shown only while the active account is low; never a duplicate or an unknown quota. */
-export function bestAccountId(accounts: readonly ProviderAccount[]) {
+export function bestAccountId(accounts: readonly ProviderAccount[], now: number) {
   const active = accounts.find((account) => account.active);
-  const remaining = active ? remainingPercent(active) : null;
+  const remaining = active ? remainingPercent(active, now) : null;
   if (remaining === null || remaining > 25) return null;
   return (
-    rankedAccounts(accounts).find(
-      (account) =>
-        !account.active &&
-        !account.duplicateOf &&
-        account.status === "ready" &&
-        remainingPercent(account) !== null &&
-        remainingPercent(account)! > remaining,
-    )?.id ?? null
+    rankedAccounts(accounts, now).find((account) => {
+      if (account.active || account.duplicateOf || account.status !== "ready") return false;
+      const candidate = remainingPercent(account, now);
+      return candidate !== null && candidate > remaining;
+    })?.id ?? null
   );
 }
 
@@ -125,20 +137,26 @@ export function usageTone(remaining: number): UsageTone {
   return remaining <= 10 ? "error" : remaining <= 25 ? "warning" : "default";
 }
 
-/** Shown once a window's reset has passed and its numbers are waiting for the next check. */
+/** Shown once a window's reset has passed and a check for its new numbers will run. */
 export const USAGE_RESET_PENDING_LABEL = "Resets now · checking…";
+/** Shown once a window's reset has passed but no check is going to run on its own. */
+export const USAGE_RESET_UNCHECKED_LABEL = "Reset · not checked yet";
 
 function windowResetPassed(window: ServerProviderUsageWindow, now: number) {
   const at = window.resetsAt ? Date.parse(window.resetsAt) : Number.NaN;
   return Number.isFinite(at) && at <= now;
 }
 
-/** `in 6d 3h`, the pending label once the reset has passed, or null without a reset time. */
-export function usageResetLabel(window: ServerProviderUsageWindow, now: number) {
+/**
+ * `in 6d 3h`, a reset label once the reset has passed, or null without a reset time.
+ * `checking` says whether a check will actually run; the label never promises one otherwise.
+ */
+export function usageResetLabel(window: ServerProviderUsageWindow, now: number, checking: boolean) {
   if (!window.resetsAt) return null;
   const at = Date.parse(window.resetsAt);
   if (!Number.isFinite(at)) return null;
-  return at <= now ? USAGE_RESET_PENDING_LABEL : `in ${formatDuration(at - now)}`;
+  if (at > now) return `in ${formatDuration(at - now)}`;
+  return checking ? USAGE_RESET_PENDING_LABEL : USAGE_RESET_UNCHECKED_LABEL;
 }
 
 /**
@@ -149,6 +167,7 @@ export function accountUsageCellView(
   windows: readonly ServerProviderUsageWindow[],
   kind: UsageCellKind,
   now: number,
+  checking: boolean,
 ) {
   const { tightest, all } = accountUsageCell(windows, kind);
   const resetPending = tightest !== undefined && windowResetPassed(tightest, now);
@@ -156,10 +175,54 @@ export function accountUsageCellView(
   return {
     all,
     remaining,
-    reset: tightest ? usageResetLabel(tightest, now) : null,
+    reset: tightest ? usageResetLabel(tightest, now, checking) : null,
     resetPending,
+    checking: resetPending && checking,
     tone: remaining === null ? "default" : usageTone(remaining),
   };
+}
+
+/** One line of the usage tooltip; a window whose reset passed never shows its old percent. */
+export function usageWindowTooltipLine(
+  window: ServerProviderUsageWindow,
+  now: number,
+  checking: boolean,
+) {
+  if (windowResetPassed(window, now))
+    return `${window.label}: reset, ${checking ? "checking…" : "not checked yet"}`;
+  const resets = formatResetsIn(window, now);
+  return `${window.label}: ${Math.round(100 - window.usedPercent)}% left${resets ? `, ${resets}` : ""}`;
+}
+
+/**
+ * Identifies one measurement with a window that reset after it was taken, or null. Only
+ * such a reset makes the numbers stale; one refresh per key is enough.
+ */
+export function usageResetKey(account: ProviderAccount, now: number): string | null {
+  if (account.status !== "ready" || account.duplicateOf) return null;
+  const usage = account.usage;
+  if (!usage || usage.unavailable?.reason === "unsupported") return null;
+  const checkedAt = Date.parse(usage.checkedAt);
+  const stale = usage.windows.some(
+    (window) => windowResetPassed(window, now) && Date.parse(window.resetsAt!) > checkedAt,
+  );
+  return stale ? `${account.id}:${usage.checkedAt}` : null;
+}
+
+/**
+ * Whether a check for a passed reset will actually run. The active account gets one live
+ * provider refresh per measurement (`attempted` holds the keys already refreshed); an
+ * inactive account is picked by the background refresh unless the server is gating it.
+ */
+export function usageResetCheckWillRun(
+  account: ProviderAccount,
+  now: number,
+  attempted: ReadonlySet<string>,
+) {
+  const key = usageResetKey(account, now);
+  if (key === null) return false;
+  if (account.active) return !attempted.has(key);
+  return !(Date.parse(account.usageRefresh?.nextAllowedAt ?? "") > now);
 }
 
 function defaultAccountProvider(
@@ -185,10 +248,13 @@ export function providerAccountsUsageKey(providers: readonly ServerProvider[]) {
 export function shouldShowAccountBadge(
   group: Pick<ProviderAccountGroup, "driver" | "accounts">,
   providers: readonly ServerProvider[],
+  now: number,
 ) {
   if (!defaultAccountProvider(group.driver, providers)?.enabled) return false;
   const active = group.accounts.find((account) => account.active);
-  return group.accounts.length > 1 || (active !== undefined && accountTone(active) !== "secondary");
+  return (
+    group.accounts.length > 1 || (active !== undefined && accountTone(active, now) !== "secondary")
+  );
 }
 
 /** Client cooldown after a manual per-account refresh; automatic refreshes never start one. */
@@ -222,12 +288,7 @@ export function autoRefreshAccountId(
   const unmeasured = candidates.find((account) => !account.usage);
   if (unmeasured) return unmeasured.id;
   // Same rule as the server's probe gate: only a reset after the measurement makes it stale.
-  const reset = candidates.find((account) => {
-    const checkedAt = Date.parse(account.usage!.checkedAt);
-    return account.usage!.windows.some(
-      (window) => windowResetPassed(window, now) && Date.parse(window.resetsAt!) > checkedAt,
-    );
-  });
+  const reset = candidates.find((account) => usageResetKey(account, now) !== null);
   if (reset) return reset.id;
   let stalest: ProviderAccount | undefined;
   for (const account of candidates) {
@@ -344,7 +405,12 @@ export function accountFreshness(
     };
   }
   // After a successful probe the server floor only disables the button; it is never a retry.
+  // The server's time already includes its global probe budget.
   const blockedUntil = Math.max(gatedUntil ?? 0, cooldown ?? 0);
+  const blockedTooltip = () =>
+    gatedUntil !== null && gatedUntil >= (cooldown ?? 0)
+      ? `Checks resume in ${formatWait(gatedUntil - now)}`
+      : cooldownTooltip(blockedUntil);
   if (!usage)
     return {
       ...plain("Not checked"),
@@ -352,8 +418,7 @@ export function accountFreshness(
       refreshing: false,
       tooltip: "Usage hasn't been checked yet.",
       canRefresh: blockedUntil === 0,
-      refreshTooltip:
-        blockedUntil === 0 ? "Check usage" : `Checks resume in ${formatWait(blockedUntil - now)}`,
+      refreshTooltip: blockedUntil === 0 ? "Check usage" : blockedTooltip(),
     };
   return {
     ...aged(age!),
@@ -361,7 +426,7 @@ export function accountFreshness(
     refreshing: false,
     tooltip: `Checked ${checkedTime(usage.checkedAt)}`,
     canRefresh: blockedUntil === 0,
-    refreshTooltip: blockedUntil === 0 ? "Refresh usage" : cooldownTooltip(blockedUntil),
+    refreshTooltip: blockedUntil === 0 ? "Refresh usage" : blockedTooltip(),
   };
 }
 
@@ -429,6 +494,38 @@ export function removeBlockedReason(account: ProviderAccount, signingIn: boolean
 
 export type SwitchState = "idle" | "self" | "other";
 
+/** The row's switch state while `switchingId` is switching; null means none is. */
+export function accountSwitchState(
+  switchingId: ProviderAccountId | null,
+  accountId: ProviderAccountId,
+): SwitchState {
+  return switchingId === null ? "idle" : switchingId === accountId ? "self" : "other";
+}
+
+/** A switch ending clears only its own id, never one another control started since. */
+export function endSwitch(current: ProviderAccountId | null, accountId: ProviderAccountId) {
+  return current === accountId ? null : current;
+}
+
+/** The auto-switch bar's "Switch now" follows the same rules as a row's Switch button. */
+export function autoSwitchNowBlockedReason(
+  group: Pick<ProviderAccountGroup, "warning">,
+  switchingId: ProviderAccountId | null,
+  targetId: ProviderAccountId,
+) {
+  return switchBlockedReason(group, accountSwitchState(switchingId, targetId));
+}
+
+/** Closing a rename clears only that row's editor. */
+export function endRename(current: ProviderAccountId | null, accountId: ProviderAccountId) {
+  return current === accountId ? null : current;
+}
+
+/** Only Enter and Escape hand focus back to the row menu; a blur leaves focus where it went. */
+export function renameRestoresFocus(how: "enter" | "escape" | "blur") {
+  return how !== "blur";
+}
+
 export function switchBlockedReason(
   group: Pick<ProviderAccountGroup, "warning">,
   switchState: SwitchState,
@@ -455,7 +552,8 @@ export function accountPrimaryAction(
   if (switchState === "self") return { kind: "switching" };
   if (account.duplicateOf) {
     const keeper = duplicateKeeper(account, group);
-    if (account.active && !canRemoveActiveDuplicate(account) && keeper)
+    // A keeper that isn't signed in can't take over; Remove then shows why it is blocked.
+    if (account.active && !canRemoveActiveDuplicate(account) && keeper?.status === "ready")
       return { kind: "switchToKeeper", keeper };
     return { kind: "remove" };
   }
@@ -623,4 +721,87 @@ export function windowPrimerStatus(
       : `Next start: ${label} in ${formatWait(wait)}.`;
   }
   return last ?? "No signed-in account can start a window right now.";
+}
+
+/** Toggling sends no threshold, so a toggle never overwrites a threshold changed elsewhere. */
+export function autoSwitchInput(
+  driver: ProviderAccountDriver,
+  enabled: boolean,
+  currentThreshold: number,
+  nextThreshold?: number,
+) {
+  return nextThreshold === undefined || nextThreshold === currentThreshold
+    ? { driver, enabled }
+    : { driver, enabled, thresholdPercent: nextThreshold };
+}
+
+/**
+ * Records a `switched` event and says whether it is new. `seen` lives at module level so a
+ * remounted subscription (reconnect, route change) never toasts the same switch twice.
+ */
+export function shouldToastAutoSwitch(
+  seen: Map<string, string>,
+  environmentId: EnvironmentId,
+  event: ProviderAccountAutoSwitchEvent,
+) {
+  if (event._tag !== "switched") return false;
+  const scope = `${environmentId}:${event.driver}`;
+  const key = `${event.at}:${event.toAccountId}`;
+  if (seen.get(scope) === key) return false;
+  seen.set(scope, key);
+  return true;
+}
+
+/**
+ * Which device the accounts UI shows. While the dialog is open the selection is pinned: a
+ * device that drops stays selected and reads as offline instead of jumping to another one.
+ * Closed, a missing selection falls back to the first connected device.
+ */
+export function resolveAccountsDevice(
+  selected: EnvironmentId | null,
+  connected: readonly EnvironmentId[],
+  open: boolean,
+): { readonly environmentId: EnvironmentId | null; readonly offlineId: EnvironmentId | null } {
+  if (selected !== null && connected.includes(selected))
+    return { environmentId: selected, offlineId: null };
+  if (open && selected !== null) return { environmentId: null, offlineId: selected };
+  return { environmentId: connected[0] ?? null, offlineId: null };
+}
+
+export type LoginPrompt = Extract<ProviderAccountLoginEvent, { _tag: "browser" | "deviceCode" }>;
+
+/** The sign-in prompt stays on screen after later events (verifying) replace it. */
+export function nextLoginPrompt(
+  previous: LoginPrompt | null,
+  event: ProviderAccountLoginEvent,
+): LoginPrompt | null {
+  return event._tag === "browser" || event._tag === "deviceCode" ? event : previous;
+}
+
+export type LoginWizardView =
+  | { readonly kind: "name" }
+  | { readonly kind: "failed"; readonly message: string }
+  | {
+      readonly kind: "completed";
+      readonly completed: Extract<ProviderAccountLoginEvent, { _tag: "completed" }>;
+    }
+  | { readonly kind: "gettingLink" }
+  | { readonly kind: "verifying" }
+  | { readonly kind: "prompt"; readonly prompt: LoginPrompt; readonly verifying: boolean };
+
+/** The wizard body, first match wins. `started` is false only on the name step. */
+export function loginWizardView(state: {
+  readonly started: boolean;
+  readonly prompt: LoginPrompt | null;
+  readonly event: ProviderAccountLoginEvent | null | undefined;
+  readonly error: string | null;
+}): LoginWizardView {
+  const { started, prompt, event, error } = state;
+  if (!started) return { kind: "name" };
+  const failed = error ?? (event?._tag === "failed" ? event.message : null);
+  if (failed !== null) return { kind: "failed", message: failed };
+  if (event?._tag === "completed") return { kind: "completed", completed: event };
+  const verifying = event?._tag === "verifying";
+  if (prompt) return { kind: "prompt", prompt, verifying };
+  return verifying ? { kind: "verifying" } : { kind: "gettingLink" };
 }

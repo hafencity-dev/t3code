@@ -355,8 +355,8 @@ describe("chooseNextAccount 32-scenario policy table", () => {
     const close = chooseNextAccount(
       input({ active, candidates: [account("Work", 60, 60, 5 * 24 * hour - 30 * minute)] }),
     );
-    expect(close).toMatchObject(stay("healthy"));
-    expect(close).not.toHaveProperty("wakeAt");
+    // It still wakes when the candidate's weekly reset moves its deadline.
+    expect(close).toMatchObject(stay("healthy", now + 5 * 24 * hour - 29 * minute));
   });
 
   it("probes a stale sooner-resetting candidate before switching proactively", () => {
@@ -436,14 +436,79 @@ describe("chooseNextAccount 32-scenario policy table", () => {
       probeWakeAt: new Map([[work.id, now + 15 * minute]]),
     };
     expect(chooseNextAccount(input(gate))).toMatchObject(stay("allExhausted", now + 15 * minute));
-    expect(chooseNextAccount(input({ ...gate, active: personal }))).toMatchObject(stay("healthy"));
-    expect(chooseNextAccount(input({ ...gate, active: personal }))).not.toHaveProperty("wakeAt");
+    // Healthy, the gated candidate's probe time is not a wake; only the active's weekly reset is.
+    expect(chooseNextAccount(input({ ...gate, active: personal }))).toMatchObject(
+      stay("healthy", now + 72 * hour + minute),
+    );
     expect(
       chooseNextAccount(input({ ...gate, probeWakeAt: new Map([[work.id, now]]) })),
     ).toMatchObject(stay("allExhausted", now + 2 * hour));
     expect(chooseNextAccount(input({ ...gate, probeBlocked: new Set() }))).toMatchObject(
       probe("Work"),
     );
+  });
+
+  // S4: a weekly trigger doesn't require the replacement to beat the active's healthy session.
+  it("replaces a weekly-exhausted account whose session is still high", () => {
+    expect(
+      chooseNextAccount(
+        input({ active: account("Personal", 95, 8), candidates: [account("B", 15, 90)] }),
+      ),
+    ).toMatchObject(switchTo("B", "weekly"));
+    // The session trigger keeps its ten-point improvement rule.
+    expect(
+      chooseNextAccount(
+        input({ active: account("Personal", 8, 90), candidates: [account("B", 15, 90)] }),
+      ),
+    ).toMatchObject(stay("allExhausted"));
+  });
+
+  // S5: a healthy stay wakes when a weekly reset can change the proactive decision.
+  it("wakes a healthy stay at the next weekly reset of the active or a candidate", () => {
+    expect(
+      chooseNextAccount(
+        input({
+          active: account("Personal", 80, 50, hour),
+          candidates: [account("B", 80, 90, 90 * minute)],
+        }),
+      ),
+    ).toMatchObject(stay("healthy", now + hour + minute));
+    expect(
+      chooseNextAccount(
+        input({
+          active: account("Personal", 80, 50, 3 * hour),
+          candidates: [account("B", 80, 15, 2 * hour + 30 * minute)],
+        }),
+      ),
+    ).toMatchObject(stay("healthy", now + 2 * hour + 31 * minute));
+    expect(
+      chooseNextAccount(
+        input({
+          active: account("Personal", 80, 50, 5 * hour),
+          candidates: [account("B", 80, 15, 4 * hour)],
+          probeBlocked: new Set([id("B")]),
+        }),
+      ),
+    ).toMatchObject(stay("healthy", now + 5 * hour + minute));
+  });
+
+  // S6: a manual switch starts the proactive dwell, but never holds back a threshold switch.
+  it("dwells after a manual switch for proactive rebalancing only", () => {
+    const sooner = { active: personal, candidates: [account("Work", 60, 60, 9 * hour)] };
+    expect(
+      chooseNextAccount(input({ ...sooner, lastManualSwitchAt: now - 5 * minute })),
+    ).toMatchObject(stay("dwell", now + 25 * minute));
+    expect(
+      chooseNextAccount(
+        input({ ...sooner, lastSwitchAt: now - 20 * minute, lastManualSwitchAt: now - 5 * minute }),
+      ),
+    ).toMatchObject(stay("dwell", now + 25 * minute));
+    expect(chooseNextAccount(input({ lastManualSwitchAt: now - minute }))).toMatchObject(
+      switchTo("Work"),
+    );
+    expect(
+      chooseNextAccount(input({ ...sooner, lastManualSwitchAt: now - 31 * minute })),
+    ).toMatchObject(switchTo("Work", "expiring"));
   });
 
   it("never selects failed or unsupported probes and cannot loop on them", () => {

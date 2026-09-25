@@ -13,6 +13,7 @@ import {
   type ProviderAccountsSnapshot,
 } from "@t3tools/contracts";
 import { Deferred, Effect, Fiber, Layer, PubSub, Queue, Schema, Scope, Stream } from "effect";
+import { TestClock } from "effect/testing";
 import { afterEach, beforeEach, vi } from "vite-plus/test";
 import { describe, expect, it } from "@effect/vitest";
 import * as ServerConfig from "../../config.ts";
@@ -27,6 +28,7 @@ import { ProviderAccountLogin, type ProviderAccountLoginOptions } from "./Provid
 import { createProviderAccountRegistry } from "./ProviderAccountRegistry.ts";
 import { switchClaudeCredentials } from "./ClaudeCredentialSwitch.ts";
 import {
+  claudeTerminalLogoutMessage,
   claudeTerminalSignedOutMessage,
   inactiveClaudeProbeEnvironment,
   ProviderAccountsService,
@@ -543,18 +545,26 @@ describe("ProviderAccountsService", () => {
     ),
   );
 
-  it.effect("a manual switch, even to a low account, records no hold or switch history", () =>
+  // S6: a manual switch records only its time, which delays proactive rebalancing.
+  it.effect("a manual switch, even to a low account, records its time but no hold or history", () =>
     run(
       Effect.gen(function* () {
         const service = yield* ProviderAccountsService;
+        yield* TestClock.adjust(42_000);
         yield* service.switchAccount({ accountId: seeded!.id });
+        yield* TestClock.adjust(1_000);
+        // Already active: nothing switched, so nothing is recorded.
         yield* service.switchAccount({ accountId: seeded!.id });
         const config = yield* ServerConfig.ServerConfig;
         const persisted = yield* Effect.promise(async () => {
           const registry = await createProviderAccountRegistry({ stateDir: config.stateDir });
           return registry.getAutoSwitch("codex");
         });
-        expect(persisted).toEqual({ enabled: false, thresholdPercent: 10 });
+        expect(persisted).toEqual({
+          enabled: false,
+          thresholdPercent: 10,
+          lastManualSwitchAt: new Date(42_000).toISOString(),
+        });
       }),
       "low",
     ),
@@ -1071,67 +1081,45 @@ describe("ProviderAccountsService", () => {
   );
   // H3: an unfinished journal locks Claude credential operations, list() only warns, and
   // recovery is retried on the next mutation once the cause is repaired.
-  it.effect("locks Claude operations behind an unrecoverable journal until it is repaired", () => {
+  // S7: an unrecoverable journal is abandoned (kept as evidence, no store touched) and the
+  // live login is filed by reconcile, instead of locking every Claude operation forever.
+  it.effect("abandons an unrecoverable journal and files the live login instead of locking", () => {
     let seeded: Awaited<ReturnType<typeof seedClaudeStores>>;
-    let callbacks: ProviderAccountLoginOptions;
-    const probe = vi.fn();
     return run(
       Effect.gen(function* () {
         const service = yield* ProviderAccountsService;
-        const settings = yield* ServerSettings.ServerSettingsService;
         const group = claudeGroup(yield* service.list());
-        expect(group.warning).toContain("A previous Claude account switch didn't finish:");
-        expect(group.warning).toContain("Accounts are locked until it's resolved.");
-        const target = ProviderAccountId.make(seeded.ids.b!);
-        for (const attempt of [
-          service.switchAccount({ accountId: target }),
-          service.remove({ accountId: target }),
-        ]) {
-          expect(yield* attempt.pipe(Effect.flip)).toMatchObject({
-            _tag: "ProviderAccountError",
-            message: expect.stringContaining("A previous Claude account switch didn't finish:"),
-          });
-        }
-        yield* Effect.promise(() =>
-          expect(callbacks.prepare({ driver: "claudeAgent", label: "New" })).rejects.toMatchObject({
-            message: expect.stringContaining("A previous Claude account switch didn't finish:"),
-          }),
-        );
-        const refreshed = claudeGroup(
-          yield* service.refreshUsage({ accountIds: [target], force: true }),
-        );
-        expect(probe).not.toHaveBeenCalled();
-        expect(refreshed.accounts.find((account) => account.id === target)?.usageRefresh).toBe(
-          undefined,
-        );
+        expect(group.warning).toBeUndefined();
+        const files = yield* Effect.promise(() => NodeFSP.readdir(seeded.stateDir));
+        expect(files).not.toContain("claude-credential-switch.json");
+        expect(
+          files.filter((name) => name.startsWith("claude-credential-switch.abandoned-")),
+        ).toHaveLength(1);
+        // Every store is as the crash left it; the terminal login stays live.
+        expect(
+          (yield* readJson(NodePath.join(seeded.homes.b!, ".credentials.json"))).claudeAiOauth,
+        ).toEqual(seeded.credentials("b").claudeAiOauth);
         expect(
           (yield* readJson(NodePath.join(seeded.activeHome, ".credentials.json"))).claudeAiOauth,
         ).toEqual(seeded.credentials("terminal").claudeAiOauth);
-        // Codex stays usable throughout.
-        yield* service.rename({
-          accountId: claudeGroup(yield* service.list()).activeAccountId!,
-          label: "Still renames",
+        // Reconcile filed the live login as its own account and signed Default out.
+        const filed = group.accounts.find((account) => account.active)!;
+        expect(filed).toMatchObject({ kind: "managed", email: "terminal@example.test" });
+        expect(group.accounts.find((account) => account.id === seeded.ids.default)).toMatchObject({
+          status: "signedOut",
+          message: claudeTerminalSignedOutMessage,
         });
-        // Repair: the terminal user signs back in as the checked-out account.
-        yield* Effect.promise(() =>
-          NodeFSP.writeFile(
-            NodePath.join(seeded.activeHome, ".claude.json"),
-            JSON.stringify({ oauthAccount: seeded.identity("default") }),
-          ),
-        );
+        const target = ProviderAccountId.make(seeded.ids.b!);
         const switched = claudeGroup(yield* service.switchAccount({ accountId: target }));
-        expect(switched.warning).toBeUndefined();
         expect(switched.activeAccountId).toBe(target);
-        expect(yield* settings.getSettings).toEqual(yield* settings.getSettings);
+        expect(switched.accounts.find((account) => account.id === filed.id)).toMatchObject({
+          status: "ready",
+          email: "terminal@example.test",
+        });
       }),
       false,
       {
         claudeHomePath: NodePath.join(root, "claude"),
-        probe: probe as unknown as Probe,
-        login: (options) => {
-          callbacks = options;
-          return new ProviderAccountLogin(options);
-        },
         before: async () => {
           seeded = await seedClaudeStores(["b"]);
           const registry = await createProviderAccountRegistry({ stateDir: seeded.stateDir });
@@ -1281,8 +1269,12 @@ describe("ProviderAccountsService", () => {
       Effect.gen(function* () {
         const service = yield* ProviderAccountsService;
         expect(claudeGroup(yield* service.list()).windowPrimer).toEqual({ enabled: false });
+        const events = yield* Stream.toQueue(service.autoSwitchEvents, { capacity: "unbounded" });
         yield* service.setWindowPrimer({ driver: "claudeAgent", enabled: true });
         yield* Effect.promise(() => primed);
+        // The start is recorded after the request, under the account mutation again.
+        while (!claudeGroup(yield* service.list()).windowPrimer?.lastPrimedAccountId)
+          yield* Queue.take(events);
         const launch = launches[0]!;
         expect(launch.env.CLAUDE_CONFIG_DIR).toBe(seeded.homes.b);
         expect(launch.env).not.toHaveProperty("CLAUDE_CODE_OAUTH_TOKEN");
@@ -1318,13 +1310,17 @@ describe("ProviderAccountsService", () => {
     );
   });
 
-  it.effect("drops an in-flight probe result for an account that became active meanwhile", () => {
+  // S8: a switch waits for an in-flight probe of its source or target, so a probe never
+  // reads a store while its credentials move; the probe's result lands before the switch.
+  it.effect("a switch waits for an in-flight probe of its target account", () => {
     let gate: Deferred.Deferred<void>;
     let started: Deferred.Deferred<void>;
+    const order: string[] = [];
     const probe: Probe = (() =>
       Effect.gen(function* () {
         yield* Deferred.succeed(started, undefined);
         yield* Deferred.await(gate);
+        order.push("probe finished");
         return {
           checkedAt,
           status: "ready",
@@ -1343,21 +1339,21 @@ describe("ProviderAccountsService", () => {
           .refreshUsage({ accountIds: [seeded!.id], force: true })
           .pipe(Effect.forkScoped);
         yield* Deferred.await(started);
-        yield* service.switchAccount({ accountId: seeded!.id });
+        const switching = yield* service.switchAccount({ accountId: seeded!.id }).pipe(
+          Effect.tap(() => Effect.sync(() => order.push("switched"))),
+          Effect.forkScoped,
+        );
+        // Only bounds how long a regression gets to finish the switch; passing never waits on it.
+        yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 200)));
+        expect(switching.pollUnsafe()).toBeUndefined();
         yield* Deferred.succeed(gate, undefined);
         yield* Fiber.join(refreshing);
+        yield* Fiber.join(switching);
+        expect(order).toEqual(["probe finished", "switched"]);
         const active = (yield* service.list()).groups
           .flatMap((group) => group.accounts)
           .find((account) => account.id === seeded!.id)!;
         expect(active.active).toBe(true);
-        expect(active.usage).toBeUndefined();
-        const config = yield* ServerConfig.ServerConfig;
-        const persisted = yield* Effect.promise(async () => {
-          const registry = await createProviderAccountRegistry({ stateDir: config.stateDir });
-          return registry.get(seeded!.id);
-        });
-        expect(persisted.lastUsage?.usage).toBeUndefined();
-        expect(persisted.lastUsage?.lastFailureKind).toBeUndefined();
       }),
       true,
       { probe },
@@ -1514,6 +1510,116 @@ describe("ProviderAccountsService", () => {
         },
       );
     },
+  );
+
+  // S14: the snapshot's next allowed check includes the shared probe budget.
+  it.effect("reports the shared probe budget as the next allowed check", () => {
+    const probe: Probe = (() =>
+      Effect.succeed({
+        checkedAt,
+        status: "ready",
+        usage: { checkedAt, windows: [{ id: "s", label: "5h", kind: "session", usedPercent: 5 }] },
+      } satisfies AccountUsage)) as unknown as Probe;
+    return run(
+      Effect.gen(function* () {
+        const service = yield* ProviderAccountsService;
+        const codex = (yield* service.refreshUsage({ force: true })).groups.find(
+          (group) => group.driver === "codex",
+        )!;
+        const inactive = codex.accounts.filter((account) => !account.active);
+        expect(inactive).toHaveLength(7);
+        const skipped = inactive.filter((account) => !account.usage);
+        expect(skipped).toHaveLength(1);
+        // Six attempts at t=0 fill the five-minute budget.
+        expect(skipped[0]!.usageRefresh).toEqual({
+          nextAllowedAt: new Date(5 * 60_000).toISOString(),
+          rateLimited: false,
+        });
+      }),
+      false,
+      {
+        probe,
+        before: async () => {
+          const registry = await createProviderAccountRegistry({
+            stateDir: NodePath.join(root, "state/userdata"),
+          });
+          await registry.list("codex", "", NodePath.join(root, "codex"));
+          for (let index = 0; index < 7; index++) {
+            const entry = await registry.createManaged({
+              driver: "codex",
+              label: `Codex ${index}`,
+              sharedHomePath: NodePath.join(root, "codex"),
+            });
+            await registry.update(entry.id, {
+              status: "ready",
+              lastUsage: { email: `codex-${index}@example.test`, checkedAt },
+            });
+          }
+        },
+      },
+    );
+  });
+
+  // S9: a Codex team seat and a personal plan under one email are different accounts.
+  it.effect("tells Codex workspaces under one email apart when signing in", () => {
+    let callbacks: ProviderAccountLoginOptions;
+    return run(
+      Effect.gen(function* () {
+        yield* ProviderAccountsService;
+        const personal = yield* Effect.promise(() =>
+          callbacks.prepare({ driver: "codex", label: "Personal" }),
+        );
+        expect(
+          yield* Effect.promise(() =>
+            callbacks.complete(personal, { email: "me@example.test", workspaceId: "ws-personal" }),
+          ),
+        ).toBeUndefined();
+        const again = yield* Effect.promise(() =>
+          callbacks.prepare({ driver: "codex", label: "Again" }),
+        );
+        expect(
+          yield* Effect.promise(() =>
+            callbacks.complete(again, { email: "me@example.test", workspaceId: "ws-team" }),
+          ),
+        ).toEqual({ message: "You're already signed in with me@example.test as Team." });
+      }),
+      false,
+      {
+        login: (options) => {
+          callbacks = options;
+          return new ProviderAccountLogin(options);
+        },
+        before: async () => {
+          const registry = await createProviderAccountRegistry({
+            stateDir: NodePath.join(root, "state/userdata"),
+          });
+          await registry.list("codex", "", NodePath.join(root, "codex"));
+          const team = await registry.createManaged({
+            driver: "codex",
+            label: "Team",
+            sharedHomePath: NodePath.join(root, "codex"),
+          });
+          await registry.update(team.id, {
+            status: "ready",
+            lastUsage: { email: "me@example.test", workspaceId: "ws-team", checkedAt },
+          });
+        },
+      },
+    );
+  });
+
+  // S10: sign-in errors keep their safe message instead of a generic storage failure.
+  it.effect("passes sign-in code errors through with their own message", () =>
+    run(
+      Effect.gen(function* () {
+        const service = yield* ProviderAccountsService;
+        expect(
+          yield* service
+            .submitLoginCode("owner", { loginId: "missing", code: "code" })
+            .pipe(Effect.flip),
+        ).toMatchObject({ _tag: "ProviderAccountError", message: "Sign-in session not found." });
+      }),
+    ),
   );
 
   it.effect("does not report probe backoff for the active account, whose usage is live", () =>
@@ -1930,6 +2036,177 @@ describe("ProviderAccountsService", () => {
         );
       },
     );
+
+    // S1: the account a terminal login replaced leaves with its own (empty) store, so it never
+    // signs in or gets probed through the active home.
+    it.effect("gives the replaced Default its own store for sign-in and probes", () => {
+      let seeded: Awaited<ReturnType<typeof seedClaudeStores>>;
+      let callbacks: ProviderAccountLoginOptions;
+      const probed: string[] = [];
+      const probe: Probe = ((input: Parameters<Probe>[0]) => {
+        probed.push(input.homePath);
+        return Effect.succeed({ checkedAt, status: "signedOut" } satisfies AccountUsage);
+      }) as unknown as Probe;
+      return run(
+        Effect.gen(function* () {
+          const service = yield* ProviderAccountsService;
+          const group = claudeGroup(yield* service.list());
+          expect(group.accounts.find((account) => account.id === seeded.ids.default)?.active).toBe(
+            false,
+          );
+          const entry = yield* storedEntry(seeded.stateDir, seeded.ids.default!);
+          expect(entry.storePath).toBeDefined();
+          expect(entry.storePath).not.toBe(seeded.activeHome);
+          expect((yield* readCredentials(entry.storePath!)).claudeAiOauth).toBeUndefined();
+          const prepared = yield* Effect.promise(() =>
+            callbacks.prepare({ driver: "claudeAgent", accountId: seeded.ids.default! }),
+          );
+          expect(prepared.homePath).toBe(entry.storePath);
+          expect(prepared.claudeActive).toBeUndefined();
+          yield* service.refreshUsage({ force: true });
+          expect(probed).toContain(entry.storePath);
+          expect(probed).not.toContain(seeded.activeHome);
+        }),
+        false,
+        {
+          claudeHomePath: NodePath.join(root, "claude"),
+          probe,
+          login: (options) => {
+            callbacks = options;
+            return new ProviderAccountLogin(options);
+          },
+          before: async () => {
+            seeded = await seedClaudeStores(["b"]);
+            await terminalLogin(seeded, "new");
+          },
+        },
+      );
+    });
+
+    // S2: a terminal logout marks the active account signed out; it never becomes an account.
+    it.effect("signs the active account out after a terminal logout and switches away", () => {
+      let seeded: Awaited<ReturnType<typeof seedClaudeStores>>;
+      const logout = () =>
+        Effect.promise(async () => {
+          await NodeFSP.writeFile(NodePath.join(seeded.activeHome, ".credentials.json"), "{}");
+          await NodeFSP.writeFile(NodePath.join(seeded.activeHome, ".claude.json"), "{}");
+        });
+      return run(
+        Effect.gen(function* () {
+          const service = yield* ProviderAccountsService;
+          const defaultOf = (snapshot: ProviderAccountsSnapshot) =>
+            claudeGroup(snapshot).accounts.find((account) => account.id === seeded.ids.default)!;
+          yield* logout();
+          let group = claudeGroup(yield* service.list());
+          expect(group.accounts).toHaveLength(2);
+          expect(defaultOf(yield* service.list())).toMatchObject({
+            active: true,
+            status: "signedOut",
+            message: claudeTerminalLogoutMessage,
+          });
+          // Signing back in as the same account clears it.
+          yield* Effect.promise(() => terminalLogin(seeded, "default"));
+          expect(defaultOf(yield* service.list())).toMatchObject({ active: true, status: "ready" });
+          expect(defaultOf(yield* service.list()).message).toBeUndefined();
+          yield* logout();
+          group = claudeGroup(
+            yield* service.switchAccount({ accountId: ProviderAccountId.make(seeded.ids.b!) }),
+          );
+          expect(group.activeAccountId).toBe(seeded.ids.b);
+          expect(group.accounts).toHaveLength(2);
+          expect(defaultOf(yield* service.list())).toMatchObject({
+            active: false,
+            status: "signedOut",
+            message: claudeTerminalLogoutMessage,
+            email: "default@example.test",
+          });
+          expect((yield* readCredentials(seeded.activeHome)).claudeAiOauth).toEqual(
+            seeded.credentials("b").claudeAiOauth,
+          );
+        }),
+        false,
+        {
+          claudeHomePath: NodePath.join(root, "claude"),
+          before: async () => {
+            seeded = await seedClaudeStores(["b"]);
+          },
+        },
+      );
+    });
+
+    // S11: Default's first identity is never captured from another saved account's login,
+    // nor while a switch journal owns the active home.
+    it.effect("never captures another saved account's live identity as Default's", () => {
+      const stateDir = NodePath.join(root, "state/userdata");
+      const activeHome = NodePath.join(root, "claude");
+      let defaultId: string;
+      let bId: string;
+      return run(
+        Effect.gen(function* () {
+          const service = yield* ProviderAccountsService;
+          const group = claudeGroup(yield* service.list());
+          expect((yield* storedEntry(stateDir, defaultId)).lastUsage?.email).toBeUndefined();
+          // The live login is B's, so the selection moved to B like any terminal login.
+          expect(group.activeAccountId).toBe(bId);
+        }),
+        false,
+        {
+          claudeHomePath: activeHome,
+          before: async () => {
+            const registry = await createProviderAccountRegistry({ stateDir });
+            const group = await registry.list("claudeAgent", activeHome, activeHome, activeHome);
+            defaultId = group.activeAccountId;
+            const b = await registry.createManaged({
+              driver: "claudeAgent",
+              label: "B",
+              sharedHomePath: activeHome,
+            });
+            bId = b.id;
+            await registry.update(b.id, {
+              status: "ready",
+              lastUsage: { email: "b@example.test", accountUuid: "uuid-b", checkedAt },
+            });
+            await NodeFSP.writeFile(
+              NodePath.join(activeHome, ".claude.json"),
+              JSON.stringify({
+                oauthAccount: { emailAddress: "b@example.test", accountUuid: "uuid-b" },
+              }),
+            );
+          },
+        },
+      );
+    });
+
+    it.effect("never captures Default's identity while a switch journal is pending", () => {
+      const stateDir = NodePath.join(root, "state/userdata");
+      const activeHome = NodePath.join(root, "claude");
+      return run(
+        Effect.gen(function* () {
+          const service = yield* ProviderAccountsService;
+          const group = claudeGroup(yield* service.list());
+          expect(group.warning).toContain("A previous Claude account switch didn't finish:");
+          const active = group.accounts.find((account) => account.active)!;
+          expect((yield* storedEntry(stateDir, active.id)).lastUsage?.email).toBeUndefined();
+        }),
+        false,
+        {
+          claudeHomePath: activeHome,
+          before: async () => {
+            await NodeFSP.mkdir(activeHome, { recursive: true });
+            await NodeFSP.writeFile(
+              NodePath.join(activeHome, ".claude.json"),
+              JSON.stringify({ oauthAccount: { emailAddress: "someone@example.test" } }),
+            );
+            // A journal for another home: recovery refuses it and keeps the barrier.
+            await NodeFSP.mkdir(stateDir, { recursive: true });
+            await NodeFSP.writeFile(
+              NodePath.join(stateDir, "claude-credential-switch.json"),
+              JSON.stringify({ version: 1, phase: "prepared", activeHome: "/elsewhere" }),
+            );
+          },
+        },
+      );
+    });
 
     it.effect("keeps a known identity when a usage probe reports none", () =>
       run(

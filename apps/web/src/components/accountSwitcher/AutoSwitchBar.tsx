@@ -15,7 +15,13 @@ import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../
 import { Switch } from "../ui/switch";
 import { toastManager } from "../ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
-import { ACCOUNT_DRIVER_LABELS, autoSwitchStatus, formatAgo } from "./accounts.logic";
+import {
+  ACCOUNT_DRIVER_LABELS,
+  autoSwitchInput,
+  autoSwitchNowBlockedReason,
+  autoSwitchStatus,
+  formatAgo,
+} from "./accounts.logic";
 import { providerAccountsEnvironment } from "./state";
 import { SwitchAccountAction } from "./SwitchAccountAction";
 import { WindowPrimerRow } from "./WindowPrimerRow";
@@ -30,6 +36,7 @@ export function AutoSwitchBar({
   event,
   now,
   readyCount,
+  switchingId,
   onSwitchStart,
   onSwitchEnd,
 }: {
@@ -38,8 +45,10 @@ export function AutoSwitchBar({
   event?: ProviderAccountAutoSwitchEvent | undefined;
   now: number;
   readyCount: number;
+  /** The account a switch started from anywhere in this section is moving to. */
+  switchingId: ProviderAccountId | null;
   onSwitchStart: (accountId: ProviderAccountId) => void;
-  onSwitchEnd: () => void;
+  onSwitchEnd: (accountId: ProviderAccountId) => void;
 }) {
   const { autoSwitch } = group;
   const labelId = useId();
@@ -49,14 +58,19 @@ export function AutoSwitchBar({
     reportFailure: false,
   });
   const provider = ACCOUNT_DRIVER_LABELS[group.driver];
-  const update = async (enabled: boolean, thresholdPercent = autoSwitch.thresholdPercent) => {
+  const update = async (enabled: boolean, thresholdPercent?: number) => {
     if (pending.current) return;
     pending.current = true;
     setSaving(true);
     try {
       const result = await setAutoSwitch({
         environmentId,
-        input: { driver: group.driver, enabled, thresholdPercent },
+        input: autoSwitchInput(
+          group.driver,
+          enabled,
+          autoSwitch.thresholdPercent,
+          thresholdPercent,
+        ),
       });
       if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
         const error = squashAtomCommandFailure(result);
@@ -166,9 +180,8 @@ export function AutoSwitchBar({
               accountId={status.target.id}
               label={status.target.label}
               variant="outline"
-              disabledReason={
-                group.warning ? "Switching is paused. See the warning above." : undefined
-              }
+              busy={switchingId === status.target.id}
+              disabledReason={autoSwitchNowBlockedReason(group, switchingId, status.target.id)}
               onStart={onSwitchStart}
               onEnd={onSwitchEnd}
             >

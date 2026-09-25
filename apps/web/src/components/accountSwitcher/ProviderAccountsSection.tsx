@@ -21,10 +21,15 @@ import { AutoSwitchBar } from "./AutoSwitchBar";
 import {
   ACCOUNT_DRIVER_LABELS,
   accountFreshness,
+  accountSwitchState,
   bestAccountId,
   duplicateKeeperLabel,
+  endRename,
+  endSwitch,
   orderedAccounts,
   readyAccountCount,
+  renameRestoresFocus,
+  usageResetCheckWillRun,
 } from "./accounts.logic";
 import { RemoveAccountDialog } from "./RemoveAccountDialog";
 
@@ -42,6 +47,7 @@ export function ProviderAccountsSection({
   now,
   refreshingIds,
   cooldownUntil,
+  resetChecksAttempted,
   onRefresh,
   autoEvent,
 }: {
@@ -52,6 +58,8 @@ export function ProviderAccountsSection({
   now: number;
   refreshingIds: ReadonlySet<ProviderAccountId>;
   cooldownUntil: ReadonlyMap<ProviderAccountId, number>;
+  /** Reset keys the dialog already refreshed the active account for. */
+  resetChecksAttempted: ReadonlySet<string>;
   onRefresh: (account: ProviderAccount) => void;
   autoEvent?: ProviderAccountAutoSwitchEvent | undefined;
 }) {
@@ -80,10 +88,11 @@ export function ProviderAccountsSection({
     const next = pending.nextId && menuTriggers.current.get(pending.nextId);
     (next || addButtonRef.current)?.focus();
   }, [serverAccounts]);
-  const best = bestAccountId(accounts);
+  const best = bestAccountId(accounts, now);
   const readyCount = readyAccountCount(accounts);
   const onSwitchStart = (accountId: ProviderAccountId) => setSwitchingId(accountId);
-  const onSwitchEnd = () => setSwitchingId(null);
+  const onSwitchEnd = (accountId: ProviderAccountId) =>
+    setSwitchingId((current) => endSwitch(current, accountId));
   const openAdd = () => setWizard({});
   const header = (
     <div className="flex min-h-7 min-w-0 items-center gap-2">
@@ -167,17 +176,19 @@ export function ProviderAccountsSection({
                   keeperLabel={duplicateKeeperLabel(account, group)}
                   renaming={renamingId === account.id}
                   signingIn={signingInId === account.id}
-                  switchState={
-                    switchingId === null ? "idle" : switchingId === account.id ? "self" : "other"
+                  resetChecking={
+                    refreshingIds.has(account.id) ||
+                    usageResetCheckWillRun(account, now, resetChecksAttempted)
                   }
+                  switchState={accountSwitchState(switchingId, account.id)}
                   menuTriggerRef={(element) => {
                     if (element) menuTriggers.current.set(account.id, element);
                     else menuTriggers.current.delete(account.id);
                   }}
                   onRenameStart={() => setRenamingId(account.id)}
-                  onRenameEnd={() => {
-                    setRenamingId(null);
-                    menuTriggers.current.get(account.id)?.focus();
+                  onRenameEnd={(how) => {
+                    setRenamingId((current) => endRename(current, account.id));
+                    if (renameRestoresFocus(how)) menuTriggers.current.get(account.id)?.focus();
                   }}
                   onSwitchStart={onSwitchStart}
                   onSwitchEnd={onSwitchEnd}
@@ -204,6 +215,7 @@ export function ProviderAccountsSection({
               event={autoEvent}
               now={now}
               readyCount={readyCount}
+              switchingId={switchingId}
               onSwitchStart={onSwitchStart}
               onSwitchEnd={onSwitchEnd}
             />

@@ -31,7 +31,12 @@ import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "..
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Spinner } from "../ui/spinner";
 import { toastManager } from "../ui/toast";
-import { ACCOUNT_DRIVERS, autoRefreshAccountId, USAGE_REFRESH_COOLDOWN_MS } from "./accounts.logic";
+import {
+  ACCOUNT_DRIVERS,
+  autoRefreshAccountId,
+  USAGE_REFRESH_COOLDOWN_MS,
+  usageResetKey,
+} from "./accounts.logic";
 import { ProviderAccountsSection } from "./ProviderAccountsSection";
 import { providerAccountsEnvironment } from "./state";
 
@@ -74,6 +79,10 @@ export function AccountSwitcherDialog({
     () => new Set(),
   );
   const pendingIds = useRef(new Set<ProviderAccountId>());
+  // Reset keys the active account was already refreshed for: one live refresh per reset.
+  const [resetChecksAttempted, setResetChecksAttempted] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
   const autoPending = useRef(false);
   const nextAutoAt = useRef(0);
   const refreshUsage = useAtomCommand(providerAccountsEnvironment.refreshUsage, {
@@ -88,19 +97,19 @@ export function AccountSwitcherDialog({
     else pendingIds.current.delete(accountId);
     setRefreshingIds(new Set(pendingIds.current));
   };
+  // The active account's usage is the live provider snapshot, not a saved-store probe.
+  const refreshActive = (target: EnvironmentId, account: ProviderAccount) =>
+    refreshProviders({
+      environmentId: target,
+      input: { instanceId: defaultInstanceIdForDriver(ProviderDriverKind.make(account.driver)) },
+    });
   const refreshAccount = async (account: ProviderAccount) => {
     // The row disables its button during the cooldown; the clock ticks when it expires.
     if (!environmentId || pendingIds.current.has(account.id)) return;
     track(account.id, true);
     try {
-      // The active account's usage is the live provider snapshot, not a saved-store probe.
       const result = account.active
-        ? await refreshProviders({
-            environmentId,
-            input: {
-              instanceId: defaultInstanceIdForDriver(ProviderDriverKind.make(account.driver)),
-            },
-          })
+        ? await refreshActive(environmentId, account)
         : await refreshUsage({
             environmentId,
             input: { accountIds: [account.id], force: true },
@@ -143,6 +152,31 @@ export function AccountSwitcherDialog({
   useEffect(() => {
     if (openTrigger !== null) autoRefresh(Date.now());
   }, [openTrigger]);
+  // A window of the active account reset after its last measurement: refresh it once, so
+  // `checking…` next to the reset is true. Failures fall back to `not checked yet`.
+  const activeResetKeys = allAccounts.flatMap((account) => {
+    const key = account.active ? usageResetKey(account, now) : null;
+    return key === null || resetChecksAttempted.has(key) ? [] : [{ account, key }];
+  });
+  const activeResetTrigger = activeResetKeys.map(({ key }) => key).join();
+  const refreshActiveResets = useEffectEvent(() => {
+    if (!environmentId) return;
+    const due = activeResetKeys.filter(({ account }) => !pendingIds.current.has(account.id));
+    if (due.length === 0) return;
+    setResetChecksAttempted((previous) => new Set([...previous, ...due.map(({ key }) => key)]));
+    for (const { account } of due) {
+      track(account.id, true);
+      void refreshActive(environmentId, account).finally(() => track(account.id, false));
+    }
+  });
+  useEffect(() => {
+    if (activeResetTrigger) refreshActiveResets();
+  }, [activeResetTrigger]);
+  // Server gates (per-account backoff plus the global probe budget) end on their own clock.
+  const gateEndsKey = allAccounts
+    .map((account) => account.usageRefresh?.nextAllowedAt)
+    .filter((at): at is string => at !== undefined)
+    .join();
   useEffect(() => {
     // One clock timer: minute ticks drive labels and the background refresh; an earlier
     // tick is inserted only when a manual refresh cooldown expires.
@@ -150,9 +184,10 @@ export function AccountSwitcherDialog({
     const schedule = () => {
       const current = Date.now();
       if (nextAutoAt.current === 0) nextAutoAt.current = current + CLOCK_INTERVAL_MS;
-      const cooldownEnds = [...manualRefreshedAt.values()]
-        .map((at) => at + USAGE_REFRESH_COOLDOWN_MS)
-        .filter((end) => end > current);
+      const cooldownEnds = [
+        ...[...manualRefreshedAt.values()].map((at) => at + USAGE_REFRESH_COOLDOWN_MS),
+        ...(gateEndsKey ? gateEndsKey.split(",").map((at) => Date.parse(at)) : []),
+      ].filter((end) => end > current);
       timer = setTimeout(
         tick,
         Math.max(0, Math.min(nextAutoAt.current, ...cooldownEnds) - current),
@@ -169,7 +204,7 @@ export function AccountSwitcherDialog({
     };
     schedule();
     return () => clearTimeout(timer);
-  }, [manualRefreshedAt]);
+  }, [manualRefreshedAt, gateEndsKey]);
   const cooldownUntil = new Map(
     [...manualRefreshedAt].map(([id, at]) => [id, at + USAGE_REFRESH_COOLDOWN_MS] as const),
   );
@@ -223,6 +258,7 @@ export function AccountSwitcherDialog({
           now={now}
           refreshingIds={refreshingIds}
           cooldownUntil={cooldownUntil}
+          resetChecksAttempted={resetChecksAttempted}
           onRefresh={(account) => void refreshAccount(account)}
           autoEvent={autoEvents?.[driver]}
         />

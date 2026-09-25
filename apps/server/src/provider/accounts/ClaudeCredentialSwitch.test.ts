@@ -82,6 +82,19 @@ describe("ClaudeCredentialSwitch", () => {
     await NodeFSP.rm(root, { recursive: true, force: true });
   });
 
+  /** The journal is gone and kept, unchanged apart from its name, as abandoned evidence. */
+  async function expectAbandoned(phase: ClaudeCredentialSwitchPhase) {
+    const files = await NodeFSP.readdir(input.stateDir);
+    expect(files).not.toContain("claude-credential-switch.json");
+    const evidence = files.filter((name) =>
+      /^claude-credential-switch\.abandoned-.+\.json$/u.test(name),
+    );
+    expect(evidence).toHaveLength(1);
+    const journal = await read(NodePath.join(input.stateDir, evidence[0]!));
+    expect(journal.phase).toBe(phase);
+    expect(JSON.stringify(journal)).not.toContain("access-");
+  }
+
   async function assertMoved() {
     expect(await read(NodePath.join(input.activeHome, ".credentials.json"))).toEqual({
       claudeAiOauth: oauth("b"),
@@ -230,7 +243,11 @@ describe("ClaudeCredentialSwitch", () => {
     const external = NodePath.join(input.managedRoot, "c");
     await NodeFSP.mkdir(external);
     input.resolveSource = vi.fn(async (observed) => {
-      expect(observed).toEqual({ email: "c@example.test", accountUuid: "c" });
+      expect(observed).toEqual({
+        email: "c@example.test",
+        accountUuid: "c",
+        workspaceId: "org-c",
+      });
       return { store: external, accountId: "c" };
     });
     const lockSets: string[][] = [];
@@ -245,7 +262,7 @@ describe("ClaudeCredentialSwitch", () => {
       activeAccountId: "b",
       sourceAccountId: "c",
       originalSourceAccountId: "a",
-      externalIdentity: { email: "c@example.test", accountUuid: "c" },
+      externalIdentity: { email: "c@example.test", accountUuid: "c", workspaceId: "org-c" },
     });
     expect((await read(NodePath.join(external, ".credentials.json"))).claudeAiOauth).toEqual(
       oauth("c"),
@@ -273,6 +290,43 @@ describe("ClaudeCredentialSwitch", () => {
     expect(
       (await read(NodePath.join(input.activeHome, ".credentials.json"))).claudeAiOauth,
     ).toEqual(oauth("a"));
+  });
+
+  // S2: a terminal logout is the expected source with no token, never a new account.
+  it("moves a source signed out in the terminal away without resolving a new account", async () => {
+    await write(NodePath.join(input.activeHome, ".credentials.json"), {
+      mcpOAuth: { keep: "active" },
+    });
+    await write(input.activeConfigPath, { theme: "dark" });
+    input.resolveSource = vi.fn(async () => {
+      throw new Error("must not resolve an empty identity");
+    });
+    const result = await switchClaudeCredentials(input);
+    expect(input.resolveSource).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      activeAccountId: "b",
+      sourceAccountId: "a",
+      originalSourceAccountId: "a",
+      sourceSignedOut: true,
+    });
+    expect(input.commit).toHaveBeenCalledWith(result);
+    expect(
+      (await read(NodePath.join(input.activeHome, ".credentials.json"))).claudeAiOauth,
+    ).toEqual(oauth("b"));
+    expect((await read(input.activeConfigPath)).oauthAccount).toEqual(account("b"));
+    expect(
+      (await read(NodePath.join(input.sourceStore, ".credentials.json"))).claudeAiOauth,
+    ).toBeUndefined();
+  });
+
+  it("refuses a token without any identity instead of filing it anywhere", async () => {
+    await write(input.activeConfigPath, { theme: "dark" });
+    input.resolveSource = vi.fn(async () => ({ store: input.sourceStore, accountId: "x" }));
+    await expect(switchClaudeCredentials(input)).rejects.toThrow("changed outside");
+    expect(input.resolveSource).not.toHaveBeenCalled();
+    expect(await NodeFSP.readdir(input.stateDir).catch(() => [])).not.toContain(
+      "claude-credential-switch.json",
+    );
   });
 
   it("supports a signed-out default without inventing credentials", async () => {
@@ -386,8 +440,9 @@ describe("ClaudeCredentialSwitch", () => {
     ).toEqual(oauth("a"));
   });
 
-  it.each<ClaudeCredentialSwitchPhase>(["source-saved", "activating", "activated", "checked-out"])(
-    "fails closed if terminal login changes active identity after %s",
+  // S7: a journal whose authority is gone is abandoned with its evidence; no store changes.
+  it.each<ClaudeCredentialSwitchPhase>(["source-saved", "activating", "activated"])(
+    "abandons the journal if terminal login changes active identity after %s",
     async (phase) => {
       await expect(
         switchClaudeCredentials(input, {
@@ -400,21 +455,55 @@ describe("ClaudeCredentialSwitch", () => {
         claudeAiOauth: oauth("c"),
       });
       await write(input.activeConfigPath, { oauthAccount: account("c") });
-      await expect(recoverClaudeCredentialSwitch(input)).rejects.toThrow("recovery left untouched");
+      const stores = async () => ({
+        source: await read(NodePath.join(input.sourceStore, ".credentials.json")),
+        target: await read(NodePath.join(input.targetStore, ".credentials.json")),
+      });
+      const before = await stores();
+      expect(await recoverClaudeCredentialSwitch(input)).toMatchObject({
+        abandoned: true,
+        phase,
+        reason: expect.stringContaining("recovery left untouched"),
+      });
+      expect(await stores()).toEqual(before);
+      expect(before.target.claudeAiOauth).toEqual(oauth("b"));
       expect(
         (await read(NodePath.join(input.activeHome, ".credentials.json"))).claudeAiOauth,
       ).toEqual(oauth("c"));
-      if (phase !== "checked-out") {
-        expect(
-          (await read(NodePath.join(input.targetStore, ".credentials.json"))).claudeAiOauth,
-        ).toEqual(oauth("b"));
-      }
-      expect(
-        (await read(NodePath.join(input.stateDir, "claude-credential-switch.json"))).phase,
-      ).toBe(phase);
+      await expectAbandoned(phase);
       expect(input.commit).not.toHaveBeenCalled();
+      // Nothing is left to recover or block on.
+      expect(await recoverClaudeCredentialSwitch(input)).toBeUndefined();
     },
   );
+
+  // S7: once checked out, only the registry commit remains; a later login never blocks it.
+  it("commits a checked-out journal even after a terminal login changed the active identity", async () => {
+    await expect(
+      switchClaudeCredentials(input, {
+        afterPhase: async (current) => {
+          if (current === "checked-out") throw new Error("crash");
+        },
+      }),
+    ).rejects.toThrow("crash");
+    await write(NodePath.join(input.activeHome, ".credentials.json"), {
+      claudeAiOauth: oauth("c"),
+    });
+    await write(input.activeConfigPath, { oauthAccount: account("c") });
+    expect(await recoverClaudeCredentialSwitch(input)).toEqual({
+      activeAccountId: "b",
+      sourceAccountId: "a",
+      originalSourceAccountId: "a",
+    });
+    expect(input.commit).toHaveBeenCalledTimes(1);
+    expect(await NodeFSP.readdir(input.stateDir)).not.toContain("claude-credential-switch.json");
+    expect(
+      (await read(NodePath.join(input.activeHome, ".credentials.json"))).claudeAiOauth,
+    ).toEqual(oauth("c"));
+    expect(
+      (await read(NodePath.join(input.sourceStore, ".credentials.json"))).claudeAiOauth,
+    ).toEqual(oauth("a"));
+  });
 
   it("does not save terminal login C into A's store after a prepared crash", async () => {
     await expect(
@@ -429,8 +518,12 @@ describe("ClaudeCredentialSwitch", () => {
     });
     await write(input.activeConfigPath, { oauthAccount: account("c") });
     const journal = await FSJournal();
-    expect(journal.sourceIdentity).toEqual({ email: "a@example.test", accountUuid: "a" });
-    await expect(recoverClaudeCredentialSwitch(input)).rejects.toThrow("recovery left untouched");
+    expect(journal.sourceIdentity).toEqual({
+      email: "a@example.test",
+      accountUuid: "a",
+      workspaceId: "org-a",
+    });
+    expect(await recoverClaudeCredentialSwitch(input)).toMatchObject({ abandoned: true });
     expect(
       (await read(NodePath.join(input.sourceStore, ".credentials.json"))).claudeAiOauth,
     ).toBeUndefined();
@@ -443,7 +536,7 @@ describe("ClaudeCredentialSwitch", () => {
     expect(
       (await read(NodePath.join(input.activeHome, ".credentials.json"))).claudeAiOauth,
     ).toEqual(oauth("c"));
-    expect((await FSJournal()).phase).toBe("prepared");
+    await expectAbandoned("prepared");
     expect(input.commit).not.toHaveBeenCalled();
   });
 
@@ -510,7 +603,10 @@ describe("ClaudeCredentialSwitch", () => {
     await write(NodePath.join(input.activeHome, ".credentials.json"), {
       claudeAiOauth: oauth("unknown"),
     });
-    await expect(recoverClaudeCredentialSwitch(input)).rejects.toThrow("recovery left untouched");
+    expect(await recoverClaudeCredentialSwitch(input)).toMatchObject({
+      abandoned: true,
+      phase: "activating",
+    });
     expect(
       (await read(NodePath.join(input.sourceStore, ".credentials.json"))).claudeAiOauth,
     ).toEqual(oauth("a"));
@@ -534,12 +630,24 @@ describe("ClaudeCredentialSwitch", () => {
       claudeAiOauth: oauth("b-relogin"),
       mcpOAuth: { keep: "target" },
     });
-    await expect(recoverClaudeCredentialSwitch(input)).rejects.toThrow("recovery left untouched");
+    expect(await recoverClaudeCredentialSwitch(input)).toMatchObject({
+      abandoned: true,
+      phase: "activated",
+    });
     expect(
       (await read(NodePath.join(input.targetStore, ".credentials.json"))).claudeAiOauth,
     ).toEqual(oauth("b-relogin"));
-    expect((await FSJournal()).phase).toBe("activated");
-    // An already checked-out store is simply confirmed.
+    await expectAbandoned("activated");
+  });
+
+  it("confirms an already checked-out target store after an activated crash", async () => {
+    await expect(
+      switchClaudeCredentials(input, {
+        afterPhase: async (current) => {
+          if (current === "activated") throw new Error("crash");
+        },
+      }),
+    ).rejects.toThrow("crash");
     await write(NodePath.join(input.targetStore, ".credentials.json"), {
       mcpOAuth: { keep: "target" },
     });
