@@ -3,6 +3,7 @@ import {
   EnvironmentId,
   ProviderAccountId,
   WS_METHODS,
+  type ProviderAccountAutoSwitchEvent,
   type ProviderAccountLoginEvent,
 } from "@t3tools/contracts";
 import * as Deferred from "effect/Deferred";
@@ -308,6 +309,91 @@ it.effect("a command resolves only after the mounted list shows its outcome", ()
       const result = yield* Effect.promise(() => renamed);
       expect(result._tag).toBe("Success");
       expect(labelAtResolve).toBe("After");
+    }),
+  ),
+);
+
+it.effect("an activity hint refetches only the open activity log; other events the list", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const target = new PrimaryConnectionTarget({
+        environmentId: EnvironmentId.make("accounts"),
+        label: "Accounts",
+        httpBaseUrl: "https://example.test",
+        wsBaseUrl: "wss://example.test",
+      });
+      const events = yield* Queue.unbounded<ProviderAccountAutoSwitchEvent>();
+      let lists = 0;
+      let reads = 0;
+      const client = {
+        [WS_METHODS.providerAccountsList]: () =>
+          Effect.sync(() => {
+            lists++;
+            return { groups: [] };
+          }),
+        [WS_METHODS.providerAccountsActivity]: () =>
+          Effect.sync(() => {
+            reads++;
+            return { entries: [] };
+          }),
+        [WS_METHODS.providerAccountsAutoSwitchEvents]: () => Stream.fromQueue(events),
+      } as unknown as WsRpcProtocolClient;
+      const supervisor = EnvironmentSupervisor.of({
+        target,
+        state: yield* SubscriptionRef.make<SupervisorConnectionState>({
+          ...AVAILABLE_CONNECTION_STATE,
+          phase: "connected",
+        }),
+        session: yield* SubscriptionRef.make(Option.some({ client } as RpcSession)),
+        prepared: yield* SubscriptionRef.make(Option.none<PreparedConnection>()),
+        connect: Effect.void,
+        disconnect: Effect.void,
+        retryNow: Effect.void,
+      });
+      const environments = EnvironmentRegistry.of({
+        run: (_id, effect) => Effect.provideService(effect, EnvironmentSupervisor, supervisor),
+        runStream: (_id, stream) =>
+          Stream.provideService(stream, EnvironmentSupervisor, supervisor),
+        followStream: (_id, stream) =>
+          Stream.provideService(stream, EnvironmentSupervisor, supervisor),
+      } as EnvironmentRegistry["Service"]);
+      const atoms = createProviderAccountsEnvironmentAtoms(
+        Atom.runtime(Layer.succeed(EnvironmentRegistry, environments)),
+      );
+      const registry = yield* Effect.acquireRelease(Effect.sync(AtomRegistry.make), (registry) =>
+        Effect.sync(() => registry.dispose()),
+      );
+      const environmentId = target.environmentId;
+      const list = atoms.list({ environmentId, input: {} });
+      const activity = atoms.activity({ environmentId, input: { driver: "codex", limit: 100 } });
+      const settled = <A, E>(atom: Atom.Atom<AsyncResult.AsyncResult<A, E>>) =>
+        AtomRegistry.toStream(registry, atom).pipe(
+          Stream.filter((result) => AsyncResult.isSuccess(result) && !result.waiting),
+          Stream.runHead,
+        );
+      registry.mount(list);
+      registry.mount(activity);
+      const received = yield* Queue.unbounded<void>();
+      registry.subscribe(
+        atoms.autoSwitchEvents({ environmentId, input: {} }),
+        (result) => {
+          if (AsyncResult.isSuccess(result)) Queue.offerUnsafe(received, undefined);
+        },
+        { immediate: true },
+      );
+      yield* settled(list);
+      yield* settled(activity);
+      expect({ lists, reads }).toEqual({ lists: 1, reads: 1 });
+
+      yield* Queue.offer(events, { _tag: "changed", driver: "codex", activity: true });
+      yield* Queue.take(received);
+      yield* settled(activity);
+      expect({ lists, reads }).toEqual({ lists: 1, reads: 2 });
+
+      yield* Queue.offer(events, { _tag: "changed", driver: "codex" });
+      yield* Queue.take(received);
+      yield* settled(list);
+      expect({ lists, reads }).toEqual({ lists: 2, reads: 2 });
     }),
   ),
 );

@@ -1,7 +1,11 @@
 import { describe, expect, it } from "@effect/vitest";
 import { Schema } from "effect";
 
-import { ProviderAccountsSetAutoSwitchInput } from "./providerAccounts.ts";
+import {
+  ProviderAccountAutoSwitchEvent,
+  ProviderAccountsActivityInput,
+  ProviderAccountsSetAutoSwitchInput,
+} from "./providerAccounts.ts";
 
 describe("ProviderAccountsSetAutoSwitchInput", () => {
   const decode = Schema.decodeUnknownExit(ProviderAccountsSetAutoSwitchInput);
@@ -25,5 +29,29 @@ describe("ProviderAccountsSetAutoSwitchInput", () => {
     for (const thresholdPercent of [4, 51]) {
       expect(input({ thresholdPercent })._tag).toBe("Failure");
     }
+  });
+});
+
+describe("ProviderAccountsActivityInput", () => {
+  const decode = Schema.decodeUnknownExit(ProviderAccountsActivityInput);
+
+  it("caps a page at the 500 entries the log keeps", () => {
+    expect(decode({})._tag).toBe("Success");
+    for (const limit of [1, 100, 500]) expect(decode({ limit })._tag).toBe("Success");
+    for (const limit of [0, 501, 1.5]) expect(decode({ limit })._tag).toBe("Failure");
+  });
+});
+
+describe("activity additions stay compatible", () => {
+  it("keeps the plain `changed` event and adds an optional activity hint", () => {
+    const decode = Schema.decodeUnknownSync(ProviderAccountAutoSwitchEvent);
+    expect(decode({ _tag: "changed", driver: "codex" })).toEqual({
+      _tag: "changed",
+      driver: "codex",
+    });
+    expect(decode({ _tag: "changed", activity: true })).toEqual({
+      _tag: "changed",
+      activity: true,
+    });
   });
 });

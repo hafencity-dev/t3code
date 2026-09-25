@@ -38,6 +38,22 @@ export function createProviderAccountsEnvironmentAtoms<R, E>(
   const invalidate = (environmentId: EnvironmentId, registry: AtomRegistry.AtomRegistry) =>
     Effect.sync(() => registry.refresh(list({ environmentId, input: {} })));
 
+  // Bumped by the server's activity hint; every mounted first page of the log refetches.
+  const activityGeneration = Atom.family((_environmentId: EnvironmentId) =>
+    Atom.make(0).pipe(
+      Atom.keepAlive,
+      Atom.withLabel("environment-data:provider-accounts:activity-generation"),
+    ),
+  );
+  /** Newest first. Fetched only while mounted; a `before` page is history and never refetches. */
+  const activity = createEnvironmentRpcQueryAtomFamily(runtime, {
+    label: "environment-data:provider-accounts:activity",
+    tag: WS_METHODS.providerAccountsActivity,
+    idleTtlMs: 0,
+    refreshTrigger: ({ environmentId, input }) =>
+      input.before === undefined ? activityGeneration(environmentId) : undefined,
+  });
+
   // Login is a command: following registry changes would replay its side effects.
   // Keep this family flat. Atom.family holds its values weakly, so a nested family's
   // inner lookup can be collected while its login atom is still mounted; the next
@@ -96,16 +112,21 @@ export function createProviderAccountsEnvironmentAtoms<R, E>(
 
   return {
     list,
+    activity,
     autoSwitchEvents: createEnvironmentSubscriptionAtomFamily(runtime, {
       label: "environment-data:provider-accounts:auto-switch-events",
       idleTtlMs: 0,
       subscribe: (input: ProviderAccountsAutoSwitchEventsInput) =>
         subscribe(WS_METHODS.providerAccountsAutoSwitchEvents, input).pipe(
-          Stream.tap(() =>
+          Stream.tap((event) =>
             Effect.gen(function* () {
               const supervisor = yield* EnvironmentSupervisor;
               const registry = yield* AtomRegistry.AtomRegistry;
-              yield* invalidate(supervisor.target.environmentId, registry);
+              const environmentId = supervisor.target.environmentId;
+              // An activity hint means only the log changed; the list stays as it is.
+              if (event._tag === "changed" && event.activity)
+                registry.update(activityGeneration(environmentId), (value) => value + 1);
+              else yield* invalidate(environmentId, registry);
             }),
           ),
         ),
@@ -147,6 +168,11 @@ export function createProviderAccountsEnvironmentAtoms<R, E>(
     rename: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:provider-accounts:rename",
       tag: WS_METHODS.providerAccountsRename,
+      onSettled,
+    }),
+    setAutoSwitchExcluded: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:provider-accounts:set-auto-switch-excluded",
+      tag: WS_METHODS.providerAccountsSetAutoSwitchExcluded,
       onSettled,
     }),
     remove: createEnvironmentRpcCommand(runtime, {

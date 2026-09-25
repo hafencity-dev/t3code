@@ -24,6 +24,8 @@ export interface AutoSwitchAccountView {
   readonly loginInProgress: boolean;
   /** A second saved copy of another account's login shares its quota, so it is never a target. */
   readonly duplicateOf?: ProviderAccountId | undefined;
+  /** Excluded by the user: never a target, though auto-switch still moves away from it. */
+  readonly autoSwitchExcluded?: boolean | undefined;
   readonly usage?: ServerProviderUsageLimits | undefined;
 }
 
@@ -68,6 +70,8 @@ export type AutoSwitchDecision =
       readonly targetAccountId: ProviderAccountId;
       readonly trigger: "session" | "weekly" | "signedOut" | "expiring";
       readonly reason: string;
+      /** One short line for the activity log, e.g. `Weekly limit at 2% · b resets in 4d 13h`. */
+      readonly summary: string;
     }
   | {
       readonly kind: "probe";
@@ -142,11 +146,28 @@ function summarize(
 
 type Summary = ReturnType<typeof summarize>;
 
-const isSwitchCandidate = (account: AutoSwitchAccountView, activeId: ProviderAccountId) =>
+/** Could take over from the active account, ignoring the user's exclusion. */
+const isEligible = (account: AutoSwitchAccountView, activeId: ProviderAccountId) =>
   account.id !== activeId &&
   account.status === "ready" &&
   !account.loginInProgress &&
   account.duplicateOf === undefined;
+
+/** The one candidate filter behind both auto-switch and `nextAccountId` ("Best option"). */
+const isSwitchCandidate = (account: AutoSwitchAccountView, activeId: ProviderAccountId) =>
+  isEligible(account, activeId) && account.autoSwitchExcluded !== true;
+
+/** `4d 13h`, `5h 20m`, `12m`: how the activity log names a time left. */
+function remainingText(ms: number) {
+  if (!Number.isFinite(ms)) return "an unknown time";
+  const minutes = Math.max(1, Math.ceil(ms / minute));
+  const days = Math.floor(minutes / (24 * 60));
+  const hours = Math.floor((minutes % (24 * 60)) / 60);
+  const rest = minutes % 60;
+  if (days > 0) return hours > 0 ? `${days}d ${hours}h` : `${days}d`;
+  if (hours > 0) return rest > 0 ? `${hours}h ${rest}m` : `${hours}h`;
+  return `${rest}m`;
+}
 
 /** Both limits clear their thresholds by the target margin, so a switch cannot flap back. */
 const hasStrictHeadroom = (candidate: Summary, thresholds: AutoSwitchThresholds) =>
@@ -263,6 +284,19 @@ export function chooseNextAccount(input: AutoSwitchInput): AutoSwitchDecision {
       : current.longLeft <= weeklyThreshold
         ? "weekly"
         : undefined;
+  const targetResets = (target: Summary) =>
+    Number.isFinite(target.deadline)
+      ? `${target.account.label} resets in ${remainingText(target.deadline - now)}`
+      : `${target.account.label} has ${target.longLeft}% weekly left`;
+  const summaries = {
+    session: (target: Summary) =>
+      `5-hour limit at ${current.sessionLeft}% · ${target.account.label} has ${target.sessionLeft}% left`,
+    weekly: (target: Summary) => `Weekly limit at ${current.longLeft}% · ${targetResets(target)}`,
+    signedOut: (target: Summary) =>
+      `${active.label} is signed out or unavailable · ${targetResets(target)}`,
+    expiring: (target: Summary) =>
+      `${targetResets(target)}, sooner than ${active.label}, so its quota gets used first`,
+  };
   const switchTo = (
     target: Summary,
     trigger: "session" | "weekly" | "signedOut" | "expiring",
@@ -270,6 +304,7 @@ export function chooseNextAccount(input: AutoSwitchInput): AutoSwitchDecision {
     kind: "switch",
     targetAccountId: target.account.id,
     trigger,
+    summary: summaries[trigger](target),
     reason:
       trigger === "expiring"
         ? `${target.account.label}'s weekly limit resets in ${duration(target.deadline)}, sooner than ${active.label}'s (${Number.isFinite(current.deadline) ? duration(current.deadline) : "no known reset"}). Using ${target.account.label} first so its quota doesn't expire unused.`
@@ -292,6 +327,13 @@ export function chooseNextAccount(input: AutoSwitchInput): AutoSwitchDecision {
       .sort((a, b) => (a.account.id < b.account.id ? -1 : a.account.id > b.account.id ? 1 : 0))
       .slice(0, maxProbe);
     if (unknown.length > 0) return probe(unknown);
+    if (
+      candidates.length === 0 &&
+      input.candidates.some(
+        (account) => account.autoSwitchExcluded === true && isEligible(account, active.id),
+      )
+    )
+      return stay("noCandidates", "No other account is available for auto-switch.");
     if (candidates.length === 0)
       return stay(
         "noCandidates",

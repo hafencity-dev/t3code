@@ -12,7 +12,7 @@ import {
   type ProviderAccountAutoSwitchEvent,
   type ProviderAccountId,
 } from "@t3tools/contracts";
-import { MonitorIcon, TriangleAlertIcon, UnplugIcon } from "lucide-react";
+import { HistoryIcon, MonitorIcon, TriangleAlertIcon, UnplugIcon } from "lucide-react";
 import { useEffect, useEffectEvent, useRef, useState } from "react";
 import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
@@ -37,6 +37,7 @@ import {
   USAGE_REFRESH_COOLDOWN_MS,
   usageResetKey,
 } from "./accounts.logic";
+import { AccountActivityDialog } from "./AccountActivityDialog";
 import { ProviderAccountsSection } from "./ProviderAccountsSection";
 import { providerAccountsEnvironment } from "./state";
 
@@ -69,6 +70,7 @@ export function AccountSwitcherDialog({
   offlineDeviceLabel?: string | undefined;
 }) {
   const popupRef = useRef<HTMLDivElement>(null);
+  const [activityOpen, setActivityOpen] = useState(false);
   const [now, setNow] = useState(() => Date.now());
   // Refresh is per account so a click never probes every saved account at once.
   const [manualRefreshedAt, setManualRefreshedAt] = useState<
@@ -274,7 +276,7 @@ export function AccountSwitcherDialog({
             Switch which account Claude Code and Codex use. Threads keep their history.
           </DialogDescription>
           {devices.length > 1 ? (
-            <div className="w-56 shrink-0 max-sm:w-full">
+            <div className="w-56 shrink-0 max-sm:min-w-0 max-sm:flex-1">
               <Select
                 value={environmentId ?? devices[0]?.id ?? null}
                 items={devices.map((candidate) => ({
@@ -299,6 +301,17 @@ export function AccountSwitcherDialog({
               </Select>
             </div>
           ) : null}
+          <Button
+            variant="outline"
+            size="sm"
+            className="shrink-0"
+            aria-haspopup="dialog"
+            disabled={!environmentId || Boolean(offlineDeviceLabel)}
+            onClick={() => setActivityOpen(true)}
+          >
+            <HistoryIcon />
+            Activity
+          </Button>
         </div>
       </DialogHeader>
       <DialogPanel>{body}</DialogPanel>
@@ -310,6 +323,15 @@ export function AccountSwitcherDialog({
         ) : null}
         <DialogClose render={<Button variant="outline" size="sm" />}>Done</DialogClose>
       </DialogFooter>
+      {activityOpen && environmentId && !offlineDeviceLabel ? (
+        <AccountActivityDialog
+          open
+          onOpenChange={setActivityOpen}
+          environmentId={environmentId}
+          deviceLabel={deviceLabel}
+          now={now}
+        />
+      ) : null}
     </DialogPopup>
   );
 }

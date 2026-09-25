@@ -33,6 +33,8 @@ export const ProviderAccount = Schema.Struct({
   message: Schema.optional(TrimmedNonEmptyString),
   /** Set on a saved account signed in as the same identity as this (kept) account. */
   duplicateOf: Schema.optional(ProviderAccountId),
+  /** Auto-switch never moves to this account; a manual switch still can. Absent means false. */
+  autoSwitchExcluded: Schema.optional(Schema.Boolean),
 });
 export type ProviderAccount = typeof ProviderAccount.Type;
 
@@ -79,7 +81,11 @@ export const ProviderAccountAutoSwitch = Schema.Struct({
 export type ProviderAccountAutoSwitch = typeof ProviderAccountAutoSwitch.Type;
 
 export const ProviderAccountAutoSwitchEvent = Schema.Union([
-  Schema.TaggedStruct("changed", { driver: Schema.optional(ProviderAccountDriver) }),
+  Schema.TaggedStruct("changed", {
+    driver: Schema.optional(ProviderAccountDriver),
+    /** Set when only the activity log changed; the account list is unchanged. */
+    activity: Schema.optional(Schema.Literal(true)),
+  }),
   Schema.TaggedStruct("switched", {
     driver: ProviderAccountDriver,
     fromAccountId: ProviderAccountId,
@@ -156,6 +162,84 @@ export const ProviderAccountLoginEvent = Schema.Union([
 ]);
 export type ProviderAccountLoginEvent = typeof ProviderAccountLoginEvent.Type;
 
+export const ProviderAccountActivityKind = Schema.Literals([
+  "switch.manual",
+  "switch.auto",
+  "switch.failed",
+  "window.started",
+  "window.failed",
+  "login.added",
+  "login.reauthenticated",
+  "login.failed",
+  "account.removed",
+  "account.renamed",
+  "account.excluded",
+  "account.included",
+  "terminal.login",
+  "terminal.logout",
+  "autoSwitch.settingsChanged",
+  "windowPrimer.settingsChanged",
+  "usage.rateLimited",
+  "recovery.abandonedJournal",
+]);
+export type ProviderAccountActivityKind = typeof ProviderAccountActivityKind.Type;
+
+/** One thing the account switcher did. Labels are snapshots, so removed accounts still read. */
+export const ProviderAccountActivityEntry = Schema.Struct({
+  id: TrimmedNonEmptyString,
+  at: IsoDateTime,
+  driver: ProviderAccountDriver,
+  kind: ProviderAccountActivityKind,
+  accountId: Schema.optional(ProviderAccountId),
+  fromAccountId: Schema.optional(ProviderAccountId),
+  toAccountId: Schema.optional(ProviderAccountId),
+  labels: Schema.Struct({
+    account: Schema.optional(TrimmedNonEmptyString),
+    from: Schema.optional(TrimmedNonEmptyString),
+    to: Schema.optional(TrimmedNonEmptyString),
+  }),
+  trigger: Schema.optional(ProviderAccountAutoSwitchTrigger),
+  /** Short, user-facing detail shown next to the sentence. */
+  reason: Schema.optional(TrimmedNonEmptyString),
+  /** Longer explanation, such as the full auto-switch reasoning or an error message. */
+  message: Schema.optional(TrimmedNonEmptyString),
+  /** Settings entries: the values after the change. */
+  settings: Schema.optional(
+    Schema.Struct({
+      enabled: Schema.Boolean,
+      enabledChanged: Schema.optional(Schema.Boolean),
+      thresholdPercent: Schema.optional(NonNegativeInt),
+      weeklyThresholdPercent: Schema.optional(NonNegativeInt),
+    }),
+  ),
+  /** Terminal sign-ins: the login was saved as a new account. */
+  created: Schema.optional(Schema.Boolean),
+  outcome: Schema.Literals(["ok", "failed", "skipped"]),
+});
+export type ProviderAccountActivityEntry = typeof ProviderAccountActivityEntry.Type;
+
+export const PROVIDER_ACCOUNT_ACTIVITY_MAX_LIMIT = 500;
+
+export const ProviderAccountsActivityInput = Schema.Struct({
+  driver: Schema.optional(ProviderAccountDriver),
+  /** Defaults to 100. */
+  limit: Schema.optional(
+    Schema.Int.check(
+      Schema.isBetween({ minimum: 1, maximum: PROVIDER_ACCOUNT_ACTIVITY_MAX_LIMIT }),
+    ),
+  ),
+  /** Entry id to continue after (older entries). */
+  before: Schema.optional(TrimmedNonEmptyString),
+});
+export type ProviderAccountsActivityInput = typeof ProviderAccountsActivityInput.Type;
+
+export const ProviderAccountsActivityResult = Schema.Struct({
+  /** Newest first. */
+  entries: Schema.Array(ProviderAccountActivityEntry),
+  nextCursor: Schema.optional(TrimmedNonEmptyString),
+});
+export type ProviderAccountsActivityResult = typeof ProviderAccountsActivityResult.Type;
+
 export class ProviderAccountError extends Schema.TaggedError<ProviderAccountError>()(
   "ProviderAccountError",
   { message: Schema.String },
@@ -212,6 +296,12 @@ export const ProviderAccountsSetWindowPrimerInput = Schema.Struct({
   enabled: Schema.Boolean,
 });
 export type ProviderAccountsSetWindowPrimerInput = typeof ProviderAccountsSetWindowPrimerInput.Type;
+export const ProviderAccountsSetAutoSwitchExcludedInput = Schema.Struct({
+  accountId: ProviderAccountId,
+  excluded: Schema.Boolean,
+});
+export type ProviderAccountsSetAutoSwitchExcludedInput =
+  typeof ProviderAccountsSetAutoSwitchExcludedInput.Type;
 export const ProviderAccountsAutoSwitchEventsInput = Schema.Struct({});
 export type ProviderAccountsAutoSwitchEventsInput =
   typeof ProviderAccountsAutoSwitchEventsInput.Type;
@@ -228,6 +318,8 @@ export const PROVIDER_ACCOUNTS_METHODS = {
   providerAccountsSwitch: "providerAccounts.switch",
   providerAccountsRename: "providerAccounts.rename",
   providerAccountsRemove: "providerAccounts.remove",
+  providerAccountsActivity: "providerAccounts.activity",
+  providerAccountsSetAutoSwitchExcluded: "providerAccounts.setAutoSwitchExcluded",
 } as const;
 
 const ProviderAccountsRpcError = Schema.Union([
@@ -316,6 +408,23 @@ export const WsProviderAccountsAutoSwitchEventsRpc = Rpc.make(
   },
 );
 
+export const WsProviderAccountsActivityRpc = Rpc.make(
+  PROVIDER_ACCOUNTS_METHODS.providerAccountsActivity,
+  {
+    payload: ProviderAccountsActivityInput,
+    success: ProviderAccountsActivityResult,
+    error: ProviderAccountsRpcError,
+  },
+);
+export const WsProviderAccountsSetAutoSwitchExcludedRpc = Rpc.make(
+  PROVIDER_ACCOUNTS_METHODS.providerAccountsSetAutoSwitchExcluded,
+  {
+    payload: ProviderAccountsSetAutoSwitchExcludedInput,
+    success: ProviderAccountsSnapshot,
+    error: ProviderAccountsRpcError,
+  },
+);
+
 export const PROVIDER_ACCOUNTS_RPCS = [
   WsProviderAccountsSetAutoSwitchRpc,
   WsProviderAccountsSetWindowPrimerRpc,
@@ -328,4 +437,6 @@ export const PROVIDER_ACCOUNTS_RPCS = [
   WsProviderAccountsSwitchRpc,
   WsProviderAccountsRenameRpc,
   WsProviderAccountsRemoveRpc,
+  WsProviderAccountsActivityRpc,
+  WsProviderAccountsSetAutoSwitchExcludedRpc,
 ] as const;

@@ -923,9 +923,17 @@ describe("ProviderAccountsService", () => {
         const service = yield* ProviderAccountsService;
         const first = yield* Stream.toQueue(service.autoSwitchEvents, { capacity: "unbounded" });
         const second = yield* Stream.toQueue(service.autoSwitchEvents, { capacity: "unbounded" });
+        // Activity-log hints ride along; they never replace the list invalidation.
+        const nextListChange = (queue: typeof first) =>
+          Effect.gen(function* () {
+            for (;;) {
+              const event = yield* Queue.take(queue);
+              if (event._tag !== "changed" || !event.activity) return event;
+            }
+          });
         const expectChanged = Effect.gen(function* () {
-          expect(yield* Queue.take(first)).toEqual({ _tag: "changed", driver: "codex" });
-          expect(yield* Queue.take(second)).toEqual({ _tag: "changed", driver: "codex" });
+          expect(yield* nextListChange(first)).toEqual({ _tag: "changed", driver: "codex" });
+          expect(yield* nextListChange(second)).toEqual({ _tag: "changed", driver: "codex" });
         });
         yield* service.rename({ accountId: seeded!.id, label: "Renamed" });
         yield* expectChanged;
@@ -941,7 +949,15 @@ describe("ProviderAccountsService", () => {
         const third = yield* Stream.toQueue(service.autoSwitchEvents, { capacity: "unbounded" });
         yield* service.rename({ accountId: seeded!.id, label: "Latest" });
         yield* expectChanged;
-        expect(yield* Queue.take(third)).toEqual({ _tag: "changed", driver: "codex" });
+        // The list change and the rename's activity hint, in whichever order they land.
+        const latest = [yield* Queue.take(third), yield* Queue.take(third)];
+        expect(latest).toHaveLength(2);
+        expect(latest).toEqual(
+          expect.arrayContaining([
+            { _tag: "changed", driver: "codex" },
+            { _tag: "changed", driver: "codex", activity: true },
+          ]),
+        );
         expect(yield* Queue.size(third)).toBe(0);
       }),
       true,
@@ -973,6 +989,14 @@ describe("ProviderAccountsService", () => {
       Effect.gen(function* () {
         const service = yield* ProviderAccountsService;
         const events = yield* Stream.toQueue(service.autoSwitchEvents, { capacity: "unbounded" });
+        // The re-login's activity hint arrives on its own; only list changes are counted.
+        const nextListChange = () =>
+          Effect.gen(function* () {
+            for (;;) {
+              const event = yield* Queue.take(events);
+              if (event._tag !== "changed" || !event.activity) return event;
+            }
+          });
         const prepared = yield* Effect.promise(() =>
           callbacks.prepare({ driver: "codex", accountId: seeded!.id }),
         );
@@ -981,8 +1005,8 @@ describe("ProviderAccountsService", () => {
           yield* Effect.promise(() =>
             callbacks.complete(prepared, { email: "other@example.test" }),
           );
-          expect(yield* Queue.take(events)).toEqual({ _tag: "changed", driver: "codex" });
-          expect(yield* Queue.take(events)).toEqual({ _tag: "changed", driver: "codex" });
+          expect(yield* nextListChange()).toEqual({ _tag: "changed", driver: "codex" });
+          expect(yield* nextListChange()).toEqual({ _tag: "changed", driver: "codex" });
         });
         yield* signIn;
         expect(calls).toBe(1);
@@ -1310,6 +1334,26 @@ describe("ProviderAccountsService", () => {
         expect(launches.every((item) => item.env.CLAUDE_CONFIG_DIR !== seeded.activeHome)).toBe(
           true,
         );
+        const { entries } = yield* service.activity({ driver: "claudeAgent" });
+        expect(entries.map((entry) => entry.kind)).toEqual([
+          "windowPrimer.settingsChanged",
+          "window.started",
+          "windowPrimer.settingsChanged",
+        ]);
+        expect(entries[1]).toMatchObject({
+          accountId: seeded.ids.b,
+          labels: { account: "b" },
+          outcome: "ok",
+        });
+        expect(entries.map((entry) => entry.settings?.enabled)).toEqual([false, undefined, true]);
+        const log = yield* Effect.promise(() =>
+          NodeFSP.readFile(
+            NodePath.join(root, "state/userdata/fork/provider-accounts/activity.jsonl"),
+            "utf8",
+          ),
+        );
+        for (const secret of ["override-token", "access-", "refresh-", "claudeAiOauth"])
+          expect(log).not.toContain(secret);
       }).pipe(Effect.ensuring(Effect.sync(() => vi.unstubAllEnvs()))),
       false,
       {
@@ -1793,6 +1837,244 @@ describe("ProviderAccountsService", () => {
     },
   );
 
+  describe("activity log", () => {
+    const codexGroup = (snapshot: ProviderAccountsSnapshot) =>
+      snapshot.groups.find((group) => group.driver === "codex")!;
+    const activityFile = () =>
+      NodePath.join(root, "state/userdata/fork/provider-accounts/activity.jsonl");
+
+    it.effect("records each account action once, at its commit, without secrets", () => {
+      let callbacks: ProviderAccountLoginOptions;
+      return run(
+        Effect.gen(function* () {
+          const service = yield* ProviderAccountsService;
+          const events = yield* Stream.toQueue(service.autoSwitchEvents, { capacity: "unbounded" });
+          const other = seeded!.id;
+          const defaultId = codexGroup(yield* service.list()).accounts.find(
+            (account) => account.kind === "default",
+          )!.id;
+          yield* service.rename({ accountId: other, label: "Work" });
+          // Unchanged values are not activity.
+          yield* service.rename({ accountId: other, label: "Work" });
+          yield* service.setAutoSwitchExcluded({ accountId: other, excluded: true });
+          yield* service.setAutoSwitchExcluded({ accountId: other, excluded: true });
+          expect(
+            codexGroup(yield* service.list()).accounts.find((account) => account.id === other),
+          ).toMatchObject({ autoSwitchExcluded: true });
+          yield* service.setAutoSwitch({ driver: "codex", enabled: true });
+          yield* service.setAutoSwitch({ driver: "codex", enabled: true });
+          yield* service.switchAccount({ accountId: other });
+          yield* service.setAutoSwitchExcluded({ accountId: other, excluded: false });
+          yield* service.switchAccount({ accountId: defaultId });
+          const added = yield* Effect.promise(() => callbacks.prepare({ driver: "codex" }));
+          yield* Effect.promise(() => callbacks.complete(added, { email: "new@example.test" }));
+          const again = yield* Effect.promise(() =>
+            callbacks.prepare({ driver: "codex", accountId: other }),
+          );
+          yield* Effect.promise(() => callbacks.complete(again, { email: "other@example.test" }));
+          const rejected = yield* Effect.promise(() => callbacks.prepare({ driver: "codex" }));
+          expect(
+            yield* Effect.promise(() =>
+              callbacks.complete(rejected, { email: "other@example.test" }),
+            ),
+          ).toMatchObject({ message: expect.stringContaining("already signed in") });
+          yield* service.remove({ accountId: other });
+          const { entries, nextCursor } = yield* service.activity({ driver: "codex" });
+          expect(nextCursor).toBeUndefined();
+          expect(entries.map((entry) => entry.kind).toReversed()).toEqual([
+            "account.renamed",
+            "account.excluded",
+            "autoSwitch.settingsChanged",
+            "switch.manual",
+            "account.included",
+            "switch.manual",
+            "login.added",
+            "login.reauthenticated",
+            "login.failed",
+            "account.removed",
+          ]);
+          const [removed, failed, reauthenticated, loginAdded, back, included] = entries;
+          expect(entries.at(-1)).toMatchObject({
+            accountId: other,
+            labels: { from: "Other", to: "Work" },
+          });
+          expect(entries.at(-3)).toMatchObject({
+            settings: {
+              enabled: true,
+              enabledChanged: true,
+              thresholdPercent: 10,
+              weeklyThresholdPercent: 2,
+            },
+          });
+          expect(entries.at(-4)).toMatchObject({
+            fromAccountId: defaultId,
+            toAccountId: other,
+            labels: { from: "Default", to: "Work" },
+            outcome: "ok",
+          });
+          expect(included).toMatchObject({ accountId: other, labels: { account: "Work" } });
+          expect(back).toMatchObject({ labels: { from: "Work", to: "Default" } });
+          expect(loginAdded).toMatchObject({ labels: { account: "new@example.test" } });
+          expect(loginAdded).not.toHaveProperty("reason");
+          expect(reauthenticated).toMatchObject({ accountId: other, labels: { account: "Work" } });
+          expect(failed).toMatchObject({
+            labels: { account: "other@example.test", to: "Work" },
+            outcome: "failed",
+          });
+          expect(failed).not.toHaveProperty("accountId");
+          expect(removed).toMatchObject({ accountId: other, labels: { account: "Work" } });
+          expect((yield* service.activity({ driver: "claudeAgent" })).entries).toEqual([]);
+          const page = yield* service.activity({ driver: "codex", limit: 4 });
+          expect(page.entries).toEqual(entries.slice(0, 4));
+          expect(
+            (yield* service.activity({ driver: "codex", before: page.nextCursor! })).entries,
+          ).toEqual(entries.slice(4));
+          // Open clients hear about every new entry.
+          let hints = 0;
+          while (hints < entries.length) {
+            const event = yield* Queue.take(events);
+            if (event._tag === "changed" && event.activity) {
+              expect(event.driver).toBe("codex");
+              hints++;
+            }
+          }
+          const log = yield* Effect.promise(() => NodeFSP.readFile(activityFile(), "utf8"));
+          expect(log).not.toContain("private-value");
+          expect((yield* Effect.promise(() => NodeFSP.stat(activityFile()))).mode & 0o777).toBe(
+            0o600,
+          );
+        }),
+        true,
+        {
+          login: (options) => {
+            callbacks = options;
+            const login = new ProviderAccountLogin(options);
+            login.logout = async () => {};
+            return login;
+          },
+        },
+      );
+    });
+
+    it.effect("logs a failed manual switch as failed", () =>
+      run(
+        Effect.gen(function* () {
+          const service = yield* ProviderAccountsService;
+          const error = yield* service.switchAccount({ accountId: seeded!.id }).pipe(Effect.flip);
+          expect(error).toMatchObject({ _tag: "ProviderAccountError" });
+          expect((yield* service.activity({})).entries).toEqual([
+            expect.objectContaining({
+              kind: "switch.failed",
+              toAccountId: seeded!.id,
+              labels: expect.objectContaining({ to: "Other", from: "Default" }),
+              reason: "Finish signing in before switching accounts.",
+              outcome: "failed",
+            }),
+          ]);
+        }),
+        true,
+        { pending: true },
+      ),
+    );
+
+    it.effect("logs a usage rate limit once per backoff period", () => {
+      const probe: Probe = (() =>
+        Effect.fail(new Error("HTTP 429 Too Many Requests"))) as unknown as Probe;
+      return run(
+        Effect.gen(function* () {
+          const service = yield* ProviderAccountsService;
+          yield* service.refreshUsage({ accountIds: [seeded!.id], force: true });
+          yield* TestClock.adjust(20 * 60_000);
+          yield* service.refreshUsage({ accountIds: [seeded!.id], force: true });
+          const { entries } = yield* service.activity({});
+          expect(entries).toEqual([
+            expect.objectContaining({
+              kind: "usage.rateLimited",
+              accountId: seeded!.id,
+              labels: { account: "Other" },
+              reason: expect.stringMatching(/^Retrying in \d+(m|h)/u),
+              outcome: "failed",
+            }),
+          ]);
+        }),
+        true,
+        { probe },
+      );
+    });
+
+    it.effect("never fails an action when the log can't be written", () =>
+      run(
+        Effect.gen(function* () {
+          const service = yield* ProviderAccountsService;
+          yield* service.list();
+          // A directory where the log file should be makes every append fail.
+          yield* Effect.promise(() => NodeFSP.mkdir(activityFile(), { recursive: true }));
+          const renamed = yield* service.rename({ accountId: seeded!.id, label: "Still works" });
+          expect(
+            codexGroup(renamed).accounts.find((account) => account.id === seeded!.id)?.label,
+          ).toBe("Still works");
+        }),
+        true,
+      ),
+    );
+
+    it.effect("logs a window that couldn't start as failed, with a short reason", () => {
+      let seeded: Awaited<ReturnType<typeof seedClaudeStores>>;
+      let attempted!: () => void;
+      const tried = new Promise<void>((resolve) => {
+        attempted = resolve;
+      });
+      const probe: Probe = (() => {
+        const now = new Date().toISOString();
+        return Effect.succeed({
+          checkedAt: now,
+          status: "ready",
+          usage: {
+            checkedAt: now,
+            windows: [{ id: "seven_day", label: "Weekly", kind: "weekly", usedPercent: 10 }],
+          },
+        } satisfies AccountUsage);
+      }) as unknown as Probe;
+      return run(
+        Effect.gen(function* () {
+          const service = yield* ProviderAccountsService;
+          const events = yield* Stream.toQueue(service.autoSwitchEvents, { capacity: "unbounded" });
+          yield* service.setWindowPrimer({ driver: "claudeAgent", enabled: true });
+          yield* Effect.promise(() => tried);
+          const failures = () =>
+            service
+              .activity({ driver: "claudeAgent" })
+              .pipe(
+                Effect.map(({ entries }) =>
+                  entries.filter((entry) => entry.kind === "window.failed"),
+                ),
+              );
+          while ((yield* failures()).length === 0) yield* Queue.take(events);
+          expect(yield* failures()).toEqual([
+            expect.objectContaining({
+              accountId: seeded.ids.b,
+              labels: { account: "b" },
+              reason: "Signed out",
+              outcome: "failed",
+            }),
+          ]);
+        }),
+        false,
+        {
+          claudeHomePath: NodePath.join(root, "claude"),
+          probe,
+          runPrime: () => {
+            attempted();
+            return Promise.resolve({ ok: false, reason: "signedOut" });
+          },
+          before: async () => {
+            seeded = await seedClaudeStores(["b"]);
+          },
+        },
+      );
+    });
+  });
+
   describe("terminal Claude logins", () => {
     const readCredentials = (home: string) =>
       Effect.promise(() =>
@@ -1853,6 +2135,16 @@ describe("ProviderAccountsService", () => {
           expect((yield* readCredentials(seeded.homes.c!)).claudeAiOauth).toEqual(
             seeded.credentials("c").claudeAiOauth,
           );
+          yield* service.list();
+          expect((yield* service.activity({})).entries).toEqual([
+            expect.objectContaining({
+              kind: "terminal.login",
+              fromAccountId: seeded.ids.default,
+              toAccountId: seeded.ids.c,
+              labels: { from: "Default", to: "c" },
+              outcome: "ok",
+            }),
+          ]);
         }),
         false,
         {
@@ -1906,6 +2198,18 @@ describe("ProviderAccountsService", () => {
           expect((yield* readCredentials(entry.homePath)).claudeAiOauth).toEqual(
             seeded.credentials("new-live").claudeAiOauth,
           );
+          const { entries } = yield* service.activity({ driver: "claudeAgent" });
+          expect(entries.map((item) => item.kind)).toEqual(["switch.manual", "terminal.login"]);
+          expect(entries[1]).toMatchObject({
+            toAccountId: created.id,
+            labels: { from: "Default", to: "new@example.test" },
+            created: true,
+          });
+          expect(entries[0]).toMatchObject({
+            fromAccountId: created.id,
+            toAccountId: seeded.ids.b,
+            labels: { from: "new@example.test", to: "b" },
+          });
         }),
         false,
         {

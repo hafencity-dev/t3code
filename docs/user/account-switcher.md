@@ -63,6 +63,11 @@ Automatic switching never interrupts a running Codex turn; it waits until the tu
 manual switch does not pause it: once the account you picked reaches a threshold, it switches as
 usual. A toast explains every automatic switch.
 
+To keep an account for manual use only, choose **Exclude from auto-switch** in its **⋯** menu.
+Auto-switch never moves to it and never marks it **Best option**, but still moves away from it when
+it is active and runs low. You can always switch to it yourself, and its 5-hour window still starts
+automatically if that is on.
+
 ## Start 5-hour windows automatically
 
 A Claude Code 5-hour window only starts with an account's first message. Turn on **Start 5-hour
@@ -75,6 +80,13 @@ amount of usage. The line below the toggle shows the next start or the last one.
 It runs on the T3 environment, so the server must be running for windows to start. It is paused
 while an API key or a Bedrock or Vertex setup is configured for Claude Code, because those would be
 billed instead of starting a subscription window.
+
+## Activity
+
+Select **Activity** at the top of the Accounts dialog to see what the account switcher did on that
+device: manual and automatic switches (with the reason), 5-hour window starts, sign-ins, removed
+and renamed accounts, sign-ins and sign-outs in a terminal, and setting changes. Filter by provider
+at the top. Each device keeps its last 500 events.
 
 ## Usage checks
 

@@ -33,6 +33,8 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.providerAccountsSwitch]: AuthOrchestrationOperateScope, // fork: provider accounts
   [WS_METHODS.providerAccountsRename]: AuthOrchestrationOperateScope, // fork: provider accounts
   [WS_METHODS.providerAccountsRemove]: AuthOrchestrationOperateScope, // fork: provider accounts
+  [WS_METHODS.providerAccountsActivity]: AuthOrchestrationReadScope, // fork: provider accounts
+  [WS_METHODS.providerAccountsSetAutoSwitchExcluded]: AuthOrchestrationOperateScope, // fork: provider accounts
   [ORCHESTRATION_WS_METHODS.dispatchCommand]: AuthOrchestrationOperateScope,
   [ORCHESTRATION_WS_METHODS.getWorkflowScript]: AuthOrchestrationReadScope,
   [ORCHESTRATION_WS_METHODS.getTurnDiff]: AuthOrchestrationReadScope,

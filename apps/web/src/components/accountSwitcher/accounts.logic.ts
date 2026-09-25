@@ -669,16 +669,32 @@ export function autoSwitchStatus(
     };
   }
   const message = autoSwitch.state === "pending" ? undefined : autoSwitch.message;
-  if (message) return { badge, text: message, showLastSwitch: true };
+  const excluded = group.accounts.filter((account) => account.autoSwitchExcluded).length;
+  // `Watching hauke · 1 excluded`: excluded accounts are never a target.
+  const withExcluded = (text: string) =>
+    excluded === 0 ? text : `${text.replace(/\.$/u, "")} · ${excluded} excluded`;
+  if (message) return { badge, text: withExcluded(message), showLastSwitch: true };
   const active = group.accounts.find((account) => account.active);
   return {
     badge,
-    text:
+    text: withExcluded(
       autoSwitch.state === "watching" || autoSwitch.state === "pending"
         ? `Watching ${active?.label ?? "the active account"}.`
         : AUTO_SWITCH_OFF_TEXT[group.switchMode],
+    ),
     showLastSwitch: true,
   };
+}
+
+/** Badge tooltip on an excluded row. */
+export const AUTO_SWITCH_EXCLUDED_HELP =
+  "Auto-switch won't switch to this account. You can still switch manually.";
+
+/** Tooltip on the ⋯ menu's exclude/include item. */
+export function autoSwitchExclusionHelp(excluded: boolean) {
+  return excluded
+    ? "Auto-switch can switch to this account again."
+    : "Auto-switch won't switch to this account, but still switches away from it when it runs low. Switching manually and automatic 5-hour window starts keep working.";
 }
 
 /** A start this recent is reported before the next one. */

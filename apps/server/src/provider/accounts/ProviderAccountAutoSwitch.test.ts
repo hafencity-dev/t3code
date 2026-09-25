@@ -13,7 +13,10 @@ import { Clock, Deferred, Effect, Queue, Schema, Semaphore, Stream } from "effec
 import { TestClock } from "effect/testing";
 
 import { makeProviderAccountAutoSwitch } from "./ProviderAccountAutoSwitch.ts";
-import type { ProviderAccountAutoSwitchRead } from "./ProviderAccountAutoSwitch.ts";
+import type {
+  ProviderAccountAutoSwitchActivity,
+  ProviderAccountAutoSwitchRead,
+} from "./ProviderAccountAutoSwitch.ts";
 
 const decodeProvider = Schema.decodeUnknownSync(ServerProvider);
 const personal = ProviderAccountId.make("personal");
@@ -129,6 +132,7 @@ const makeHarness = Effect.fnUntraced(function* (options?: {
     probes: [] as (readonly ProviderAccountId[])[],
     switches: [] as ProviderAccountId[],
     persisted: [] as ProviderAccountAutoSwitchLastSwitch[],
+    recorded: [] as ProviderAccountAutoSwitchActivity[],
     subscriptions: 0,
     idleSubscriptions: 0,
     claudeEnabled: options?.claudeEnabled ?? false,
@@ -244,6 +248,7 @@ const makeHarness = Effect.fnUntraced(function* (options?: {
       }),
     ),
     publish: (event) => Queue.offer(events, event).pipe(Effect.asVoid),
+    recordSwitch: (entry) => Effect.sync(() => void state.recorded.push(entry)),
   });
   return {
     reactor,
@@ -654,11 +659,27 @@ describe("ProviderAccountAutoSwitch", () => {
         state: "paused",
         message: "Couldn't switch to Work: Switch failed",
       });
+      expect(h.state.recorded).toEqual([
+        expect.objectContaining({
+          outcome: "failed",
+          from: expect.objectContaining({ id: personal, label: "Personal" }),
+          to: expect.objectContaining({ id: work, label: "Work" }),
+          trigger: "session",
+          error: "Switch failed",
+        }),
+      ]);
       h.state.failSwitch = false;
       yield* h.reactor.notify("codex");
       expect((yield* Queue.take(h.events))._tag).toBe("switched");
       expect(h.state.switches).toEqual([work]);
       expect(h.state.persisted).toHaveLength(1);
+      // The activity entry is written once, after the switch was persisted.
+      expect(h.state.recorded).toHaveLength(2);
+      expect(h.state.recorded[1]).toMatchObject({
+        outcome: "ok",
+        to: { id: work, label: "Work" },
+        summary: "5-hour limit at 5% · Work has 80% left",
+      });
     }).pipe(Effect.scoped),
   );
 });

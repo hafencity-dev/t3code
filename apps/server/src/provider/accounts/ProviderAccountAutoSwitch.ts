@@ -51,6 +51,19 @@ export interface ProviderAccountAutoSwitchDependencies {
   /** Delivered after the session projection commits; restart-mode switches recheck busy. */
   readonly idleChanges: Stream.Stream<ProviderAccountDriver>;
   readonly publish: (event: ProviderAccountAutoSwitchEvent) => Effect.Effect<void>;
+  /** Activity log hook; must never fail. Called after a switch committed or failed. */
+  readonly recordSwitch?: (entry: ProviderAccountAutoSwitchActivity) => Effect.Effect<void>;
+}
+
+export interface ProviderAccountAutoSwitchActivity {
+  readonly driver: ProviderAccountDriver;
+  readonly outcome: "ok" | "failed";
+  readonly from: { readonly id: ProviderAccountId; readonly label: string };
+  readonly to: { readonly id: ProviderAccountId; readonly label: string };
+  readonly trigger: ProviderAccountAutoSwitchLastSwitch["trigger"];
+  readonly summary: string;
+  readonly reason: string;
+  readonly error?: string;
 }
 
 const drivers = ["claudeAgent", "codex"] as const;
@@ -268,6 +281,17 @@ export const makeProviderAccountAutoSwitch = Effect.fn("makeProviderAccountAutoS
                 yield* Effect.logWarning("Provider account auto-switch could not switch", {
                   driver,
                 });
+                if (deps.recordSwitch)
+                  yield* deps.recordSwitch({
+                    driver,
+                    outcome: "failed",
+                    from: active,
+                    to: target,
+                    trigger: decision.trigger,
+                    summary: decision.summary,
+                    reason: decision.reason,
+                    error: error.message,
+                  });
                 return false;
               }),
             ),
@@ -310,6 +334,16 @@ export const makeProviderAccountAutoSwitch = Effect.fn("makeProviderAccountAutoS
             reason: decision.reason,
           };
           yield* deps.persistLastSwitch(driver, lastSwitch);
+          if (deps.recordSwitch)
+            yield* deps.recordSwitch({
+              driver,
+              outcome: "ok",
+              from: active,
+              to: target,
+              trigger: decision.trigger,
+              summary: decision.summary,
+              reason: decision.reason,
+            });
           yield* deps.publish({ _tag: "switched", driver, ...lastSwitch, toLabel: target.label });
           // Re-read via list(), never via the triggering provider snapshot.
           yield* notify(driver);

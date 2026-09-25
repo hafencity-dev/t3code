@@ -11,6 +11,8 @@ import {
   type ProviderAccountsRemoveInput,
   type ProviderAccountsSetAutoSwitchInput,
   type ProviderAccountsSetWindowPrimerInput,
+  type ProviderAccountsActivityInput,
+  type ProviderAccountsSetAutoSwitchExcludedInput,
 } from "@t3tools/contracts";
 import type { Effect, Stream } from "effect";
 import type { ProviderAccountsService } from "./ProviderAccountsService.ts";
@@ -58,5 +60,14 @@ export function makeProviderAccountsRpcHandlers(deps: {
       observe(WS_METHODS.providerAccountsRename, service.rename(input)),
     [WS_METHODS.providerAccountsRemove]: (input: ProviderAccountsRemoveInput) =>
       observe(WS_METHODS.providerAccountsRemove, service.remove(input)),
+    [WS_METHODS.providerAccountsActivity]: (input: ProviderAccountsActivityInput) =>
+      observe(WS_METHODS.providerAccountsActivity, service.activity(input)),
+    [WS_METHODS.providerAccountsSetAutoSwitchExcluded]: (
+      input: ProviderAccountsSetAutoSwitchExcludedInput,
+    ) =>
+      observe(
+        WS_METHODS.providerAccountsSetAutoSwitchExcluded,
+        service.setAutoSwitchExcluded(input),
+      ),
   };
 }

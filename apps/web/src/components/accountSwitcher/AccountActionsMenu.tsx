@@ -1,9 +1,17 @@
 import type { ProviderAccount } from "@t3tools/contracts";
-import { EllipsisIcon, LogInIcon, PencilIcon, Trash2Icon } from "lucide-react";
+import {
+  CircleCheckIcon,
+  CircleSlashIcon,
+  EllipsisIcon,
+  LogInIcon,
+  PencilIcon,
+  Trash2Icon,
+} from "lucide-react";
 import { useRef, type ReactNode, type Ref } from "react";
 import { Button } from "../ui/button";
 import { Menu, MenuGroup, MenuItem, MenuPopup, MenuSeparator, MenuTrigger } from "../ui/menu";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
+import { autoSwitchExclusionHelp } from "./accounts.logic";
 
 /** Tooltips don't work reliably on disabled menu items, so the reason is written out. */
 function ItemText({ children, reason }: { children: ReactNode; reason?: string | undefined }) {
@@ -21,18 +29,24 @@ export function AccountActionsMenu({
   triggerRef,
   removeBlockedReason,
   editBlockedReason,
+  exclusionBusy,
   onRename,
   onSignIn,
+  onToggleAutoSwitchExcluded,
   onRemove,
 }: {
   account: ProviderAccount;
   triggerRef?: Ref<HTMLButtonElement>;
   removeBlockedReason?: string | undefined;
   editBlockedReason?: string | undefined;
+  /** An exclude/include request for this account is in flight. */
+  exclusionBusy?: boolean | undefined;
   onRename: () => void;
   onSignIn: () => void;
+  onToggleAutoSwitchExcluded: () => void;
   onRemove: () => void;
 }) {
+  const excluded = account.autoSwitchExcluded === true;
   // Rename focuses its own input; handing focus back to the trigger would blur it.
   const skipFinalFocus = useRef(false);
   const external = account.kind === "external";
@@ -80,6 +94,19 @@ export function AccountActionsMenu({
             <LogInIcon />
             <ItemText reason={editBlockedReason}>Sign in again</ItemText>
           </MenuItem>
+          <Tooltip>
+            <TooltipTrigger
+              render={<MenuItem disabled={exclusionBusy} onClick={onToggleAutoSwitchExcluded} />}
+            >
+              {excluded ? <CircleCheckIcon /> : <CircleSlashIcon />}
+              <ItemText>
+                {excluded ? "Include in auto-switch" : "Exclude from auto-switch"}
+              </ItemText>
+            </TooltipTrigger>
+            <TooltipPopup side="left" className="max-w-xs">
+              {autoSwitchExclusionHelp(excluded)}
+            </TooltipPopup>
+          </Tooltip>
         </MenuGroup>
         <MenuSeparator />
         <MenuItem variant="destructive" disabled={Boolean(removeBlockedReason)} onClick={onRemove}>

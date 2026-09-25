@@ -11,6 +11,8 @@ import {
   type ProviderAccountDriver,
   type ProviderAccountLoginEvent,
   type ProviderAccountAutoSwitchEvent,
+  type ProviderAccountsActivityInput,
+  type ProviderAccountsSetAutoSwitchExcludedInput,
   type ProviderAccountsSetAutoSwitchInput,
   type ProviderAccountsSetWindowPrimerInput,
   type ProviderAccountsRefreshUsageInput,
@@ -22,6 +24,10 @@ import {
 } from "@t3tools/contracts";
 import { Clock, Context, DateTime, Effect, Layer, PubSub, Queue, Semaphore, Stream } from "effect";
 import { makeProviderAccountAutoSwitch } from "./ProviderAccountAutoSwitch.ts";
+import {
+  createProviderAccountActivityLog,
+  type ProviderAccountActivityRecord,
+} from "./ProviderAccountActivityLog.ts";
 import { nextAutoSwitchAccountId } from "./autoSwitchPolicy.ts";
 import { makeProviderAccountWindowPrimer } from "./ProviderAccountWindowPrimer.ts";
 import {
@@ -183,6 +189,7 @@ function accountFromEntry(
     ...(plan ? { plan } : {}),
     ...(usage ? { usage } : {}),
     ...(entry.message ? { message: entry.message } : {}),
+    ...(entry.autoSwitchExcluded ? { autoSwitchExcluded: true } : {}),
     // The active account's usage is live and never probed, so it has no probe backoff.
     ...(!active && usageRefresh ? { usageRefresh } : {}),
   };
@@ -255,6 +262,14 @@ function accountIdentities(
   return { identities, duplicateOf };
 }
 
+/** `15m`, `2h`, `1h 30m`: how long a rate-limited account waits before the next check. */
+function formatActivityWait(ms: number) {
+  const minutes = Math.max(1, Math.ceil(ms / 60_000));
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  return hours === 0 ? `${minutes}m` : rest === 0 ? `${hours}h` : `${hours}h ${rest}m`;
+}
+
 const claudeGroupOf = (snapshot: ProviderAccountsSnapshot) =>
   snapshot.groups.find((group) => group.driver === "claudeAgent");
 
@@ -284,6 +299,36 @@ const make = (
     let loadedRegistry: Awaited<ReturnType<typeof createProviderAccountRegistry>> | undefined;
     const claudeManagedRoot = NodePath.join(config.stateDir, "fork", "provider-accounts", "claude");
     const claudeInstanceId = defaultInstanceIdForDriver(ProviderDriverKind.make("claudeAgent"));
+    const autoEvents = yield* PubSub.unbounded<ProviderAccountAutoSwitchEvent>();
+    yield* Effect.addFinalizer(() => PubSub.shutdown(autoEvents));
+    const activity = createProviderAccountActivityLog({ stateDir: config.stateDir });
+    const runActivityFork = Effect.runForkWith(yield* Effect.context<never>());
+    /**
+     * Records at an action's commit point. The write is queued in call order but never awaited,
+     * so it can't fail or slow the action (it runs under the account mutation); a write error
+     * is only a warning.
+     */
+    const recordActivity = (record: ProviderAccountActivityRecord) =>
+      Effect.flatMap(Clock.currentTimeMillis, (at) =>
+        Effect.sync(() => {
+          void activity.append(record, at).then(
+            () =>
+              runActivityFork(
+                PubSub.publish(autoEvents, {
+                  _tag: "changed",
+                  driver: record.driver,
+                  activity: true,
+                }),
+              ),
+            (cause: unknown) =>
+              runActivityFork(
+                Effect.logWarning("Could not write the account activity log", {
+                  causeType: cause instanceof Error ? cause.name : typeof cause,
+                }),
+              ),
+          );
+        }),
+      );
     // A hot switch returns as soon as credentials moved; the snapshot follows in the
     // background while list() masks the previous account's identity and limits.
     const refreshClaudeSnapshot = Effect.gen(function* () {
@@ -300,18 +345,38 @@ const make = (
       registry: Awaited<ReturnType<typeof createProviderAccountRegistry>>,
       result: ClaudeCredentialSwitchResult,
     ) => {
+      const found: ProviderAccountActivityRecord[] = [];
       // A terminal logout moved the source away with no token; it is signed out, not replaced.
-      if (result.sourceSignedOut)
-        await registry.update(result.sourceAccountId, {
+      if (result.sourceSignedOut) {
+        const source = await registry.update(result.sourceAccountId, {
           status: "signedOut",
           message: claudeTerminalLogoutMessage,
         });
+        found.push({
+          driver: "claudeAgent",
+          kind: "terminal.logout",
+          accountId: ProviderAccountId.make(source.id),
+          labels: { account: source.label },
+          reason: "Found while switching accounts",
+          outcome: "ok",
+        });
+      }
       if (result.externalIdentity && hasIdentity(result.externalIdentity)) {
         await registry.update(result.originalSourceAccountId, {
           status: "signedOut",
           message: claudeTerminalSignedOutMessage,
         });
         const reused = await registry.get(result.sourceAccountId);
+        found.push({
+          driver: "claudeAgent",
+          kind: "terminal.login",
+          toAccountId: ProviderAccountId.make(reused.id),
+          labels: { to: reused.label },
+          // A terminal login to an unknown account was just saved as a new, pending one.
+          ...(reused.status === "pending" ? { created: true } : {}),
+          reason: "Found while switching accounts",
+          outcome: "ok",
+        });
         await registry.update(result.sourceAccountId, {
           status: "ready",
           message: null,
@@ -323,6 +388,7 @@ const make = (
         });
       }
       await registry.setClaudeActiveAccount(result.activeAccountId);
+      for (const record of found) await runPromise(recordActivity(record));
     };
     // An unfinished switch journal locks every Claude credential operation until it is
     // resolved. Recovery is retried on each mutation; list() only reports the reason.
@@ -375,6 +441,13 @@ const make = (
           reason: abandoned.reason,
           journalPath: abandoned.journalPath,
         });
+        yield* recordActivity({
+          driver: "claudeAgent",
+          kind: "recovery.abandonedJournal",
+          labels: {},
+          reason: abandoned.reason,
+          outcome: "skipped",
+        });
         return;
       }
       if (outcome.success) yield* refreshClaudeSnapshot;
@@ -402,8 +475,6 @@ const make = (
     const switcher = makeProviderAccountSwitch({ settings, engine, snapshots, instances });
     const observedAccounts = new Map<ProviderAccountDriver, { id: string; checkedAt?: string }>();
     const staleSnapshots = new Map<ProviderAccountDriver, string>();
-    const autoEvents = yield* PubSub.unbounded<ProviderAccountAutoSwitchEvent>();
-    yield* Effect.addFinalizer(() => PubSub.shutdown(autoEvents));
     let autoSwitch: Effect.Success<ReturnType<typeof makeProviderAccountAutoSwitch>> | undefined;
     let windowPrimer:
       | Effect.Success<ReturnType<typeof makeProviderAccountWindowPrimer>>
@@ -723,6 +794,13 @@ const make = (
           registry.update(active.id, { status: "signedOut", message: claudeTerminalLogoutMessage }),
         );
         yield* Effect.logInfo("The active Claude account was signed out in the terminal");
+        yield* recordActivity({
+          driver: "claudeAgent",
+          kind: "terminal.logout",
+          accountId: ProviderAccountId.make(active.id),
+          labels: { account: active.label },
+          outcome: "ok",
+        });
         yield* changed("claudeAgent");
         return true;
       }
@@ -737,6 +815,13 @@ const make = (
         if (active.status !== "signedOut" || active.message !== claudeTerminalLogoutMessage)
           return false;
         yield* io(() => registry.update(active.id, { status: "ready", message: null }));
+        yield* recordActivity({
+          driver: "claudeAgent",
+          kind: "terminal.login",
+          toAccountId: ProviderAccountId.make(active.id),
+          labels: { to: active.label },
+          outcome: "ok",
+        });
         yield* changed("claudeAgent");
         return true;
       }
@@ -782,6 +867,15 @@ const make = (
       cache.forget(ProviderAccountId.make(target.id));
       yield* Effect.logInfo("Filed a terminal Claude sign-in under its saved account", {
         created: !keeper,
+      });
+      yield* recordActivity({
+        driver: "claudeAgent",
+        kind: "terminal.login",
+        fromAccountId: ProviderAccountId.make(active.id),
+        toAccountId: ProviderAccountId.make(target.id),
+        labels: { from: active.label, to: target.label },
+        ...(keeper ? {} : { created: true }),
+        outcome: "ok",
       });
       yield* changed("claudeAgent");
       return true;
@@ -895,6 +989,22 @@ const make = (
                   lastUsage: { ...result, ...storedIdentity(entry) },
                 }),
               );
+            // Once per backoff period: a rate limit that continues is not logged again.
+            if (
+              result?.lastFailureKind === "rateLimited" &&
+              entry.lastUsage?.lastFailureKind !== "rateLimited"
+            ) {
+              const now = yield* Clock.currentTimeMillis;
+              const wait = (result.nextAllowedAt ?? now) - now;
+              yield* recordActivity({
+                driver: entry.driver,
+                kind: "usage.rateLimited",
+                accountId: account.id,
+                labels: { account: entry.label },
+                ...(wait > 0 ? { reason: `Retrying in ${formatActivityWait(wait)}` } : {}),
+                outcome: "failed",
+              });
+            }
           }),
         { concurrency: 2 },
       );
@@ -1042,10 +1152,17 @@ const make = (
                       sameAccountIdentity(identities.get(entry.id) ?? {}, signedIn),
                   );
               // A new sign-in is discarded by the caller; nothing is persisted for it.
-              if (duplicate && !account.existing)
+              if (duplicate && !account.existing) {
+                yield* recordActivity({
+                  driver: account.driver,
+                  kind: "login.failed",
+                  labels: { account: identity.email, to: duplicate.label },
+                  outcome: "failed",
+                });
                 return {
                   message: `You're already signed in with ${identity.email} as ${duplicate.label}.`,
                 };
+              }
               const checkedAt = DateTime.formatIso(yield* DateTime.now);
               const message = duplicate
                 ? `Signed in as ${identity.email}, which is already saved as ${duplicate.label}. Sign in again with the right account.`
@@ -1059,6 +1176,26 @@ const make = (
               );
               if (account.unnamed)
                 yield* io(() => registry.rename(account.accountId, identity.email));
+              const label = account.unnamed ? identity.email : (self?.label ?? identity.email);
+              yield* recordActivity(
+                duplicate
+                  ? {
+                      driver: account.driver,
+                      kind: "login.failed",
+                      accountId: ProviderAccountId.make(account.accountId),
+                      labels: { account: label, to: duplicate.label },
+                      reason: `${identity.email} is already saved as ${duplicate.label}`,
+                      outcome: "failed",
+                    }
+                  : {
+                      driver: account.driver,
+                      kind: account.existing ? "login.reauthenticated" : "login.added",
+                      accountId: ProviderAccountId.make(account.accountId),
+                      labels: { account: label },
+                      ...(label === identity.email ? {} : { reason: identity.email }),
+                      outcome: "ok",
+                    },
+              );
               cache.forget(ProviderAccountId.make(account.accountId));
               const observed = observedAccounts.get(account.driver);
               if (observed?.id === account.accountId && observed.checkedAt)
@@ -1304,8 +1441,29 @@ const make = (
       const before = yield* registryEffect.pipe(
         Effect.flatMap((registry) => io(() => registry.get(input.accountId))),
       );
-      const wasActive = (yield* groupState(before.driver)).activeAccountId === before.id;
-      const snapshot = yield* switchAccountUnlocked(input);
+      const previousState = yield* groupState(before.driver);
+      const wasActive = previousState.activeAccountId === before.id;
+      const previous = previousState.accounts.find(
+        (entry) => entry.id === previousState.activeAccountId,
+      );
+      const switchRecord = {
+        driver: before.driver,
+        toAccountId: ProviderAccountId.make(before.id),
+        ...(previous ? { fromAccountId: ProviderAccountId.make(previous.id) } : {}),
+        labels: { to: before.label, ...(previous ? { from: previous.label } : {}) },
+      };
+      const snapshot = yield* switchAccountUnlocked(input).pipe(
+        Effect.tapError((error) =>
+          error._tag === "ProviderAccountError"
+            ? recordActivity({
+                ...switchRecord,
+                kind: "switch.failed",
+                reason: error.message,
+                outcome: "failed",
+              })
+            : Effect.void,
+        ),
+      );
       const group = snapshot.groups.find((entry) => entry.activeAccountId === input.accountId)!;
       // A manual switch is just a switch: the next evaluation uses the new account's numbers.
       // Its time only delays proactive rebalancing, so auto-switch can't revert it right away.
@@ -1313,6 +1471,7 @@ const make = (
         const registry = yield* registryEffect;
         const at = DateTime.formatIso(yield* DateTime.now);
         yield* io(() => registry.updateAutoSwitch(group.driver, { lastManualSwitchAt: at }));
+        yield* recordActivity({ ...switchRecord, kind: "switch.manual", outcome: "ok" });
       }
       if (autoSwitch) {
         yield* autoSwitch.clear(group.driver);
@@ -1327,7 +1486,16 @@ const make = (
       label: string;
     }) {
       const registry = yield* registryEffect;
+      const previous = yield* io(() => registry.get(input.accountId));
       const entry = yield* io(() => registry.rename(input.accountId, input.label));
+      if (entry.label !== previous.label)
+        yield* recordActivity({
+          driver: entry.driver,
+          kind: "account.renamed",
+          accountId: input.accountId,
+          labels: { from: previous.label, to: entry.label },
+          outcome: "ok",
+        });
       yield* changed(entry.driver);
       return yield* list();
     }, mutation.withPermit);
@@ -1382,6 +1550,13 @@ const make = (
         yield* deleteManagedHome(account);
       }
       yield* io(() => registry.remove(input.accountId, state.currentHome));
+      yield* recordActivity({
+        driver: entry.driver,
+        kind: "account.removed",
+        accountId: input.accountId,
+        labels: { account: entry.label },
+        outcome: "ok",
+      });
       cache.forget(input.accountId);
       if (autoSwitch) yield* autoSwitch.notify(entry.driver);
       yield* changed(entry.driver);
@@ -1392,7 +1567,8 @@ const make = (
       input: ProviderAccountsSetAutoSwitchInput,
     ) {
       const registry = yield* registryEffect;
-      yield* io(() =>
+      const before = yield* io(() => registry.getAutoSwitch(input.driver));
+      const after = yield* io(() =>
         registry.updateAutoSwitch(input.driver, {
           enabled: input.enabled,
           ...(input.thresholdPercent === undefined
@@ -1403,6 +1579,23 @@ const make = (
             : { weeklyThresholdPercent: input.weeklyThresholdPercent }),
         }),
       );
+      if (
+        before.enabled !== after.enabled ||
+        before.thresholdPercent !== after.thresholdPercent ||
+        before.weeklyThresholdPercent !== after.weeklyThresholdPercent
+      )
+        yield* recordActivity({
+          driver: input.driver,
+          kind: "autoSwitch.settingsChanged",
+          labels: {},
+          settings: {
+            enabled: after.enabled,
+            ...(before.enabled === after.enabled ? {} : { enabledChanged: true }),
+            thresholdPercent: after.thresholdPercent,
+            weeklyThresholdPercent: after.weeklyThresholdPercent,
+          },
+          outcome: "ok",
+        });
       if (autoSwitch) {
         yield* autoSwitch.clear(input.driver);
         yield* autoSwitch.notify(input.driver);
@@ -1415,12 +1608,57 @@ const make = (
       input: ProviderAccountsSetWindowPrimerInput,
     ) {
       const registry = yield* registryEffect;
+      const before = yield* io(() => registry.getWindowPrimer());
       yield* io(() => registry.updateWindowPrimer({ enabled: input.enabled }));
+      if (before.enabled !== input.enabled)
+        yield* recordActivity({
+          driver: input.driver,
+          kind: "windowPrimer.settingsChanged",
+          labels: {},
+          settings: { enabled: input.enabled, enabledChanged: true },
+          outcome: "ok",
+        });
       if (windowPrimer) yield* windowPrimer.clear;
       // Also re-evaluates the primer, which arms or stops its timer.
       yield* changed(input.driver);
       return yield* list();
     }, mutation.withPermit);
+
+    const setAutoSwitchExcluded = Effect.fn("providerAccounts.setAutoSwitchExcluded")(function* (
+      input: ProviderAccountsSetAutoSwitchExcludedInput,
+    ) {
+      const registry = yield* registryEffect;
+      const previous = yield* io(() => registry.get(input.accountId));
+      if ((previous.autoSwitchExcluded === true) !== input.excluded) {
+        const entry = yield* io(() =>
+          registry.setAutoSwitchExcluded(input.accountId, input.excluded),
+        );
+        yield* recordActivity({
+          driver: entry.driver,
+          kind: input.excluded ? "account.excluded" : "account.included",
+          accountId: input.accountId,
+          labels: { account: entry.label },
+          outcome: "ok",
+        });
+      }
+      // The next target (and the "Best option") may have changed.
+      if (autoSwitch) yield* autoSwitch.notify(previous.driver);
+      yield* changed(previous.driver);
+      return yield* list();
+    }, mutation.withPermit);
+
+    const readActivity = (input: ProviderAccountsActivityInput) =>
+      Effect.tryPromise({ try: () => activity.read(input), catch: (cause) => cause }).pipe(
+        Effect.catch((cause) =>
+          Effect.logWarning("Could not read the account activity log", {
+            causeType: cause instanceof Error ? cause.name : typeof cause,
+          }).pipe(
+            Effect.andThen(
+              Effect.fail(new ProviderAccountError({ message: "Couldn't read the activity log." })),
+            ),
+          ),
+        ),
+      );
 
     // OrchestrationEngine commits projectEventDeferred's SQL projections before
     // publishing domain events. Only attachment cleanup is deferred, so idle
@@ -1498,6 +1736,19 @@ const make = (
           Effect.andThen(event._tag === "switched" ? changed(event.driver) : Effect.void),
           Effect.asVoid,
         ),
+      recordSwitch: (event) =>
+        recordActivity({
+          driver: event.driver,
+          kind: event.outcome === "ok" ? "switch.auto" : "switch.failed",
+          fromAccountId: event.from.id,
+          toAccountId: event.to.id,
+          labels: { from: event.from.label, to: event.to.label },
+          trigger: event.trigger,
+          ...(event.outcome === "ok"
+            ? { reason: event.summary, message: event.reason }
+            : { reason: event.error ?? "The switch failed.", message: event.summary }),
+          outcome: event.outcome,
+        }),
     });
 
     const primeFailureMessages: Record<ClaudeWindowPrimeFailure, string> = {
@@ -1505,6 +1756,12 @@ const make = (
       rateLimited: "Claude is rate limiting this account.",
       timeout: "Claude didn't answer within a minute.",
       failed: "Claude returned an error.",
+    };
+    const primeActivityReasons: Record<ClaudeWindowPrimeFailure, string> = {
+      signedOut: "Signed out",
+      rateLimited: "Rate-limited by Claude",
+      timeout: "No answer within a minute",
+      failed: "Claude returned an error",
     };
     // Credentials that would bill the request elsewhere instead of starting a subscription window.
     const apiBillingKeys = [
@@ -1550,9 +1807,24 @@ const make = (
         if (!result.ok) {
           // Only the classified reason; prompts and CLI output are never logged.
           yield* Effect.logWarning("Claude window start failed", { reason: result.reason, active });
+          yield* recordActivity({
+            driver: "claudeAgent",
+            kind: "window.failed",
+            accountId: account.id,
+            labels: { account: entry.label },
+            reason: primeActivityReasons[result.reason],
+            outcome: "failed",
+          });
           return yield* new ProviderAccountError({ message: primeFailureMessages[result.reason] });
         }
         yield* Effect.logInfo("Started a Claude 5-hour window", { active });
+        yield* recordActivity({
+          driver: "claudeAgent",
+          kind: "window.started",
+          accountId: account.id,
+          labels: { account: entry.label },
+          outcome: "ok",
+        });
       });
     });
     windowPrimer = yield* makeProviderAccountWindowPrimer({
@@ -1598,7 +1870,20 @@ const make = (
         account.active
           ? providers.refreshInstance(claudeInstanceId)
           : refreshUsage({ accountIds: [account.id], force }),
-      prime: primeClaudeWindow,
+      // A start that can't even be sent (signed in elsewhere, no saved login) is a failure too.
+      prime: (account) =>
+        primeClaudeWindow(account).pipe(
+          Effect.tapError((error) =>
+            recordActivity({
+              driver: "claudeAgent",
+              kind: "window.failed",
+              accountId: account.id,
+              labels: { account: account.label },
+              reason: error.message,
+              outcome: "failed",
+            }),
+          ),
+        ),
       persistPrimed: (accountId, at) =>
         Effect.gen(function* () {
           const registry = yield* registryEffect;
@@ -1636,6 +1921,8 @@ const make = (
       refreshUsage,
       setAutoSwitch,
       setWindowPrimer,
+      setAutoSwitchExcluded,
+      activity: readActivity,
       autoSwitchEvents: Stream.fromPubSub(autoEvents),
       startLogin,
       switchAccount,

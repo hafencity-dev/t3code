@@ -28,6 +28,7 @@ import { AccountActionsMenu } from "./AccountActionsMenu";
 import { AccountFreshnessCell } from "./AccountFreshnessCell";
 import { AccountUsageCell } from "./AccountUsageCell";
 import {
+  AUTO_SWITCH_EXCLUDED_HELP,
   accountPrimaryAction,
   accountStatusMessage,
   accountSubtitle,
@@ -256,7 +257,37 @@ export function AccountRow({
       Remove
     </Button>
   );
-  const ariaLabel = [account.label, account.active ? "active" : null, message?.text]
+  const [exclusionBusy, setExclusionBusy] = useState(false);
+  const setAutoSwitchExcluded = useAtomCommand(providerAccountsEnvironment.setAutoSwitchExcluded, {
+    reportFailure: false,
+  });
+  const toggleAutoSwitchExcluded = async () => {
+    if (exclusionBusy) return;
+    const excluded = account.autoSwitchExcluded !== true;
+    setExclusionBusy(true);
+    try {
+      const result = await setAutoSwitchExcluded({
+        environmentId,
+        input: { accountId: account.id, excluded },
+      });
+      if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+        const error = squashAtomCommandFailure(result);
+        toastManager.add({
+          type: "error",
+          title: excluded ? "Couldn't exclude account" : "Couldn't include account",
+          description: error instanceof Error ? error.message : "Please try again.",
+        });
+      }
+    } finally {
+      setExclusionBusy(false);
+    }
+  };
+  const ariaLabel = [
+    account.label,
+    account.active ? "active" : null,
+    account.autoSwitchExcluded ? "manual only" : null,
+    message?.text,
+  ]
     .filter(Boolean)
     .join(", ");
   return (
@@ -286,6 +317,14 @@ export function AccountRow({
                     {shortPlanLabel(account.plan)}
                   </TooltipTrigger>
                   <TooltipPopup>{account.plan}</TooltipPopup>
+                </Tooltip>
+              ) : null}
+              {account.autoSwitchExcluded ? (
+                <Tooltip>
+                  <TooltipTrigger render={<Badge variant="outline" size="sm" />}>
+                    Manual only
+                  </TooltipTrigger>
+                  <TooltipPopup>{AUTO_SWITCH_EXCLUDED_HELP}</TooltipPopup>
                 </Tooltip>
               ) : null}
               {best ? (
@@ -393,8 +432,10 @@ export function AccountRow({
           triggerRef={menuTriggerRef}
           removeBlockedReason={removeReason}
           editBlockedReason={switchState === "self" ? "Wait for the switch to finish." : undefined}
+          exclusionBusy={exclusionBusy}
           onRename={onRenameStart}
           onSignIn={onSignIn}
+          onToggleAutoSwitchExcluded={() => void toggleAutoSwitchExcluded()}
           onRemove={onRemove}
         />
       </div>

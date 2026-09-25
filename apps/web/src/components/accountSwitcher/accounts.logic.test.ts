@@ -673,6 +673,24 @@ describe("auto-switch status", () => {
       text: "Watching home.",
     });
   });
+  it("counts accounts excluded from auto-switch", () => {
+    const excluded = { ...group({}), accounts: [active, { ...target, autoSwitchExcluded: true }] };
+    expect(autoSwitchStatus(excluded).text).toBe("Watching home · 1 excluded");
+    expect(
+      autoSwitchStatus({
+        ...excluded,
+        autoSwitch: {
+          ...excluded.autoSwitch,
+          message: "No other account is available for auto-switch.",
+        },
+      }).text,
+    ).toBe("No other account is available for auto-switch · 1 excluded");
+    // Off: the feature explanation stays as it is.
+    expect(
+      autoSwitchStatus({ ...excluded, autoSwitch: { ...excluded.autoSwitch, enabled: false } })
+        .text,
+    ).not.toContain("excluded");
+  });
 });
 
 describe("account switch modes", () => {

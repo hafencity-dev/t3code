@@ -322,7 +322,7 @@ export function AddAccountWizard({
                 <div className="grid min-w-0 flex-1 gap-4">
                   {link._tag === "deviceCode" ? (
                     <div className="flex items-center justify-between rounded-lg border bg-muted/40 p-4">
-                      <code className="font-mono text-2xl tracking-[0.18em]">{link.userCode}</code>
+                      <code className="font-mono text-2xl tracking-widest">{link.userCode}</code>
                       <CopyAction value={link.userCode} label="Copy code" iconOnly />
                     </div>
                   ) : null}

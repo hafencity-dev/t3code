@@ -789,3 +789,73 @@ describe("nextAutoSwitchAccountId", () => {
     expect(next([active, ...candidates])).toBe(id("Work"));
   });
 });
+
+describe("accounts excluded from auto-switch", () => {
+  const config = { thresholdPercent: 10, weeklyThresholdPercent: 2 };
+  const excluded = (value: AutoSwitchAccountView): AutoSwitchAccountView => ({
+    ...value,
+    autoSwitchExcluded: true,
+  });
+
+  it("skips an excluded healthy account even when it resets first", () => {
+    const soonest = excluded(account("Soonest", 95, 90, 24 * hour));
+    const decision = chooseNextAccount(input({ candidates: [soonest, work] }));
+    expect(decision).toMatchObject(switchTo("Work"));
+    expect(
+      nextAutoSwitchAccountId({
+        now,
+        config,
+        activeAccountId: low.id,
+        accounts: [low, soonest, work],
+      }),
+    ).toBe(id("Work"));
+  });
+
+  it("stays when every other account is excluded, and says why", () => {
+    const decision = chooseNextAccount(
+      input({ candidates: [excluded(work), excluded(account("Later"))] }),
+    );
+    expect(decision).toEqual({
+      kind: "stay",
+      code: "noCandidates",
+      reason: "No other account is available for auto-switch.",
+    });
+  });
+
+  it("still moves away from an excluded active account", () => {
+    const decision = chooseNextAccount(input({ active: excluded(low), candidates: [work] }));
+    expect(decision).toMatchObject(switchTo("Work"));
+    // Proactively too, when another account's weekly quota resets sooner.
+    const healthy = excluded(account("Personal", 80, 80, 96 * hour));
+    expect(chooseNextAccount(input({ active: healthy, candidates: [work] }))).toMatchObject(
+      switchTo("Work", "expiring"),
+    );
+  });
+
+  it("never names an excluded account as the next one", () => {
+    const active = account("Active", 50, 50);
+    expect(
+      nextAutoSwitchAccountId({
+        now,
+        config,
+        activeAccountId: active.id,
+        accounts: [active, excluded(work)],
+      }),
+    ).toBeUndefined();
+  });
+
+  it("summarizes a switch in one short line", () => {
+    const weeklyLow = account("Personal", 80, 2, 96 * hour);
+    const decision = chooseNextAccount(
+      input({
+        active: weeklyLow,
+        candidates: [account("Work", 60, 60, 4 * 24 * hour + 13 * hour)],
+      }),
+    );
+    expect(decision).toMatchObject({
+      kind: "switch",
+      trigger: "weekly",
+      summary: "Weekly limit at 2% · Work resets in 4d 13h",
+    });
+  });
+});

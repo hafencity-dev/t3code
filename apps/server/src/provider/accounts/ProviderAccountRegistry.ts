@@ -40,6 +40,8 @@ const Entry = Schema.Struct({
   createdAt: Schema.String,
   lastUsage: Schema.optional(LastUsage),
   status: Schema.Literals(["ready", "pending", "signedOut", "error"]),
+  /** Auto-switch never moves to this account; absent means included. */
+  autoSwitchExcluded: Schema.optional(Schema.Boolean),
 });
 export type ProviderAccountEntry = typeof Entry.Type;
 const AutoSwitch = Schema.Struct({
@@ -412,6 +414,19 @@ export async function createProviderAccountRegistry(input: { stateDir: string })
           throw new ProviderAccountRegistryGuardError("Account label must not be empty.");
         const entry = { ...find(id), label: label.trim() };
         // Keep the account's position: the dialog lists accounts in creation order.
+        await persist({
+          ...stored,
+          accounts: stored.accounts.some((item) => item.id === id)
+            ? stored.accounts.map((item) => (item.id === id ? entry : item))
+            : [...stored.accounts, entry],
+        });
+        return structuredClone(entry);
+      }),
+    setAutoSwitchExcluded: (id: string, excluded: boolean) =>
+      serialized(async () => {
+        const { autoSwitchExcluded: _previous, ...rest } = find(id);
+        const entry: ProviderAccountEntry = excluded ? { ...rest, autoSwitchExcluded: true } : rest;
+        // Like a rename, the setting keeps the account's position and saves an external one.
         await persist({
           ...stored,
           accounts: stored.accounts.some((item) => item.id === id)
