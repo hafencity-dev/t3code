@@ -13,7 +13,7 @@ This repo is a fork of `pingdotgg/t3code` (`upstream` remote). We regularly sync
 Fork-specific features (rebuilt on upstream in September 2026; everything else from the earlier fork was dropped on purpose):
 
 - **Source control panel** — `apps/server/src/vcs/workingCopy/`, `apps/web/src/components/sourceControl/`, `apps/web/src/lib/sourceControl/`, `packages/contracts/src/workingCopy.ts`, `packages/client-runtime/src/state/workingCopy*.ts`.
-- **Sidebar usage stats** — `apps/web/src/components/sidebar/SidebarProviderUsage.tsx`, rendered from upstream's own usage-limit data (no fork data pipeline).
+- **Account switcher** — `apps/server/src/provider/accounts/`, `apps/web/src/components/accountSwitcher/`, `packages/contracts/src/providerAccounts.ts`, `packages/client-runtime/src/state/providerAccounts.ts`, `packages/shared/src/fork/accountUsageWindows.ts`. Replaced the former sidebar usage block.
 - **Claude Code → Codex model routing (incl. GPT Fast)** — `apps/server/src/provider/claudeCodex/`, `packages/contracts/src/claudeCodexRouting.ts`, `packages/shared/src/claudeCodexRouting.ts`, `apps/web/src/components/settings/ModelRoutingSettings*`, `apps/web/src/components/chat/ClaudeCodexFastMode*`.
 - **2code branding** — `apps/web/src/branding.ts`, `Brand2codeMark`, `distributions/2code/`, `assets/2code/`, desktop product identity in `apps/desktop/src/app/DesktopDistribution.ts`.
 - **2code update system** — `scripts/fork/2code-release/`, `scripts/fork/2code-desktop-*.ts`, `.github/workflows/hafencity-2code-release.yml`, legacy hand-off in `apps/desktop/src/migrations/` and `apps/server/src/fork/`, plus the migration-ledger repair in `apps/server/src/persistence/fork/`.
