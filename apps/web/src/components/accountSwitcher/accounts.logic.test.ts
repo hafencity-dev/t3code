@@ -31,6 +31,7 @@ import {
   accountUsageCell,
   accountUsageCellView,
   autoRefreshAccountId,
+  autoSwitchEndgameBadge,
   autoSwitchStatus,
   isUsageRefreshCoolingDown,
   formatAgo,
@@ -676,6 +677,16 @@ describe("auto-switch status", () => {
       badge: { label: "On", variant: "success" },
       text: "Watching home.",
     });
+  });
+  it("adds an Endgame badge only while auto-switch is on and in the endgame", () => {
+    expect(autoSwitchEndgameBadge(group({ endgame: true }).autoSwitch)).toEqual({
+      label: "Endgame",
+      variant: "outline",
+    });
+    expect(autoSwitchEndgameBadge(group({}).autoSwitch)).toBeUndefined();
+    expect(
+      autoSwitchEndgameBadge(group({ enabled: false, state: "off", endgame: true }).autoSwitch),
+    ).toBeUndefined();
   });
   it("counts accounts excluded from auto-switch", () => {
     const excluded = { ...group({}), accounts: [active, { ...target, autoSwitchExcluded: true }] };

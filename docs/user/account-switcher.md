@@ -58,7 +58,9 @@ while the active account is still healthy, when another account's weekly limit r
 that quota is used up first. An account is only switched to while it has at least 3 points more
 weekly quota left than the weekly threshold (5% with the default 2%), so it never has to switch
 away again right after. If that account's 5-hour limit is low, it switches once that limit
-resets. An early switch waits at least 5 minutes after the last switch.
+resets. An early switch waits at least 5 minutes after the last switch. Once no account has that
+much left, auto-switch enters an **Endgame**: each account runs down to 1% of its weekly limit before
+it moves on, soonest weekly reset first, and then it waits for the first weekly reset.
 
 Automatic switching never interrupts a running Codex turn; it waits until the turn finishes. A
 manual switch does not pause it: once the account you picked reaches a threshold, it switches as

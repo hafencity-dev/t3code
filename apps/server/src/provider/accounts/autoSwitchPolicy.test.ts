@@ -201,7 +201,9 @@ const scenarios: ReadonlyArray<{ name: string; input: AutoSwitchInput; expected:
   {
     name: "11 exhausted candidate wakes at latest blocking reset",
     input: input({
-      active: account("Personal", 8, 2, 96 * hour),
+      // A 1% weekly threshold turns the endgame off, so the active weekly keeps blocking.
+      config: { enabled: true, thresholdPercent: 10, weeklyThresholdPercent: 1 },
+      active: account("Personal", 8, 1, 96 * hour),
       candidates: [account("Work", 0, 0, 4 * hour)],
     }),
     expected: stay("allExhausted", now + 4 * hour),
@@ -720,10 +722,10 @@ describe("separate 5-hour and weekly thresholds", () => {
         input({ active, candidates: [account("Spent", 90, 4, 24 * hour), healthy] }),
       ),
     ).toMatchObject(switchTo("Work", "weekly"));
-    // Neither tier accepts it, even alone.
+    // Alone, every account is low, so the endgame uses its sooner-resetting leftovers first.
     expect(
       chooseNextAccount(input({ active, candidates: [account("Spent", 90, 4, 24 * hour)] })),
-    ).toMatchObject(stay("allExhausted"));
+    ).toMatchObject({ ...switchTo("Spent", "expiring"), endgame: true });
     // 5% is enough, and its sooner reset wins.
     expect(
       chooseNextAccount(
@@ -969,5 +971,135 @@ describe("using sooner-resetting weekly quota first", () => {
       accountId: id("claude2"),
       due: true,
     });
+  });
+});
+
+describe("endgame: every account runs down to 1% when all are low", () => {
+  const day = 24 * hour;
+  const config = { thresholdPercent: 10, weeklyThresholdPercent: 2 };
+  const decide = (
+    active: AutoSwitchAccountView,
+    accounts: AutoSwitchAccountView[],
+    overrides: Partial<AutoSwitchInput> = {},
+  ) =>
+    chooseNextAccount(
+      input({
+        active,
+        candidates: accounts.filter((value) => value.id !== active.id),
+        providerLabel: "Claude",
+        ...overrides,
+      }),
+    );
+  const next = (active: AutoSwitchAccountView, accounts: AutoSwitchAccountView[]) =>
+    nextAutoSwitchTarget({ now, config, activeAccountId: active.id, accounts });
+  const hauke = (weekly: number) => account("hauke", 80, weekly, 2 * day);
+  const claude2 = (weekly: number) => account("claude2", 80, weekly, 4 * day + 12 * hour);
+  const marcos = (weekly: number) => account("marcos", 80, weekly, 5 * day);
+
+  it("runs each account down to 1% in weekly-reset order, then waits for the first reset", () => {
+    // hauke resets first, so it goes first; it runs past the 2% threshold down to 1%.
+    const start = [marcos(2), hauke(3), claude2(4)];
+    expect(decide(marcos(2), start)).toMatchObject({
+      ...switchTo("hauke", "expiring"),
+      endgame: true,
+    });
+    const onHauke = decide(hauke(2), [marcos(2), hauke(2), claude2(4)]);
+    expect(onHauke).toMatchObject({ ...stay("healthy"), endgame: true });
+    expect(onHauke.reason).toBe(
+      "Endgame: using hauke down to 1% before switching (all accounts are low).",
+    );
+    // At 1%, the next account by weekly reset with at least 2% left takes over.
+    const spentHauke = decide(hauke(1), [marcos(2), hauke(1), claude2(3)]);
+    expect(spentHauke).toMatchObject({ ...switchTo("claude2", "weekly"), endgame: true });
+    expect(spentHauke.reason).toBe(
+      "hauke is at 1% of its weekly limit; switching to claude2 (3% left, resets in 4d 12h).",
+    );
+    expect(decide(claude2(1), [marcos(2), hauke(1), claude2(1)])).toMatchObject(
+      switchTo("marcos", "weekly"),
+    );
+    // Everyone is at 1%: stay, and wake when hauke's weekly resets first.
+    const done = decide(marcos(1), [marcos(1), hauke(1), claude2(1)]);
+    expect(done).toMatchObject(stay("allExhausted", now + 2 * day + minute));
+    expect(done).not.toHaveProperty("endgame");
+    expect(done.reason).toBe(
+      "All Claude accounts are down to 1% of their weekly limit. hauke resets first, in 2d.",
+    );
+  });
+
+  it("returns to the normal rules as soon as any account has normal headroom again", () => {
+    // claude2's weekly reset gave it fresh quota: hauke switches at the normal 2% threshold.
+    const decision = decide(hauke(2), [marcos(3), hauke(2), claude2(90)]);
+    expect(decision).toMatchObject(switchTo("claude2", "weekly"));
+    expect(decision).not.toHaveProperty("endgame");
+    // A healthy active account never hops to a nearly spent, sooner-resetting one.
+    expect(decide(marcos(40), [marcos(40), hauke(4)])).toMatchObject(stay("healthy"));
+    // With a 1% weekly threshold the endgame is off.
+    expect(
+      decide(marcos(2), [marcos(2), hauke(3)], {
+        config: { enabled: true, thresholdPercent: 10, weeklyThresholdPercent: 1 },
+      }),
+    ).not.toHaveProperty("endgame");
+  });
+
+  it("uses sooner-resetting leftovers first, with dwell and breaker", () => {
+    const accounts = [marcos(4), hauke(3)];
+    expect(decide(marcos(4), accounts)).toMatchObject(switchTo("hauke", "expiring"));
+    expect(decide(marcos(4), accounts, { lastSwitchAt: now - 2 * minute })).toMatchObject({
+      ...stay("dwell", now + 3 * minute),
+      endgame: true,
+    });
+    expect(decide(marcos(4), accounts, { recentAutoSwitchAts: recent })).toMatchObject(
+      stay("circuitBreaker"),
+    );
+    // Leftovers at 1% are not worth a switch.
+    expect(decide(marcos(4), [marcos(4), hauke(1)])).toMatchObject({
+      ...stay("healthy"),
+      endgame: true,
+    });
+  });
+
+  it("never switches to an account at 1%, nor away from 1% without a target", () => {
+    // hauke is at 1% and later-resetting marcos is fine: no switch back to hauke.
+    expect(decide(marcos(3), [marcos(3), hauke(1)])).toMatchObject(stay("healthy"));
+    // marcos at 1% with only 1% accounts around stays, even though another has 2% session room.
+    expect(decide(marcos(1), [marcos(1), hauke(1), claude2(1)])).toMatchObject(
+      stay("allExhausted"),
+    );
+    // A 2% target only counts when its 5-hour limit allows; the relaxed 5-hour rule is the fallback.
+    const lowSession = account("claude2", 14, 3, 4 * day);
+    expect(decide(hauke(1), [marcos(1), hauke(1), lowSession])).toMatchObject(
+      switchTo("claude2", "weekly"),
+    );
+    expect(
+      decide(hauke(1), [marcos(1), hauke(1), account("claude2", 10, 3, 4 * day)]),
+    ).toMatchObject({ ...stay("allExhausted"), endgame: true });
+  });
+
+  it("at a hard 0% switches to any account with weekly quota left", () => {
+    expect(decide(hauke(0), [hauke(0), marcos(1)])).toMatchObject(switchTo("marcos", "weekly"));
+    expect(next(hauke(0), [hauke(0), marcos(1)])).toEqual({ accountId: id("marcos"), due: true });
+    // Nothing left anywhere: stay.
+    expect(decide(hauke(0), [hauke(0), marcos(0)])).toMatchObject(stay("allExhausted"));
+  });
+
+  it("Best option follows the endgame ranking", () => {
+    // Healthy-enough active: the sooner-resetting leftover is due now.
+    expect(next(marcos(4), [marcos(4), hauke(3), claude2(2)])).toEqual({
+      accountId: id("hauke"),
+      due: true,
+    });
+    // Active at 1%: the earliest-resetting account with at least 2% left.
+    expect(next(hauke(1), [hauke(1), claude2(3), marcos(2)])).toEqual({
+      accountId: id("claude2"),
+      due: true,
+    });
+    // Only a relaxed 5-hour target is left, as with a threshold switch.
+    const lowSession = account("claude2", 14, 3, 4 * day);
+    expect(next(hauke(1), [hauke(1), lowSession])).toEqual({
+      accountId: id("claude2"),
+      due: true,
+    });
+    // All at 1%: nobody.
+    expect(next(hauke(1), [hauke(1), claude2(1), marcos(1)])).toBeUndefined();
   });
 });

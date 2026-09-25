@@ -76,6 +76,8 @@ export const ProviderAccountAutoSwitch = Schema.Struct({
   message: Schema.optional(TrimmedNonEmptyString),
   pendingTargetAccountId: Schema.optional(ProviderAccountId),
   wakeAt: Schema.optional(IsoDateTime),
+  /** Every account is low, so each runs down to 1% of its weekly limit in turn. */
+  endgame: Schema.optional(Schema.Literal(true)),
   lastSwitch: Schema.optional(ProviderAccountAutoSwitchLastSwitch),
 });
 export type ProviderAccountAutoSwitch = typeof ProviderAccountAutoSwitch.Type;

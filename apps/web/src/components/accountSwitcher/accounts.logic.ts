@@ -644,7 +644,7 @@ const AUTO_SWITCH_OFF_TEXT = {
 
 export type AutoSwitchBadge = {
   readonly label: string;
-  readonly variant: "success" | "warning" | "secondary";
+  readonly variant: "success" | "warning" | "secondary" | "outline";
 };
 
 const AUTO_SWITCH_BADGES: Partial<
@@ -655,6 +655,15 @@ const AUTO_SWITCH_BADGES: Partial<
   waiting: { label: "Waiting", variant: "secondary" },
   paused: { label: "Paused", variant: "secondary" },
 };
+
+const AUTO_SWITCH_ENDGAME_BADGE: AutoSwitchBadge = { label: "Endgame", variant: "outline" };
+
+/** Shown next to the state badge while every account runs down to 1% of its weekly limit. */
+export function autoSwitchEndgameBadge(
+  autoSwitch: Pick<ProviderAccountGroup["autoSwitch"], "enabled" | "endgame">,
+) {
+  return autoSwitch.enabled && autoSwitch.endgame ? AUTO_SWITCH_ENDGAME_BADGE : undefined;
+}
 
 /** Line 2 of the auto-switch bar plus its state badge, first match wins. */
 export function autoSwitchStatus(

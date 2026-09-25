@@ -26,7 +26,7 @@ export interface ProviderAccountAutoSwitchRead {
 
 export type ProviderAccountAutoSwitchState = Pick<
   ProviderAccountAutoSwitch,
-  "state" | "message" | "pendingTargetAccountId" | "wakeAt"
+  "state" | "message" | "pendingTargetAccountId" | "wakeAt" | "endgame"
 >;
 
 export interface ProviderAccountAutoSwitchDependencies {
@@ -223,6 +223,7 @@ export const makeProviderAccountAutoSwitch = Effect.fn("makeProviderAccountAutoS
             ...(probeBlocked ? { probeBlocked } : {}),
             ...(probeWakeAt ? { probeWakeAt } : {}),
             recentAutoSwitchAts: runtime.recent,
+            providerLabel: driver === "claudeAgent" ? "Claude" : "Codex",
             ...(config.lastSwitch ? { lastSwitchAt: Date.parse(config.lastSwitch.at) } : {}),
             ...(config.lastManualSwitchAt
               ? { lastManualSwitchAt: Date.parse(config.lastManualSwitchAt) }
@@ -248,6 +249,7 @@ export const makeProviderAccountAutoSwitch = Effect.fn("makeProviderAccountAutoS
               state,
               message: decision.reason,
               ...(decision.wakeAt !== undefined ? { wakeAt: iso(decision.wakeAt) } : {}),
+              ...(decision.endgame ? { endgame: true as const } : {}),
             };
             if (decision.wakeAt !== undefined && decision.wakeAt > now) {
               runtime.timer = yield* Effect.sleep(decision.wakeAt - now).pipe(
@@ -303,6 +305,7 @@ export const makeProviderAccountAutoSwitch = Effect.fn("makeProviderAccountAutoS
                   state: "pending",
                   message: decision.reason,
                   pendingTargetAccountId: target.id,
+                  ...(decision.endgame ? { endgame: true as const } : {}),
                 };
                 const key = `${target.id}:${error.runningTurnCount}:${decision.reason}`;
                 if (runtime.pendingKey !== key) {
@@ -325,7 +328,11 @@ export const makeProviderAccountAutoSwitch = Effect.fn("makeProviderAccountAutoS
           runtime.recent.push(at);
           runtime.pendingKey = undefined;
           runtime.needsIdle = false;
-          runtime.state = { state: "watching", message: decision.reason };
+          runtime.state = {
+            state: "watching",
+            message: decision.reason,
+            ...(decision.endgame ? { endgame: true as const } : {}),
+          };
           const lastSwitch = {
             at: iso(at),
             fromAccountId: active.id,

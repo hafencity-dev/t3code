@@ -17,6 +17,7 @@ import { toastManager } from "../ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import {
   ACCOUNT_DRIVER_LABELS,
+  autoSwitchEndgameBadge,
   autoSwitchInput,
   autoSwitchNowBlockedReason,
   autoSwitchStatus,
@@ -122,6 +123,7 @@ export function AutoSwitchBar({
     }
   };
   const status = autoSwitchStatus(group, event);
+  const endgameBadge = autoSwitchEndgameBadge(autoSwitch);
   // Turning it off is always allowed; only turning it on can be blocked.
   const enableBlockedReason = autoSwitch.enabled
     ? undefined
@@ -198,7 +200,20 @@ export function AutoSwitchBar({
           </>
         ) : null}
         {status.badge ? (
-          <span className="ml-auto shrink-0">
+          <span className="ml-auto inline-flex shrink-0 items-center gap-1">
+            {endgameBadge ? (
+              <Tooltip>
+                <TooltipTrigger render={<span className="inline-flex" />}>
+                  <Badge variant={endgameBadge.variant} size="sm">
+                    {endgameBadge.label}
+                  </Badge>
+                </TooltipTrigger>
+                <TooltipPopup>
+                  Every account is low, so each one runs down to 1% of its weekly limit before
+                  switching, soonest weekly reset first.
+                </TooltipPopup>
+              </Tooltip>
+            ) : null}
             <Badge variant={status.badge.variant} size="sm">
               {status.badge.label}
             </Badge>
