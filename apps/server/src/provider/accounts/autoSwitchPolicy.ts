@@ -4,6 +4,7 @@ import type {
   ProviderAccountId,
   ServerProviderUsageLimits,
 } from "@t3tools/contracts";
+import { accountGatingWindows } from "@t3tools/shared/fork/accountUsageWindows";
 
 const minute = 60_000;
 const hour = 60 * minute;
@@ -63,7 +64,9 @@ function summarize(
   probed: ReadonlySet<ProviderAccountId>,
 ) {
   let rolledOver = false;
-  const windows = (account.usage?.windows ?? [])
+  // Claude hard-blocks a model only for that model's requests, so its model-scoped weeklies
+  // (Fable) never gate the account while the all-model weekly is reported.
+  const windows = accountGatingWindows(account.usage?.windows ?? [])
     .filter((window) => window.kind !== "other")
     .map((window) => {
       const reset = window.resetsAt === undefined ? undefined : Date.parse(window.resetsAt);

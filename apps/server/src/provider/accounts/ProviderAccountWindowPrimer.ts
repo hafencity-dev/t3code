@@ -6,8 +6,10 @@ import type {
   ProviderAccountId,
   ProviderAccountWindowPrimer,
   ServerProvider,
+  ServerProviderUsageWindow,
 } from "@t3tools/contracts";
 import { Clock, DateTime, Effect, Fiber, Queue, Stream } from "effect";
+import { accountGatingWindows } from "@t3tools/shared/fork/accountUsageWindows";
 import type * as Scope from "effect/Scope";
 
 /** A window counts as running until this long after its reset, so the reset has settled. */
@@ -60,7 +62,15 @@ export function planWindowPrime(
   if (usage?.unavailable?.reason === "unsupported") return { kind: "skip" };
   const checkedAt = parseTime(usage?.checkedAt) ?? Number.NEGATIVE_INFINITY;
   let stale = !usage || usage.windows.length === 0;
-  const weekly = usage?.windows.find((window) => window.id === "seven_day");
+  // Only the all-model weekly blocks every request; a spent model-scoped weekly (Fable) still
+  // leaves the account usable, so it only counts when no all-model weekly is reported.
+  const weekly = accountGatingWindows(usage?.windows ?? [])
+    .filter((window) => window.kind === "weekly")
+    .reduce<ServerProviderUsageWindow | undefined>(
+      (tightest, window) =>
+        !tightest || window.usedPercent > tightest.usedPercent ? window : tightest,
+      undefined,
+    );
   if (weekly && weekly.usedPercent >= 100) {
     const resetsAt = parseTime(weekly.resetsAt);
     if (resetsAt === undefined) return { kind: "skip" };

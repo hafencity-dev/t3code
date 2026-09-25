@@ -100,6 +100,43 @@ describe("account choices", () => {
     expect(accountUsageCell([monthly], "weekly").tightest).toBe(monthly);
     expect(accountUsageCell([monthly], "session")).toEqual({ tightest: undefined, all: [] });
   });
+  it("shows Claude's all-model weekly and lists model-scoped weeklies only on hover", () => {
+    const now = Date.parse("2026-09-23T12:00:00Z");
+    const weekly = {
+      id: "seven_day",
+      kind: "weekly" as const,
+      label: "Weekly",
+      usedPercent: 40,
+      resetsAt: "2026-09-26T12:00:00Z",
+    };
+    const fable = {
+      id: "seven_day_fable",
+      kind: "weekly" as const,
+      label: "Weekly · Fable",
+      usedPercent: 88,
+      resetsAt: "2026-09-25T12:00:00Z",
+    };
+    const session = { ...window(10), id: "five_hour" };
+    const view = accountUsageCellView([session, fable, weekly], "weekly", now, true);
+    expect(view).toMatchObject({ remaining: 60, reset: "in 3d 0h", tone: "default" });
+    expect(view.all).toEqual([weekly, fable]);
+    expect(usageWindowTooltipLine(fable, now, true)).toBe(
+      "Weekly · Fable: 12% left, resets in 2d 0h",
+    );
+    const claude = account("claude", undefined, {
+      driver: "claudeAgent",
+      usage: { checkedAt: "2026-09-23T12:00:00Z", windows: [session, fable, weekly] },
+    });
+    expect(remainingPercent(claude, now)).toBe(60);
+    expect(accountTone(claude, now)).toBe("secondary");
+    // A low Fable weekly alone never recommends another account.
+    expect(bestAccountId([{ ...claude, active: true }, account("fresh", 0)], now)).toBeNull();
+    // Without the all-model weekly, the model-scoped one fills the column.
+    expect(accountUsageCellView([fable], "weekly", now, true).remaining).toBe(12);
+    expect(
+      remainingPercent({ ...claude, usage: { ...claude.usage!, windows: [session, fable] } }, now),
+    ).toBe(12);
+  });
   it("labels resets, and marks a passed reset as waiting for a check", () => {
     const now = Date.parse("2026-09-23T12:00:00Z");
     expect(usageResetLabel(window(10), now, true)).toBeNull();

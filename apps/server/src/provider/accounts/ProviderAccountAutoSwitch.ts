@@ -11,6 +11,7 @@ import type {
   ServerProvider,
 } from "@t3tools/contracts";
 import { Clock, DateTime, Effect, Fiber, Queue, Stream } from "effect";
+import { accountGatingWindows } from "@t3tools/shared/fork/accountUsageWindows";
 
 import type { ProviderAccountAutoSwitch as PersistedConfig } from "./ProviderAccountRegistry.ts";
 import { chooseNextAccount } from "./autoSwitchPolicy.ts";
@@ -125,7 +126,7 @@ export const makeProviderAccountAutoSwitch = Effect.fn("makeProviderAccountAutoS
           if (key === lastProviderKey && !becameKnown) return;
           lastProviderKey = key;
           const now = yield* Clock.currentTimeMillis;
-          const low = provider.usageLimits?.windows.some(
+          const low = accountGatingWindows(provider.usageLimits?.windows ?? []).some(
             (window) => window.kind !== "other" && 100 - window.usedPercent <= runtime.threshold,
           );
           if (
@@ -218,11 +219,10 @@ export const makeProviderAccountAutoSwitch = Effect.fn("makeProviderAccountAutoS
             group.switchMode === "restart" &&
             (active.status === "signedOut" ||
               active.status === "error" ||
-              (active.usage?.windows.some(
+              accountGatingWindows(active.usage?.windows ?? []).some(
                 (window) =>
                   window.kind !== "other" && 100 - window.usedPercent <= config.thresholdPercent,
-              ) ??
-                false));
+              ));
           if (decision.kind === "probe") return decision;
           if (decision.kind === "stay") {
             const state =

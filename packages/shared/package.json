@@ -311,6 +311,10 @@
       "types": "./src/fork/legacy2codeImport.ts",
       "import": "./src/fork/legacy2codeImport.ts"
     },
+    "./fork/accountUsageWindows": {
+      "types": "./src/fork/accountUsageWindows.ts",
+      "import": "./src/fork/accountUsageWindows.ts"
+    },
     "./usageMerge": {
       "types": "./src/usageMerge.ts",
       "import": "./src/usageMerge.ts"

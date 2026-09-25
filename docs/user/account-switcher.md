@@ -31,6 +31,8 @@ remove the account in use, switch to another one first.
 ## Switch
 
 Select **Switch** on an account. Each account shows its 5-hour and weekly usage and when they reset.
+For Claude Code, **Weekly** is the all-model weekly limit; model-specific weekly limits (such as
+Fable) appear when you hover it and don't affect recommendations or automatic switching.
 **Best option** marks the account with the most headroom whose weekly limit resets soonest.
 
 - **Claude Code** switches in place, like running `claude auth login` in a terminal. Running

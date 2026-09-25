@@ -149,6 +149,46 @@ const scenarios: ReadonlyArray<{ name: string; input: AutoSwitchInput; expected:
     expected: switchTo("Work", "weekly"),
   },
   {
+    name: "10b Claude model-scoped weekly never gates the account",
+    input: input({
+      active: {
+        ...personal,
+        usage: {
+          checkedAt: iso(0),
+          windows: [
+            window("session", 80, 2 * hour),
+            { ...window("weekly", 60, 72 * hour), id: "seven_day" },
+            { ...window("weekly", 2, 30 * hour), id: "seven_day_fable" },
+          ],
+        },
+      },
+      candidates: [],
+    }),
+    expected: {
+      kind: "stay",
+      code: "healthy",
+      reason: "Personal has 80% session and 60% long-term quota left; no switch needed.",
+      // The Fable reset (30h) is not a deadline either; only the all-model weekly's is.
+      wakeAt: now + 72 * hour + minute,
+    },
+  },
+  {
+    name: "10c a model-scoped weekly counts when no all-model weekly is reported",
+    input: input({
+      active: {
+        ...personal,
+        usage: {
+          checkedAt: iso(0),
+          windows: [
+            window("session", 80, 2 * hour),
+            { ...window("weekly", 2, 30 * hour), id: "seven_day_fable" },
+          ],
+        },
+      },
+    }),
+    expected: switchTo("Work", "weekly"),
+  },
+  {
     name: "11 exhausted candidate wakes at latest blocking reset",
     input: input({
       active: account("Personal", 8, 8, 96 * hour),

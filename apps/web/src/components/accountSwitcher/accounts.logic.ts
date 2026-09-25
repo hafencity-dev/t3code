@@ -12,6 +12,7 @@ import type {
   ServerProviderUsageWindow,
 } from "@t3tools/contracts";
 import { formatDuration, formatResetsIn } from "@t3tools/shared/usageLimits";
+import { accountGatingWindows } from "@t3tools/shared/fork/accountUsageWindows";
 
 export const ACCOUNT_DRIVERS = ["claudeAgent", "codex"] as const;
 export const ACCOUNT_DRIVER_LABELS = { claudeAgent: "Claude Code", codex: "Codex" } as const;
@@ -52,10 +53,13 @@ export function shortPlanLabel(plan: string) {
 /**
  * Unknown usage must never look like unused quota or become the recommended account. A
  * window whose reset has passed no longer counts: its number describes a window that ended.
+ * Claude's model-scoped weeklies never gate the account while its all-model weekly is known.
  */
 export function remainingPercent(account: ProviderAccount, now: number): number | null {
   if (!account.usage || account.usage.unavailable) return null;
-  const current = account.usage.windows.filter((window) => !windowResetPassed(window, now));
+  const current = accountGatingWindows(account.usage.windows).filter(
+    (window) => !windowResetPassed(window, now),
+  );
   if (current.length === 0) return null;
   return 100 - Math.max(...current.map((window) => window.usedPercent));
 }
@@ -66,7 +70,7 @@ export function accountTone(account: ProviderAccount, now: number) {
   return remaining !== null && remaining <= 25 ? "warning" : "secondary";
 }
 
-/** When the tightest weekly (or monthly) window resets; unknown sorts last. */
+/** When the weekly (or monthly) window the column shows resets; unknown sorts last. */
 function weeklyResetAt(account: ProviderAccount) {
   const { tightest } = accountUsageCell(account.usage?.windows ?? [], "weekly");
   const at = tightest?.resetsAt ? Date.parse(tightest.resetsAt) : Number.NaN;
@@ -109,21 +113,26 @@ export function orderedAccounts(accounts: readonly ProviderAccount[]) {
 export type UsageCellKind = "session" | "weekly";
 
 /**
- * The tightest window of a usage column plus every window it stands for. Weekly includes
- * model-scoped weeklies and falls back to monthly windows when none is weekly.
+ * The window a usage column shows plus every window it stands for (the hover lists `all`).
+ * Weekly shows Claude's all-model weekly; model-scoped weeklies only join the hover unless no
+ * all-model weekly is reported. Weekly falls back to monthly windows when none is weekly.
  */
 export function accountUsageCell(
   windows: readonly ServerProviderUsageWindow[],
   kind: UsageCellKind,
 ) {
   const weekly = windows.filter((window) => window.kind === "weekly");
-  const all =
+  const candidates =
     kind === "session"
       ? windows.filter((window) => window.kind === "session")
       : weekly.length > 0
-        ? weekly
+        ? accountGatingWindows(weekly)
         : windows.filter((window) => window.kind === "monthly");
-  const tightest = all.reduce<ServerProviderUsageWindow | undefined>(
+  const all =
+    kind === "weekly" && weekly.length > 0
+      ? [...candidates, ...weekly.filter((window) => !candidates.includes(window))]
+      : candidates;
+  const tightest = candidates.reduce<ServerProviderUsageWindow | undefined>(
     (previous, window) =>
       !previous || window.usedPercent > previous.usedPercent ? window : previous,
     undefined,

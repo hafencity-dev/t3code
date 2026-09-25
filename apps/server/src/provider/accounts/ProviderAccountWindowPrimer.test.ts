@@ -170,6 +170,26 @@ describe("planWindowPrime", () => {
     expect(planWindowPrime(account(work, { usage: fresh }), 0)).toEqual({ kind: "prime" });
   });
 
+  it("ignores a spent model-scoped weekly unless it is the only weekly reported", () => {
+    const fable = {
+      id: "seven_day_fable",
+      label: "Weekly · Fable",
+      kind: "weekly" as const,
+      usedPercent: 100,
+      resetsAt: iso(48 * HOUR),
+    };
+    const withFable = usage(0);
+    expect(
+      planWindowPrime(
+        account(work, { usage: { ...withFable, windows: [...withFable.windows, fable] } }),
+        0,
+      ),
+    ).toEqual({ kind: "prime" });
+    expect(
+      planWindowPrime(account(work, { usage: { ...withFable, windows: [fable] } }), 0),
+    ).toEqual({ kind: "wait", at: 48 * HOUR + MINUTE });
+  });
+
   it("probes before trusting data measured before the reset or before its own start", () => {
     expect(planWindowPrime(account(work, { usage: usage(-10 * MINUTE, HOUR) }), 2 * HOUR)).toEqual({
       kind: "probe",
