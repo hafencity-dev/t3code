@@ -12,7 +12,10 @@ import type {
   ServerProviderUsageWindow,
 } from "@t3tools/contracts";
 import { formatDuration, formatResetsIn } from "@t3tools/shared/usageLimits";
-import { accountGatingWindows } from "@t3tools/shared/fork/accountUsageWindows";
+import {
+  accountGatingWindows,
+  inactiveUsageStaleness,
+} from "@t3tools/shared/fork/accountUsageWindows";
 
 export const ACCOUNT_DRIVERS = ["claudeAgent", "codex"] as const;
 export const ACCOUNT_DRIVER_LABELS = { claudeAgent: "Claude Code", codex: "Codex" } as const;
@@ -219,7 +222,11 @@ export function usageResetCheckWillRun(
   const key = usageResetKey(account, now);
   if (key === null) return false;
   if (account.active) return !attempted.has(key);
-  return !(Date.parse(account.usageRefresh?.nextAllowedAt ?? "") > now);
+  // Only a gating window's reset makes the automatic refresh pick an inactive account.
+  return (
+    inactiveUsageStaleness(account.usage, now).stale &&
+    !(Date.parse(account.usageRefresh?.nextAllowedAt ?? "") > now)
+  );
 }
 
 function defaultAccountProvider(
@@ -256,18 +263,16 @@ export function shouldShowAccountBadge(
 
 /** Client cooldown after a manual per-account refresh; automatic refreshes never start one. */
 export const USAGE_REFRESH_COOLDOWN_MS = 60_000;
-/** Matches the server's probe TTL: younger measurements are not worth an automatic probe. */
-export const USAGE_STALE_MS = 5 * 60_000;
-
 export function isUsageRefreshCoolingDown(lastRefreshedAt: number | null | undefined, now: number) {
   return lastRefreshedAt != null && now - lastRefreshedAt < USAGE_REFRESH_COOLDOWN_MS;
 }
 
 /**
  * Picks at most one inactive account for the dialog's automatic refresh, so it never
- * bulk-probes: a ready account that was never measured first, then one with a window that
- * reset after it was measured, otherwise the stalest measurement older than the TTL.
- * Accounts the server is backing off are skipped.
+ * bulk-probes. Uses the server's staleness rule: a ready account that was never measured
+ * first, then one with a window that reset after it was measured, otherwise the stalest
+ * measurement past the freshness limit (30 minutes). Accounts the server is backing off are
+ * skipped.
  */
 export function autoRefreshAccountId(
   accounts: readonly ProviderAccount[],
@@ -282,18 +287,19 @@ export function autoRefreshAccountId(
       account.usage?.unavailable?.reason !== "unsupported" &&
       !(Date.parse(account.usageRefresh?.nextAllowedAt ?? "") > now),
   );
-  const unmeasured = candidates.find((account) => !account.usage);
-  if (unmeasured) return unmeasured.id;
-  // Same rule as the server's probe gate: only a reset after the measurement makes it stale.
-  const reset = candidates.find((account) => usageResetKey(account, now) !== null);
-  if (reset) return reset.id;
-  let stalest: ProviderAccount | undefined;
-  for (const account of candidates) {
-    const checkedAt = Date.parse(account.usage!.checkedAt);
-    if (now - checkedAt <= USAGE_STALE_MS) continue;
-    if (!stalest || checkedAt < Date.parse(stalest.usage!.checkedAt)) stalest = account;
-  }
-  return stalest?.id ?? null;
+  const stale = candidates.flatMap((account) => {
+    const staleness = inactiveUsageStaleness(account.usage, now);
+    return staleness.stale ? [{ account, reason: staleness.reason }] : [];
+  });
+  const first = (reason: "neverMeasured" | "windowReset") =>
+    stale.find((entry) => entry.reason === reason)?.account;
+  const pick =
+    first("neverMeasured") ??
+    first("windowReset") ??
+    stale
+      .map(({ account }) => account)
+      .sort((a, b) => Date.parse(a.usage!.checkedAt) - Date.parse(b.usage!.checkedAt))[0];
+  return pick?.id ?? null;
 }
 
 export interface AccountFreshness {

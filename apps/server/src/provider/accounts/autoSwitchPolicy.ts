@@ -5,7 +5,10 @@ import type {
   ServerProviderUsageLimits,
   ServerProviderUsageWindow,
 } from "@t3tools/contracts";
-import { accountGatingWindows } from "@t3tools/shared/fork/accountUsageWindows";
+import {
+  accountGatingWindows,
+  inactiveUsageStaleness,
+} from "@t3tools/shared/fork/accountUsageWindows";
 
 const minute = 60_000;
 const hour = 60 * minute;
@@ -15,7 +18,8 @@ const targetMarginPercent = 10;
  * lands on an account that is due to switch away again right away.
  */
 const weeklyTargetMarginPercent = 3;
-const usageFreshMs = 5 * minute;
+/** A switch target measured longer ago than this is probed once before switching to it. */
+export const AUTO_SWITCH_CONFIRM_MS = 10 * minute;
 const proactiveDwellMs = 5 * minute;
 const maxProbe = 2;
 /** A reset settles this long before the new window shows up in usage. */
@@ -70,6 +74,10 @@ export interface AutoSwitchInput {
   readonly active: AutoSwitchAccountView;
   readonly candidates: ReadonlyArray<AutoSwitchAccountView>;
   readonly probed: ReadonlySet<ProviderAccountId>;
+  /**
+   * Accounts the usage gate would not probe now. A stale one is skipped; a fresh one whose
+   * confirmation probe is blocked is switched to on its stored numbers.
+   */
   readonly probeBlocked?: ReadonlySet<ProviderAccountId>;
   readonly probeWakeAt?: ReadonlyMap<ProviderAccountId, number>;
   readonly recentAutoSwitchAts: ReadonlyArray<number>;
@@ -110,7 +118,7 @@ function summarize(
   thresholds: AutoSwitchThresholds,
   probed: ReadonlySet<ProviderAccountId>,
 ) {
-  let rolledOver = false;
+  const usable = account.usage?.unavailable?.reason !== "probeFailed";
   // Claude hard-blocks a model only for that model's requests, so its model-scoped weeklies
   // (Fable) never gate the account while the all-model weekly is reported.
   const windows = accountGatingWindows(account.usage?.windows ?? [])
@@ -118,7 +126,6 @@ function summarize(
     .map((window) => {
       const reset = window.resetsAt === undefined ? undefined : Date.parse(window.resetsAt);
       const expired = reset !== undefined && reset <= now;
-      rolledOver ||= expired;
       return {
         kind: window.kind,
         left: expired ? 100 : 100 - window.usedPercent,
@@ -140,12 +147,8 @@ function summarize(
     known:
       (account.usage?.windows.length ?? 0) > 0 &&
       account.usage?.unavailable?.reason !== "unsupported",
-    fresh:
-      account.usage?.unavailable?.reason !== "probeFailed" &&
-      (probed.has(account.id) ||
-        (!rolledOver &&
-          account.usage !== undefined &&
-          now - Date.parse(account.usage.checkedAt) <= usageFreshMs)),
+    fresh: usable && (probed.has(account.id) || !inactiveUsageStaleness(account.usage, now).stale),
+    confirmed: usable && (probed.has(account.id) || usageConfirmed(account.usage, now)),
     hasSession: sessions.length > 0,
     sessionLeft,
     longLeft,
@@ -164,6 +167,21 @@ function summarize(
 }
 
 type Summary = ReturnType<typeof summarize>;
+
+/**
+ * Recent enough to switch to without a confirmation probe: fresh under the inactive staleness
+ * rule and measured within `AUTO_SWITCH_CONFIRM_MS`.
+ */
+export function usageConfirmed(
+  usage: Pick<ServerProviderUsageLimits, "checkedAt" | "windows"> | undefined,
+  now: number,
+) {
+  return (
+    usage !== undefined &&
+    !inactiveUsageStaleness(usage, now).stale &&
+    now - Date.parse(usage.checkedAt) <= AUTO_SWITCH_CONFIRM_MS
+  );
+}
 
 /** Could take over from the active account, ignoring the user's exclusion. */
 const isEligible = (account: AutoSwitchAccountView, activeId: ProviderAccountId) =>
@@ -364,9 +382,12 @@ export function chooseNextAccount(input: AutoSwitchInput): AutoSwitchDecision {
   const probe = (accounts: ReadonlyArray<Summary>): AutoSwitchDecision => ({
     kind: "probe",
     accountIds: accounts.map(({ account }) => account.id),
-    reason: `Checking ${accounts.map(({ account }) => account.label).join(" and ")} before switching from ${active.label}; usage must be confirmed within 5 minutes.`,
+    reason: `Checking ${accounts.map(({ account }) => account.label).join(" and ")} before switching from ${active.label}; usage must be confirmed within ${AUTO_SWITCH_CONFIRM_MS / minute} minutes.`,
   });
   const compare = compareCandidates;
+  // The gate can't probe it now. A fresh account stays usable on its stored numbers.
+  const blocked = (candidate: Summary) =>
+    input.probeBlocked?.has(candidate.account.id) === true && !candidate.fresh;
   const hasHeadroom = (candidate: Summary, strict: boolean) =>
     strict
       ? hasStrictHeadroom(candidate, config)
@@ -378,10 +399,7 @@ export function chooseNextAccount(input: AutoSwitchInput): AutoSwitchDecision {
           candidate.sessionLeft >= current.sessionLeft + targetMarginPercent);
   const rankBy = (headroom: (candidate: Summary) => boolean) =>
     candidates
-      .filter(
-        (candidate) =>
-          !input.probeBlocked?.has(candidate.account.id) && candidate.known && headroom(candidate),
-      )
+      .filter((candidate) => !blocked(candidate) && candidate.known && headroom(candidate))
       .sort(compare);
   const rank = (strict: boolean) => rankBy((candidate) => hasHeadroom(candidate, strict));
   const pickOrProbe = (
@@ -393,7 +411,12 @@ export function chooseNextAccount(input: AutoSwitchInput): AutoSwitchDecision {
       .filter((candidate) => !probed.has(candidate.account.id))
       .slice(0, maxProbe);
     if (stale.length > 0) return probe(stale);
-    return freshIndex === -1 ? undefined : ranking[freshIndex];
+    if (freshIndex === -1) return undefined;
+    const target = ranking[freshIndex]!;
+    // Only the chosen target is confirmed, and only when the gate would let the probe run.
+    return target.confirmed || input.probeBlocked?.has(target.account.id) === true
+      ? target
+      : probe([target]);
   };
   if (!config.enabled) return stay("healthy", `Auto-switch is off for ${active.label}.`);
   const signedOut = active.status === "signedOut" || active.status === "error";
@@ -447,10 +470,7 @@ export function chooseNextAccount(input: AutoSwitchInput): AutoSwitchDecision {
     }
     const unknown = candidates
       .filter(
-        (candidate) =>
-          !candidate.known &&
-          !probed.has(candidate.account.id) &&
-          !input.probeBlocked?.has(candidate.account.id),
+        (candidate) => !candidate.known && !probed.has(candidate.account.id) && !blocked(candidate),
       )
       .sort((a, b) => (a.account.id < b.account.id ? -1 : a.account.id > b.account.id ? 1 : 0))
       .slice(0, maxProbe);
@@ -484,7 +504,7 @@ export function chooseNextAccount(input: AutoSwitchInput): AutoSwitchDecision {
       ...candidates
         .filter(
           (candidate) =>
-            input.probeBlocked?.has(candidate.account.id) &&
+            blocked(candidate) &&
             (!candidate.known || hasHeadroom(candidate, true) || hasHeadroom(candidate, false)),
         )
         .map((candidate) => input.probeWakeAt?.get(candidate.account.id) ?? Infinity)
@@ -528,8 +548,7 @@ export function chooseNextAccount(input: AutoSwitchInput): AutoSwitchDecision {
   if (selection !== undefined)
     return "kind" in selection ? selection : switchTo(selection, "expiring");
   const sooner = candidates.filter(
-    (candidate) =>
-      candidate.known && !input.probeBlocked?.has(candidate.account.id) && resetsSooner(candidate),
+    (candidate) => candidate.known && !blocked(candidate) && resetsSooner(candidate),
   );
   // A sooner-resetting account whose session is low becomes a target once its session resets.
   const sessionLow = sooner
@@ -547,12 +566,7 @@ export function chooseNextAccount(input: AutoSwitchInput): AutoSwitchDecision {
     .sort((a, b) => a.deadline - b.deadline || compare(a, b));
   // A weekly reset moves a deadline, which can make proactive rebalancing worthwhile.
   const weeklyWakeAt = Math.min(
-    ...[
-      current,
-      ...candidates.filter(
-        (candidate) => candidate.known && !input.probeBlocked?.has(candidate.account.id),
-      ),
-    ]
+    ...[current, ...candidates.filter((candidate) => candidate.known && !blocked(candidate))]
       .map((summary) => summary.longResetAt + resetGraceMs)
       .filter((at) => at > now),
   );

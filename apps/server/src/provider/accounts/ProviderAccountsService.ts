@@ -29,7 +29,7 @@ import {
   createProviderAccountActivityLog,
   type ProviderAccountActivityRecord,
 } from "./ProviderAccountActivityLog.ts";
-import { nextAutoSwitchTarget } from "./autoSwitchPolicy.ts";
+import { nextAutoSwitchTarget, usageConfirmed } from "./autoSwitchPolicy.ts";
 import { makeProviderAccountWindowPrimer } from "./ProviderAccountWindowPrimer.ts";
 import {
   claudeWindowPrimeLaunch,
@@ -1727,20 +1727,18 @@ const make = (
             if (account.active) continue;
             const entry = yield* io(() => registry.get(account.id));
             const previous = previousUsage(entry);
-            // A successful cached measurement remains selectable during the normal probe TTL.
+            // A recent successful measurement needs no probe; any other one is blocked when
+            // the gate (floor, backoff, budget) would skip the policy's confirmation probe.
             const usage = account.usage;
-            const fresh =
+            const confirmed =
               !previous?.lastFailureKind &&
               usage &&
               !usage.unavailable &&
               usage.windows.length > 0 &&
-              now - Date.parse(usage.checkedAt) <= 5 * 60_000 &&
-              !usage.windows.some(
-                (window) => window.resetsAt && Date.parse(window.resetsAt) <= now,
-              );
-            if (!fresh && !cache.canProbe(account.id, now, previous)) {
+              usageConfirmed(usage, now);
+            if (!confirmed && !cache.canProbe(account.id, now, previous, true)) {
               probeBlocked.add(account.id);
-              probeWakeAt.set(account.id, cache.nextAllowedAt(account.id, now, previous));
+              probeWakeAt.set(account.id, cache.nextAllowedAt(account.id, now, previous, true));
             }
           }
           return {
@@ -1754,8 +1752,10 @@ const make = (
               .map((account) => account.id),
           };
         }),
+      // The policy asks only for the accounts it needs confirmed, so the staleness TTL is
+      // skipped; the floor, backoff, and shared budget still gate every probe.
       refresh: (accountIds) =>
-        refreshUsageMeasured({ accountIds }, false).pipe(
+        refreshUsageMeasured({ accountIds, force: true }, false).pipe(
           Effect.map(({ measured }) => accountIds.filter((id) => measured.has(id))),
         ),
       refreshActive: (driver) =>

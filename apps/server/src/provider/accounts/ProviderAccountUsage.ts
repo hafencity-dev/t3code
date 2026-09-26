@@ -21,6 +21,7 @@ import { codexPlanLabel, withCodexAppServerClient } from "../Layers/CodexProvide
 import { claudeUsageResponseToLimits } from "../Layers/claudeUsageLimits.ts";
 import { codexRateLimitsToLimits } from "../Layers/codexUsageLimits.ts";
 import { makeUnavailableUsageLimits } from "../providerUsageLimits.ts";
+import { inactiveUsageStaleness } from "@t3tools/shared/fork/accountUsageWindows";
 
 export interface AccountUsage {
   readonly lastAttemptAt?: number | undefined;
@@ -134,18 +135,21 @@ export class AccountUsageProbeStaleError extends Error {
   override readonly name = "AccountUsageProbeStaleError";
 }
 
-export const ACCOUNT_USAGE_TTL_MS = 5 * 60_000;
+/** The shared probe budget: at most `MAX_ATTEMPTS` inactive probes per rolling window. */
+export const ACCOUNT_USAGE_BUDGET_WINDOW_MS = 5 * 60_000;
 
-/** A window reset between the measurement and now. A reset already past when measured never counts. */
-export function resetSinceMeasured(usage: Pick<AccountUsage, "checkedAt" | "usage">, now: number) {
-  const checkedAt = Date.parse(usage.checkedAt);
-  return (usage.usage?.windows ?? []).some((window) => {
-    const resetsAt = window.resetsAt ? Date.parse(window.resetsAt) : Number.NaN;
-    return resetsAt > checkedAt && resetsAt <= now;
-  });
+/** Staleness of a stored inactive measurement, under the one shared rule. */
+export function storedUsageStaleness(
+  usage: Pick<AccountUsage, "checkedAt" | "usage">,
+  now: number,
+) {
+  return inactiveUsageStaleness(
+    { checkedAt: usage.checkedAt, windows: usage.usage?.windows ?? [] },
+    now,
+  );
 }
 const MANUAL_FLOOR_MS = 60_000;
-const MAX_ATTEMPTS = 6;
+const MAX_ATTEMPTS = 4;
 
 /** Inspect wrapped SDK / JSON-RPC errors, never expose their private text to clients. */
 function failureDetails(error: unknown, now: number) {
@@ -213,27 +217,27 @@ export const makeAccountUsageCache = <E, R>(dependencies: {
   const pending = new Map<ProviderAccountId, Effect.Effect<AccountUsage | undefined, never, R>>();
   const attempts: Array<{ at: number }> = [];
   const pendingUntil = new Map<ProviderAccountId, number>();
+  const recentAttempts = (now: number) =>
+    attempts.filter(({ at }) => at > now - ACCOUNT_USAGE_BUDGET_WINDOW_MS);
   const budgetAt = (now: number) => {
-    const recent = attempts.filter(({ at }) => at > now - ACCOUNT_USAGE_TTL_MS);
+    const recent = recentAttempts(now);
     return recent.length >= MAX_ATTEMPTS
-      ? recent[recent.length - MAX_ATTEMPTS]!.at + ACCOUNT_USAGE_TTL_MS
+      ? recent[recent.length - MAX_ATTEMPTS]!.at + ACCOUNT_USAGE_BUDGET_WINDOW_MS
       : 0;
   };
-  // Manual refreshes wait only for the 60s floor and failure backoff; the TTL gates the rest.
-  // A success's stored nextAllowedAt is ignored so older 5-minute values never block them.
-  // A window that reset after it was measured makes the measurement stale regardless of age.
-  const accountAt = (prior: AccountUsage | undefined, now: number, force = false) =>
-    Math.max(
+  // Manual refreshes wait only for the 60s floor and failure backoff; staleness gates the rest.
+  // A success's stored nextAllowedAt is ignored so older values never block them.
+  const accountAt = (prior: AccountUsage | undefined, now: number, force = false) => {
+    const staleness =
+      !force && prior && (prior.usage || prior.status === "signedOut") && !prior.lastFailureKind
+        ? storedUsageStaleness(prior, now)
+        : undefined;
+    return Math.max(
       prior?.lastFailureKind ? (prior.nextAllowedAt ?? 0) : 0,
       prior?.lastAttemptAt === undefined ? 0 : prior.lastAttemptAt + MANUAL_FLOOR_MS,
-      !force &&
-        prior &&
-        (prior.usage || prior.status === "signedOut") &&
-        !prior.lastFailureKind &&
-        !resetSinceMeasured(prior, now)
-        ? Date.parse(prior.checkedAt) + ACCOUNT_USAGE_TTL_MS
-        : 0,
+      staleness && !staleness.stale ? staleness.staleAt : 0,
     );
+  };
   const nextAllowedAt = (
     id: ProviderAccountId,
     now: number,
@@ -245,8 +249,8 @@ export const makeAccountUsageCache = <E, R>(dependencies: {
       budgetAt(now),
       pendingUntil.get(id) ?? 0,
     );
-  const canProbe = (id: ProviderAccountId, now: number, previous?: AccountUsage) =>
-    !pending.has(id) && now >= nextAllowedAt(id, now, previous);
+  const canProbe = (id: ProviderAccountId, now: number, previous?: AccountUsage, force = false) =>
+    !pending.has(id) && now >= nextAllowedAt(id, now, previous, force);
 
   /** `measured` is true only when this call produced (or joined) a new successful measurement. */
   const refreshMeasured = Effect.fn("providerAccounts.refreshCachedUsage")(function* (input: {
@@ -266,12 +270,19 @@ export const makeAccountUsageCache = <E, R>(dependencies: {
         if (now < Math.max(accountAt(prior, now, input.force), budgetAt(now)))
           return { effect: Effect.succeed(prior), probing: false };
         // Reserve the attempt before releasing the admission lock, not after the probe finishes.
-        while (attempts.length && attempts[0]!.at <= now - ACCOUNT_USAGE_TTL_MS) attempts.shift();
+        while (attempts.length && attempts[0]!.at <= now - ACCOUNT_USAGE_BUDGET_WINDOW_MS)
+          attempts.shift();
         const attempt = { at: now };
         attempts.push(attempt);
+        // Verifies the probe rate in debug logs: probes admitted in the last budget window.
+        yield* Effect.logDebug("Provider account usage probe admitted", {
+          accountId: input.id,
+          probesLast5Minutes: attempts.length,
+          forced: input.force === true,
+        });
         const memo = yield* Effect.gen(function* () {
           attempt.at = yield* Clock.currentTimeMillis;
-          pendingUntil.set(input.id, attempt.at + ACCOUNT_USAGE_TTL_MS);
+          pendingUntil.set(input.id, attempt.at + ACCOUNT_USAGE_BUDGET_WINDOW_MS);
           return yield* dependencies.probe(input.id).pipe(Effect.timeout(20_000));
         }).pipe(
           permits.withPermit,
@@ -335,7 +346,7 @@ export const makeAccountUsageCache = <E, R>(dependencies: {
           Effect.cached,
         );
         pending.set(input.id, memo);
-        pendingUntil.set(input.id, now + ACCOUNT_USAGE_TTL_MS);
+        pendingUntil.set(input.id, now + ACCOUNT_USAGE_BUDGET_WINDOW_MS);
         return { effect: memo, probing: true };
       }),
     );
@@ -350,6 +361,8 @@ export const makeAccountUsageCache = <E, R>(dependencies: {
     refreshMeasured,
     canProbe,
     nextAllowedAt,
+    /** Probes admitted in the rolling budget window, for tests and diagnostics. */
+    recentProbeCount: (now: number) => recentAttempts(now).length,
     forget: (id: ProviderAccountId) => cache.delete(id),
   };
 };

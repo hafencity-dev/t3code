@@ -27,6 +27,8 @@ const group = (
   candidateUsed = 20,
   reset = 3_600_000,
   driver: ProviderAccountDriver = "codex",
+  // Fresh under the 30-minute rule but older than 10 minutes: confirmed before a switch.
+  candidateCheckedAt = -900_000,
 ) =>
   decodeGroup({
     driver,
@@ -68,7 +70,7 @@ const group = (
         status: "ready",
         active: false,
         usage: {
-          checkedAt: new Date(-600_000).toISOString(),
+          checkedAt: new Date(candidateCheckedAt).toISOString(),
           windows: [
             {
               id: "session",
@@ -109,6 +111,8 @@ const makeHarness = Effect.fnUntraced(function* (options?: {
   unmeasured?: boolean;
   /** The active account's usage is its stored measurement, not the live snapshot. */
   staleActive?: boolean;
+  /** When the candidate was last measured, relative to the epoch start. */
+  candidateCheckedAt?: number;
 }) {
   const events = yield* Queue.unbounded<ProviderAccountAutoSwitchEvent>();
   const completions = yield* Queue.unbounded<void>();
@@ -126,7 +130,13 @@ const makeHarness = Effect.fnUntraced(function* (options?: {
         thresholdPercent: 10,
         weeklyThresholdPercent: 2,
       },
-      group: group(options?.used, options?.candidateUsed, options?.reset, options?.driver),
+      group: group(
+        options?.used,
+        options?.candidateUsed,
+        options?.reset,
+        options?.driver,
+        options?.candidateCheckedAt,
+      ),
       loginInProgress: [],
     } as ProviderAccountAutoSwitchRead,
     busy: options?.busy ?? false,
@@ -304,7 +314,11 @@ describe("ProviderAccountAutoSwitch", () => {
 
   it.effect("gated probes stay bounded until the retry timer expires", () =>
     Effect.gen(function* () {
-      const h = yield* makeHarness({ probeBlockedUntil: 900_000 });
+      // Stale (31 minutes old), so it can't be switched to until it is probed.
+      const h = yield* makeHarness({
+        probeBlockedUntil: 900_000,
+        candidateCheckedAt: -31 * 60_000,
+      });
       expect((yield* Queue.take(h.events))._tag).toBe("blocked");
       yield* completed(h.completions, 2);
       expect(h.state.probes).toEqual([]);
@@ -319,6 +333,27 @@ describe("ProviderAccountAutoSwitch", () => {
       expect(h.state.probes).toEqual([[work]]);
       expect(h.state.switches).toEqual([work]);
       expect(yield* Queue.size(h.completions)).toBe(0);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("probes only the target once when its usage is older than ten minutes", () =>
+    Effect.gen(function* () {
+      const h = yield* makeHarness();
+      expect((yield* Queue.take(h.events))._tag).toBe("switched");
+      expect(h.state.probes).toEqual([[work]]);
+      expect(h.state.switches).toEqual([work]);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("switches without probing on recent usage or a gated confirmation", () =>
+    Effect.gen(function* () {
+      const recent = yield* makeHarness({ candidateCheckedAt: -5 * 60_000 });
+      expect((yield* Queue.take(recent.events))._tag).toBe("switched");
+      expect(recent.state.probes).toEqual([]);
+      // Fresh under the 30-minute rule; the gate blocks the confirmation, so it is not waited for.
+      const gated = yield* makeHarness({ probeBlockedUntil: 900_000 });
+      expect((yield* Queue.take(gated.events))._tag).toBe("switched");
+      expect(gated.state.probes).toEqual([]);
     }).pipe(Effect.scoped),
   );
 
@@ -456,6 +491,8 @@ describe("ProviderAccountAutoSwitch", () => {
       expect((yield* Queue.take(h.events))._tag).toBe("blocked");
       expect(h.state.activeRefreshes).toBe(2);
       expect(h.reactor.getState("claudeAgent").wakeAt).toBe(new Date(420_000).toISOString());
+      // Re-reading the active account's live usage never probes inactive accounts.
+      expect(h.state.probes).toEqual([]);
       // A switch starts a new episode: the next account gets its own grace minute.
       yield* h.reactor.clear("claudeAgent");
       expect(h.reactor.getState("claudeAgent").state).toBe("watching");

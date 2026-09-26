@@ -48,7 +48,7 @@ const low = account("Personal", 8);
 const work = account("Work", 60, 60, 48 * hour);
 const stale = (value: AutoSwitchAccountView): AutoSwitchAccountView => ({
   ...value,
-  usage: { ...value.usage!, checkedAt: iso(-6 * minute) },
+  usage: { ...value.usage!, checkedAt: iso(-31 * minute) },
 });
 const input = (overrides: Partial<AutoSwitchInput> = {}): AutoSwitchInput => ({
   now,
@@ -78,7 +78,11 @@ const nearReset = (left: number) =>
     },
   });
 const rolled = account("Work", 0, 60, 48 * hour, {
-  usage: { checkedAt: iso(0), windows: [window("session", 0, 0), window("weekly", 60, 48 * hour)] },
+  usage: {
+    // Measured a minute before its 5-hour window reset.
+    checkedAt: iso(-minute),
+    windows: [window("session", 0, 0), window("weekly", 60, 48 * hour)],
+  },
 });
 const recent = [now - 40 * minute, now - 30 * minute, now - 20 * minute, now - 10 * minute];
 
@@ -468,12 +472,16 @@ describe("chooseNextAccount 32-scenario policy table", () => {
     },
   );
 
-  it("skips a gated preferred candidate even with fresh retained usage", () => {
+  it("skips a gated preferred candidate unless its retained usage is fresh", () => {
     const preferred = account("Preferred", 80, 80, hour);
+    const failed = {
+      ...preferred,
+      usage: { ...preferred.usage!, unavailable: { reason: "probeFailed" as const } },
+    };
     expect(
       chooseNextAccount(
         input({
-          candidates: [preferred, work],
+          candidates: [failed, work],
           probeBlocked: new Set([preferred.id]),
         }),
       ),
@@ -481,7 +489,26 @@ describe("chooseNextAccount 32-scenario policy table", () => {
     expect(
       chooseNextAccount(
         input({
-          candidates: [preferred, stale(work)],
+          candidates: [stale(preferred), work],
+          probeBlocked: new Set([preferred.id]),
+        }),
+      ),
+    ).toMatchObject(switchTo("Work"));
+    // Fresh but unconfirmed (older than 10 minutes): the gate blocks the confirmation probe,
+    // so the stored numbers are used.
+    const unconfirmed = {
+      ...preferred,
+      usage: { ...preferred.usage!, checkedAt: iso(-15 * minute) },
+    };
+    expect(
+      chooseNextAccount(
+        input({ candidates: [unconfirmed, work], probeBlocked: new Set([preferred.id]) }),
+      ),
+    ).toMatchObject(switchTo("Preferred"));
+    expect(
+      chooseNextAccount(
+        input({
+          candidates: [stale(preferred), stale(work)],
           probeBlocked: new Set([preferred.id]),
         }),
       ),
@@ -506,6 +533,31 @@ describe("chooseNextAccount 32-scenario policy table", () => {
     expect(chooseNextAccount(input({ ...gate, probeBlocked: new Set() }))).toMatchObject(
       probe("Work"),
     );
+  });
+
+  it("confirms only the chosen target when its usage is older than ten minutes", () => {
+    const aged = (value: AutoSwitchAccountView, age: number): AutoSwitchAccountView => ({
+      ...value,
+      usage: { ...value.usage!, checkedAt: iso(-age) },
+    });
+    // 9 minutes old: confirmed, no probe.
+    expect(
+      chooseNextAccount(
+        input({ candidates: [aged(work, 9 * minute), aged(account("B"), 20 * minute)] }),
+      ),
+    ).toMatchObject(switchTo("Work"));
+    // 15 minutes old: fresh under the 30-minute rule, so only this one account is probed.
+    const decision = chooseNextAccount(
+      input({ candidates: [aged(work, 15 * minute), aged(account("B"), 20 * minute)] }),
+    );
+    expect(decision).toMatchObject(probe("Work"));
+    expect(decision.kind === "probe" && decision.accountIds).toHaveLength(1);
+    // Once probed it is switched to.
+    expect(
+      chooseNextAccount(
+        input({ candidates: [aged(work, 15 * minute)], probed: new Set([work.id]) }),
+      ),
+    ).toMatchObject(switchTo("Work"));
   });
 
   // S4: a weekly trigger doesn't require the replacement to beat the active's healthy session.
@@ -545,7 +597,7 @@ describe("chooseNextAccount 32-scenario policy table", () => {
       chooseNextAccount(
         input({
           active: account("Personal", 80, 50, 5 * hour),
-          candidates: [account("B", 80, 15, 4 * hour)],
+          candidates: [stale(account("B", 80, 15, 4 * hour))],
           probeBlocked: new Set([id("B")]),
         }),
       ),

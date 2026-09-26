@@ -780,18 +780,40 @@ describe("automatic usage refresh", () => {
       ),
     ).toBe("new");
   });
-  it("otherwise picks only the stalest measurement older than five minutes", () => {
+  it("otherwise picks only the stalest measurement older than thirty minutes", () => {
     expect(
       autoRefreshAccountId(
         [
-          measured("stale", "2026-09-23T12:20:00Z"),
-          measured("stalest", "2026-09-23T12:00:00Z"),
+          measured("stale", "2026-09-23T12:00:00Z"),
+          measured("stalest", "2026-09-23T11:00:00Z"),
           measured("fresh", "2026-09-23T12:31:00Z"),
         ],
         now,
       ),
     ).toBe("stalest");
-    expect(autoRefreshAccountId([measured("fresh", "2026-09-23T12:30:00Z")], now)).toBeNull();
+    // 29 minutes old: other accounts' usage only moves on a reset or when they are used.
+    expect(autoRefreshAccountId([measured("recent", "2026-09-23T12:06:00Z")], now)).toBeNull();
+    expect(autoRefreshAccountId([measured("old", "2026-09-23T12:04:00Z")], now)).toBe("old");
+  });
+  it("probes six healthy accounts at most once each over thirty minutes of ticks", () => {
+    const opened = Date.parse("2026-09-23T13:00:00Z");
+    let accounts = Array.from({ length: 6 }, (_, n) =>
+      measured(`account-${n}`, new Date(opened - (20 + 5 * n) * 60_000).toISOString()),
+    );
+    let probes = 0;
+    // The dialog opens, then ticks once a minute; each pick is measured right away.
+    for (let at = opened; at < opened + 30 * 60_000; at += 60_000) {
+      const picked = autoRefreshAccountId(accounts, at);
+      if (!picked) continue;
+      probes++;
+      accounts = accounts.map((entry) =>
+        entry.id === picked
+          ? { ...entry, usage: { ...entry.usage!, checkedAt: new Date(at).toISOString() } }
+          : entry,
+      );
+    }
+    // Each account is picked once, when it passes 30 minutes; the old 5-minute rule took 30.
+    expect(probes).toBe(6);
   });
   it("next picks an account whose window reset after it was measured, however recent", () => {
     const reset = (id: string, checkedAt: string, resetsAt: string) =>
@@ -811,6 +833,29 @@ describe("automatic usage refresh", () => {
     expect(
       autoRefreshAccountId(
         [reset("reported", "2026-09-23T12:33:00Z", "2026-09-23T12:00:00Z")],
+        now,
+      ),
+    ).toBeNull();
+    // A model-scoped weekly never gates the account, so its reset alone is not worth a probe.
+    expect(
+      autoRefreshAccountId(
+        [
+          account("fable", undefined, {
+            usage: {
+              checkedAt: "2026-09-23T12:33:00Z",
+              windows: [
+                { id: "seven_day", kind: "weekly", label: "Weekly", usedPercent: 40 },
+                {
+                  id: "seven_day_fable",
+                  kind: "weekly",
+                  label: "Fable",
+                  usedPercent: 100,
+                  resetsAt: "2026-09-23T12:34:00Z",
+                },
+              ],
+            },
+          }),
+        ],
         now,
       ),
     ).toBeNull();

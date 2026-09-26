@@ -1030,9 +1030,9 @@ describe("ProviderAccountsService", () => {
           .flatMap((group) => group.accounts)
           .find((entry) => entry.id === seeded!.id)!;
         expect(account.usage?.windows[0]?.usedPercent).toBe(42);
-        // Each sign-in bypasses the per-account floor, but the 6-per-5-minute budget holds.
-        for (let attempt = 0; attempt < 6; attempt++) yield* signIn;
-        expect(calls).toBe(6);
+        // Each sign-in bypasses the per-account floor, but the 4-per-5-minute budget holds.
+        for (let attempt = 0; attempt < 4; attempt++) yield* signIn;
+        expect(calls).toBe(4);
       }),
       true,
       {
@@ -1778,12 +1778,13 @@ describe("ProviderAccountsService", () => {
         const inactive = codex.accounts.filter((account) => !account.active);
         expect(inactive).toHaveLength(7);
         const skipped = inactive.filter((account) => !account.usage);
-        expect(skipped).toHaveLength(1);
-        // Six attempts at t=0 fill the five-minute budget.
-        expect(skipped[0]!.usageRefresh).toEqual({
-          nextAllowedAt: new Date(5 * 60_000).toISOString(),
-          rateLimited: false,
-        });
+        expect(skipped).toHaveLength(3);
+        // Four attempts at t=0 fill the five-minute budget.
+        for (const account of skipped)
+          expect(account.usageRefresh).toEqual({
+            nextAllowedAt: new Date(5 * 60_000).toISOString(),
+            rateLimited: false,
+          });
       }),
       false,
       {

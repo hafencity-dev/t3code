@@ -91,7 +91,7 @@ describe("provider account usage admission", () => {
   );
 
   it.effect(
-    "keeps the five-minute TTL for automatic checks but lets a manual refresh through after 60s",
+    "keeps inactive usage fresh for 30 minutes but lets a manual refresh through after 60s",
     () =>
       Effect.gen(function* () {
         let calls = 0;
@@ -100,9 +100,13 @@ describe("provider account usage admission", () => {
         });
         yield* cache.refresh({ id, active: false, previous: good });
         expect(calls).toBe(0);
-        yield* TestClock.adjust(5 * minute);
+        yield* TestClock.adjust(29 * minute);
+        yield* cache.refresh({ id, active: false });
+        expect(calls).toBe(0);
+        yield* TestClock.adjust(minute);
         const value = yield* cache.refresh({ id, active: false });
-        expect(value?.nextAllowedAt).toBe(6 * minute);
+        expect(calls).toBe(1);
+        expect(value?.nextAllowedAt).toBe(31 * minute);
         yield* TestClock.adjust(minute - 1);
         yield* cache.refresh(refresh);
         expect(calls).toBe(1);
@@ -158,6 +162,51 @@ describe("provider account usage admission", () => {
         active: false,
         previous: { ...withReset("1969-12-31T23:00:00.000Z") },
       });
+      expect(calls).toBe(1);
+    }),
+  );
+
+  // Six healthy accounts, the dialog asking for one account every minute for 30 minutes.
+  it.effect("thirty minutes of automatic refreshes probe six healthy accounts once each", () =>
+    Effect.gen(function* () {
+      let calls = 0;
+      const cache = makeAccountUsageCache({
+        probe: () => measuredNow.pipe(Effect.tap(() => Effect.sync(() => calls++))),
+      });
+      const ids = Array.from({ length: 6 }, (_, n) => ProviderAccountId.make(`healthy-${n}`));
+      // Last measured 25 to 50 minutes ago, before the dialog opened.
+      yield* TestClock.adjust(60 * minute);
+      const previous = (n: number): AccountUsage => {
+        const checkedAt = new Date((35 - 5 * n) * minute).toISOString();
+        return { ...good, checkedAt, usage: { checkedAt, windows: [] } };
+      };
+      for (let tick = 0; tick < 30; tick++) {
+        for (const [n, accountId] of ids.entries())
+          yield* cache.refresh({ id: accountId, active: false, previous: previous(n) });
+        yield* TestClock.adjust(minute);
+      }
+      expect(calls).toBe(6);
+    }),
+  );
+
+  it.effect("a window reset triggers exactly one probe for that account", () =>
+    Effect.gen(function* () {
+      let calls = 0;
+      const cache = makeAccountUsageCache({
+        probe: () => measuredNow.pipe(Effect.tap(() => Effect.sync(() => calls++))),
+      });
+      const resetsAt = new Date(10 * minute).toISOString();
+      const measured: AccountUsage = {
+        ...good,
+        usage: {
+          checkedAt: good.checkedAt,
+          windows: [{ id: "five_hour", label: "5h", kind: "session", usedPercent: 90, resetsAt }],
+        },
+      };
+      for (let tick = 0; tick < 20; tick++) {
+        yield* cache.refresh({ id, active: false, previous: measured });
+        yield* TestClock.adjust(minute);
+      }
       expect(calls).toBe(1);
     }),
   );
@@ -274,11 +323,13 @@ describe("provider account usage admission", () => {
         const cache = makeAccountUsageCache({
           probe: () => measuredNow.pipe(Effect.tap(() => Effect.sync(() => calls++))),
         });
-        for (let n = 0; n < 6; n++) {
+        for (let n = 0; n < 4; n++) {
           yield* cache.refresh({ ...refresh, id: ProviderAccountId.make(`budget-${n}`) });
           yield* TestClock.adjust(minute / 2);
         }
-        expect(calls).toBe(6);
+        yield* TestClock.adjust(minute);
+        expect(calls).toBe(4);
+        expect(cache.recentProbeCount(3 * minute)).toBe(4);
         expect(cache.canProbe(id, 3 * minute)).toBe(false);
         expect(cache.nextAllowedAt(id, 3 * minute)).toBe(5 * minute);
         expect(yield* cache.refresh({ ...refresh, previous: good })).toEqual(good);
@@ -287,12 +338,12 @@ describe("provider account usage admission", () => {
         ).toBeUndefined();
         yield* TestClock.adjust(2 * minute - 1);
         yield* cache.refresh(refresh);
-        expect(calls).toBe(6);
+        expect(calls).toBe(4);
         yield* TestClock.adjust(1);
-        expect(calls).toBe(6); // Skipped work is not queued for later.
-        expect(cache.canProbe(id, 5 * minute)).toBe(true);
+        expect(calls).toBe(4); // Skipped work is not queued for later.
+        expect(cache.canProbe(id, 5 * minute, undefined, true)).toBe(true);
         yield* cache.refresh(refresh);
-        expect(calls).toBe(7);
+        expect(calls).toBe(5);
         expect(cache.nextAllowedAt(ProviderAccountId.make("other"), 5 * minute)).toBe(5.5 * minute);
       }),
   );
@@ -316,7 +367,7 @@ describe("provider account usage admission", () => {
           }),
       });
       const fibers = [];
-      for (let n = 0; n < 6; n++)
+      for (let n = 0; n < 4; n++)
         fibers.push(
           yield* cache
             .refresh({ ...refresh, id: ProviderAccountId.make(`pending-${n}`) })
@@ -328,7 +379,7 @@ describe("provider account usage admission", () => {
       expect(calls).toBe(2);
       yield* Deferred.succeed(finish, undefined);
       for (const fiber of fibers) yield* Fiber.join(fiber);
-      expect(calls).toBe(6);
+      expect(calls).toBe(4);
       expect(maximum).toBe(2);
     }),
   );
@@ -404,16 +455,16 @@ describe("provider account usage admission", () => {
             checkedAt: newer.checkedAt,
             email: newer.email,
           });
-          yield* TestClock.adjust(5 * minute);
+          yield* TestClock.adjust(30 * minute);
           const failed = yield* cache.refresh({ id, active: false, previous });
           expect(failed).toMatchObject({
             checkedAt: newer.checkedAt,
             email: newer.email,
-            lastAttemptAt: 6 * minute,
-            nextAllowedAt: 11 * minute,
+            lastAttemptAt: 31 * minute,
+            nextAllowedAt: 36 * minute,
           });
           expect(yield* cache.refresh({ ...refresh, previous: newer })).toEqual(failed);
-          expect(cache.canProbe(id, 6 * minute, newer)).toBe(false);
+          expect(cache.canProbe(id, 31 * minute, newer)).toBe(false);
           expect(calls).toBe(2);
         }),
     );
@@ -438,7 +489,7 @@ describe("provider account usage admission", () => {
         const first = yield* cache.refresh({ ...refresh, previous: good }).pipe(Effect.forkChild);
         yield* Deferred.await(started);
         expect(cache.canProbe(id, 0)).toBe(false);
-        expect(cache.nextAllowedAt(id, 0)).toBe(5 * minute);
+        expect(cache.nextAllowedAt(id, 0, undefined, true)).toBe(5 * minute);
         const second = yield* cache.refresh({ ...refresh, previous: good }).pipe(Effect.forkChild);
         yield* Effect.yieldNow;
         yield* Deferred.succeed(finish, undefined);

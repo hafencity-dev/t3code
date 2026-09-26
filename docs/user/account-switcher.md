@@ -93,10 +93,12 @@ at the top. Each device keeps its last 500 events.
 
 ## Usage checks
 
-The active account's usage updates with every turn. Other accounts are checked when you open the
-dialog and their numbers are older than five minutes, or when you select the refresh button next
-to an account. Checks are rate limited; after a failure or a provider rate limit the dialog shows
-when it will retry and keeps the last known numbers.
+The active account's usage updates with every turn. Other accounts only change when one of their
+limits resets or when they are used, so they are rechecked after a reset or every 30 minutes, one
+at a time while the dialog is open. Auto-switch checks an account again before switching to it if
+its numbers are more than 10 minutes old. Select the refresh button next to an account to check it
+now. Checks are rate limited; after a failure or a provider rate limit the dialog shows when it
+will retry and keeps the last known numbers.
 
 ## Limits
 
