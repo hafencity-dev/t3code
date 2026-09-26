@@ -19,6 +19,7 @@ import {
   type ProviderAccountsStartLoginInput,
   type ProviderAccountsSwitchInput,
   type ProviderAccountsSnapshot,
+  type ProviderInstanceId,
   type ServerProvider,
   type ServerSettings,
 } from "@t3tools/contracts";
@@ -157,12 +158,8 @@ function effectiveEnvironment(settings: ServerSettings, driver: ProviderAccountD
   );
 }
 
-function accountFromEntry(
-  entry: ProviderAccountEntry,
-  active: boolean,
-  provider?: ServerProvider,
-  usageRefresh?: ProviderAccount["usageRefresh"],
-): ProviderAccount {
+/** The live snapshot, when it describes this entry; otherwise the entry's stored numbers apply. */
+function ownSnapshot(entry: ProviderAccountEntry, provider: ServerProvider | undefined) {
   const metadata = entry.lastUsage;
   // The live Claude snapshot describes whoever is signed in to the active home. It belongs to
   // this entry only while it reports the entry's own identity; a terminal login elsewhere must
@@ -171,7 +168,17 @@ function accountFromEntry(
     entry.driver === "claudeAgent" &&
     Boolean(metadata?.email && provider?.auth.email) &&
     provider!.auth.email!.toLowerCase() !== metadata!.email!.toLowerCase();
-  const snapshot = (entry.status === "error" && entry.message) || foreign ? undefined : provider;
+  return (entry.status === "error" && entry.message) || foreign ? undefined : provider;
+}
+
+function accountFromEntry(
+  entry: ProviderAccountEntry,
+  active: boolean,
+  provider?: ServerProvider,
+  usageRefresh?: ProviderAccount["usageRefresh"],
+): ProviderAccount {
+  const metadata = entry.lastUsage;
+  const snapshot = ownSnapshot(entry, provider);
   // A recorded sign-out (such as a terminal logout) outranks a snapshot taken before it.
   const status =
     entry.status === "pending" ||
@@ -338,12 +345,22 @@ const make = (
           );
         }),
       );
+    // A hot switch keeps the instance's config home, and the instance caches its capabilities
+    // probe (identity and limits) per home. A plain refresh would re-publish the previous
+    // account's email and limits under a fresh timestamp, which then hides the active account's
+    // own usage until the cache expires. Every refresh that follows a credential change drops it.
+    const refreshInstanceLive = (instanceId: ProviderInstanceId) =>
+      Effect.gen(function* () {
+        const instance = yield* instances.getInstance(instanceId);
+        if (instance?.invalidateCaches) yield* instance.invalidateCaches;
+        return yield* providers.refreshInstance(instanceId);
+      });
     // A hot switch returns as soon as credentials moved; the snapshot follows in the
     // background while list() masks the previous account's identity and limits.
     const refreshClaudeSnapshot = Effect.gen(function* () {
       const observed = observedAccounts.get("claudeAgent");
       if (observed?.checkedAt) staleSnapshots.set("claudeAgent", observed.checkedAt);
-      yield* providers.refreshInstance(claudeInstanceId).pipe(
+      yield* refreshInstanceLive(claudeInstanceId).pipe(
         Effect.catchCause((cause) =>
           Effect.logWarning("Claude provider refresh after account switch failed", cause),
         ),
@@ -703,6 +720,9 @@ const make = (
                 : undefined,
             );
           });
+          const activeEntry = state.accounts.find((entry) => entry.id === state.activeAccountId);
+          const activeUsageLive =
+            activeEntry !== undefined && ownSnapshot(activeEntry, snapshot) !== undefined;
           const { identities, duplicateOf } = accountIdentities(state.accounts, accounts, live);
           const groupAccounts = state.accounts.map((entry, index) => {
             const original = duplicateOf(entry);
@@ -766,12 +786,15 @@ const make = (
             accounts: groupAccounts,
             ...(warning ? { warning } : {}),
           };
-          return { group, identities };
+          return { group, identities, activeUsageLive };
         }),
       );
       return {
         snapshot: { groups: groups.map((entry) => entry.group) },
         identities: new Map(groups.flatMap((entry) => [...entry.identities])),
+        activeUsageLive: new Map(
+          groups.map((entry) => [entry.group.driver, entry.activeUsageLive]),
+        ),
       };
     });
 
@@ -1694,7 +1717,9 @@ const make = (
           const automatic = yield* io(() => registry.getAutoSwitch(driver));
           // Runs under the account mutation; never decide on an unreconciled terminal login.
           if (driver === "claudeAgent") yield* reconcileClaudeUnlocked();
-          const group = (yield* list()).groups.find((entry) => entry.driver === driver)!;
+          // list() without its idle reconcile, which the held mutation would skip anyway.
+          const detailed = yield* listDetailed();
+          const group = detailed.snapshot.groups.find((entry) => entry.driver === driver)!;
           const now = yield* Clock.currentTimeMillis;
           const probeBlocked = new Set<ProviderAccountId>();
           const probeWakeAt = new Map<ProviderAccountId, number>();
@@ -1723,6 +1748,7 @@ const make = (
             group,
             probeBlocked,
             probeWakeAt,
+            activeUsageLive: detailed.activeUsageLive.get(driver) ?? false,
             loginInProgress: group.accounts
               .filter((account) => login.isBusy(account.id))
               .map((account) => account.id),
@@ -1732,6 +1758,8 @@ const make = (
         refreshUsageMeasured({ accountIds }, false).pipe(
           Effect.map(({ measured }) => accountIds.filter((id) => measured.has(id))),
         ),
+      refreshActive: (driver) =>
+        refreshInstanceLive(defaultInstanceIdForDriver(ProviderDriverKind.make(driver))),
       switchAccount: (accountId) => switchAccountUnlocked({ accountId, interruptRunning: false }),
       persistLastSwitch: (driver, lastSwitch) =>
         Effect.gen(function* () {
@@ -1878,7 +1906,7 @@ const make = (
         }),
       refresh: (account, force) =>
         account.active
-          ? providers.refreshInstance(claudeInstanceId)
+          ? refreshInstanceLive(claudeInstanceId)
           : refreshUsage({ accountIds: [account.id], force }),
       // A start that can't even be sent (signed in elsewhere, no saved login) is a failure too.
       prime: (account) =>

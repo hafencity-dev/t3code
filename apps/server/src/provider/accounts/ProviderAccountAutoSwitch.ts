@@ -22,6 +22,11 @@ export interface ProviderAccountAutoSwitchRead {
   readonly loginInProgress: readonly string[];
   readonly probeBlocked?: ReadonlySet<ProviderAccountId>;
   readonly probeWakeAt?: ReadonlyMap<ProviderAccountId, number>;
+  /**
+   * False while the active account's usage is its stored measurement rather than the live
+   * provider snapshot: masked right after a switch, or the snapshot reports another identity.
+   */
+  readonly activeUsageLive?: boolean;
 }
 
 export type ProviderAccountAutoSwitchState = Pick<
@@ -37,6 +42,8 @@ export interface ProviderAccountAutoSwitchDependencies {
   readonly refresh: (
     accountIds: readonly ProviderAccountId[],
   ) => Effect.Effect<ReadonlyArray<ProviderAccountId>, ProviderAccountError>;
+  /** Re-reads the active account's live snapshot with the provider's probe caches dropped. */
+  readonly refreshActive?: (driver: ProviderAccountDriver) => Effect.Effect<unknown>;
   /** Unlocked switch with interruptRunning:false; only restart-mode groups check busy. */
   readonly switchAccount: (
     accountId: ProviderAccountId,
@@ -68,6 +75,14 @@ export interface ProviderAccountAutoSwitchActivity {
 
 const drivers = ["claudeAgent", "codex"] as const;
 const iso = (at: number) => DateTime.formatIso(DateTime.makeUnsafe(at));
+const minute = 60_000;
+/** A switch's own snapshot refresh lands within seconds; after this the reactor re-reads it. */
+const liveUsageGraceMs = minute;
+/** First re-read interval while the active usage stays unknown; doubles up to the cap. */
+const liveUsageRetryMs = 2 * minute;
+const liveUsageRetryMaxMs = 30 * minute;
+/** Unknown this long is logged once per episode. */
+const liveUsageWarnMs = 5 * minute;
 
 export const makeProviderAccountAutoSwitch = Effect.fn("makeProviderAccountAutoSwitch")(function* (
   deps: ProviderAccountAutoSwitchDependencies,
@@ -87,6 +102,11 @@ export const makeProviderAccountAutoSwitch = Effect.fn("makeProviderAccountAutoS
       timer: undefined as Fiber.Fiber<void> | undefined,
       subscriptions: undefined as Fiber.Fiber<void> | undefined,
       pendingKey: undefined as string | undefined,
+      // Since when the active account's live usage is unknown, and when to re-read it next.
+      liveMissingSince: undefined as number | undefined,
+      liveRetryAt: undefined as number | undefined,
+      liveRetries: 0,
+      liveWarned: false,
     };
   });
   const runtimes = { claudeAgent: yield* makeRuntime(), codex: yield* makeRuntime() };
@@ -101,11 +121,18 @@ export const makeProviderAccountAutoSwitch = Effect.fn("makeProviderAccountAutoS
     runtime.timer = undefined;
     if (timer) yield* Fiber.interrupt(timer);
   });
+  const resetLiveUsage = (runtime: (typeof runtimes)[ProviderAccountDriver]) => {
+    runtime.liveMissingSince = undefined;
+    runtime.liveRetryAt = undefined;
+    runtime.liveRetries = 0;
+    runtime.liveWarned = false;
+  };
   const clear = Effect.fnUntraced(function* (driver: ProviderAccountDriver) {
     const runtime = runtimes[driver];
     runtime.generation++;
     runtime.needsIdle = false;
     runtime.pendingKey = undefined;
+    resetLiveUsage(runtime);
     runtime.state = { state: runtime.enabled ? "watching" : "off" };
     yield* stopTimer(driver);
   });
@@ -134,9 +161,11 @@ export const makeProviderAccountAutoSwitch = Effect.fn("makeProviderAccountAutoS
             provider.usageLimits?.unavailable?.reason !== "unsupported";
           const becameKnown = !runtime.usageKnown && known;
           runtime.usageKnown = known;
-          const key = `${provider.usageLimits?.checkedAt ?? ""}:${provider.auth.status}:${provider.status}:${known}`;
+          const key = `${provider.usageLimits?.checkedAt ?? ""}:${provider.auth.status}:${provider.auth.email ?? ""}:${provider.status}:${known}`;
           if (key === lastProviderKey && !becameKnown) return;
           lastProviderKey = key;
+          // Waiting on the live snapshot: any new one may be it.
+          if (runtime.liveMissingSince !== undefined) return yield* notify(driver);
           const now = yield* Clock.currentTimeMillis;
           const low = atAutoSwitchThreshold(
             provider.usageLimits?.windows ?? [],
@@ -163,12 +192,13 @@ export const makeProviderAccountAutoSwitch = Effect.fn("makeProviderAccountAutoS
     // At most two accounts per probe, and each account at most once per evaluation.
     // Account mutations invalidate this evaluation instead of extending its probe budget.
     let remainingProbes: number | undefined;
+    let refreshedActive = false;
     yield* stopTimer(driver);
     while (generation === runtime.generation) {
       const next = yield* deps.withMutation(
         Effect.gen(function* () {
           if (generation !== runtime.generation) return;
-          const { config, group, loginInProgress, probeBlocked, probeWakeAt } =
+          const { config, group, loginInProgress, probeBlocked, probeWakeAt, activeUsageLive } =
             yield* deps.read(driver);
           if (generation !== runtime.generation) return;
           runtime.enabled = config.enabled;
@@ -185,6 +215,7 @@ export const makeProviderAccountAutoSwitch = Effect.fn("makeProviderAccountAutoS
               yield* Fiber.interrupt(idleSubscription);
               idleSubscription = undefined;
             }
+            resetLiveUsage(runtime);
             return;
           }
           const active = group.accounts.find((account) => account.id === group.activeAccountId);
@@ -200,6 +231,14 @@ export const makeProviderAccountAutoSwitch = Effect.fn("makeProviderAccountAutoS
           }
           remainingProbes ??= group.accounts.length;
           const now = yield* Clock.currentTimeMillis;
+          // Stored numbers can't show the active account running low. Signed-out and API-key
+          // accounts have nothing live to wait for.
+          const liveUsage =
+            active.status !== "ready" ||
+            active.usage?.unavailable?.reason === "unsupported" ||
+            (activeUsageLive !== false && runtime.usageKnown);
+          if (liveUsage) resetLiveUsage(runtime);
+          else runtime.liveMissingSince ??= now;
           runtime.recent = runtime.recent.filter((at) => at > now - 3_600_000);
           const view = (account: typeof active) => ({
             ...account,
@@ -236,34 +275,66 @@ export const makeProviderAccountAutoSwitch = Effect.fn("makeProviderAccountAutoS
               atAutoSwitchThreshold(active.usage?.windows ?? [], config));
           if (decision.kind === "probe") return decision;
           if (decision.kind === "stay") {
-            const state =
-              decision.code === "circuitBreaker"
+            const since = runtime.liveMissingSince;
+            const stuck = since !== undefined && now - since >= liveUsageGraceMs;
+            if (stuck && deps.refreshActive && !refreshedActive) {
+              const retryAt = runtime.liveRetryAt;
+              if (retryAt === undefined || now >= retryAt) {
+                runtime.liveRetryAt =
+                  now + Math.min(liveUsageRetryMs * 2 ** runtime.liveRetries, liveUsageRetryMaxMs);
+                runtime.liveRetries++;
+                return { kind: "refreshActive" as const };
+              }
+            }
+            if (stuck && !runtime.liveWarned && now - since >= liveUsageWarnMs) {
+              runtime.liveWarned = true;
+              yield* Effect.logWarning(
+                "Provider account auto-switch can't see the active account's live usage",
+                { driver, minutes: Math.floor((now - since) / minute) },
+              );
+            }
+            // A "healthy" verdict from stored numbers would be a lying status line.
+            const blind = stuck && decision.code === "healthy";
+            const liveWakeAt =
+              since === undefined
+                ? undefined
+                : stuck
+                  ? (runtime.liveRetryAt ?? now + liveUsageRetryMs)
+                  : since + liveUsageGraceMs;
+            const reason = blind
+              ? `Can't see ${active.label}'s current usage, so auto-switch can't tell when it runs low. Checking again in ${Math.max(1, Math.ceil(((liveWakeAt ?? now) - now) / minute))} min.`
+              : decision.reason;
+            const state = blind
+              ? "waiting"
+              : decision.code === "circuitBreaker"
                 ? "paused"
                 : decision.code === "healthy"
                   ? "watching"
                   : "waiting";
-            const changed =
-              runtime.state.state !== state || runtime.state.message !== decision.reason;
+            const changed = runtime.state.state !== state || runtime.state.message !== reason;
+            const shownWakeAt = blind ? liveWakeAt : decision.wakeAt;
             runtime.pendingKey = undefined;
             runtime.state = {
               state,
-              message: decision.reason,
-              ...(decision.wakeAt !== undefined ? { wakeAt: iso(decision.wakeAt) } : {}),
+              message: reason,
+              ...(shownWakeAt !== undefined ? { wakeAt: iso(shownWakeAt) } : {}),
               ...(decision.endgame ? { endgame: true as const } : {}),
             };
-            if (decision.wakeAt !== undefined && decision.wakeAt > now) {
-              runtime.timer = yield* Effect.sleep(decision.wakeAt - now).pipe(
+            const wakeAt = Math.min(decision.wakeAt ?? Infinity, liveWakeAt ?? Infinity);
+            if (Number.isFinite(wakeAt) && wakeAt > now) {
+              runtime.timer = yield* Effect.sleep(wakeAt - now).pipe(
                 Effect.andThen(notify(driver)),
                 Effect.forkIn(scope),
               );
             }
             if (
               changed &&
-              (decision.code === "allExhausted" ||
+              (blind ||
+                decision.code === "allExhausted" ||
                 decision.code === "noCandidates" ||
                 decision.code === "circuitBreaker")
             ) {
-              yield* deps.publish({ _tag: "blocked", driver, reason: decision.reason });
+              yield* deps.publish({ _tag: "blocked", driver, reason });
             }
             return;
           }
@@ -357,6 +428,12 @@ export const makeProviderAccountAutoSwitch = Effect.fn("makeProviderAccountAutoS
         }),
       );
       if (!next || generation !== runtime.generation) return;
+      if (next.kind === "refreshActive") {
+        refreshedActive = true;
+        // Like probes, outside the mutation; the next pass re-reads whatever it published.
+        yield* deps.refreshActive!(driver).pipe(Effect.catchCause(() => Effect.void));
+        continue;
+      }
       const ids = next.accountIds
         .filter((id) => !probed.has(id))
         .slice(0, Math.min(2, remainingProbes ?? 0));

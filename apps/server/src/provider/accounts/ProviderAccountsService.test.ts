@@ -102,18 +102,26 @@ describe("ProviderAccountsService", () => {
       runPrime?: typeof runClaudeWindowPrime;
       refreshInstance?: ProviderRegistryShape["refreshInstance"];
       providers?: ReadonlyArray<ServerProvider>;
+      /** Overrides the static provider registry, e.g. with a live Claude snapshot. */
+      providerRegistry?: Effect.Effect<Partial<ProviderRegistryShape>>;
+      invalidateClaudeCaches?: Effect.Effect<void>;
     } = {},
   ) {
     const snapshots = [provider, ...(options.providers ?? [])];
-    const providerLayer = options.refreshInstance
-      ? Layer.effect(
-          ProviderRegistry,
-          Effect.gen(function* () {
-            const base = yield* ProviderRegistry;
-            return ProviderRegistry.of({ ...base, refreshInstance: options.refreshInstance! });
-          }),
-        ).pipe(Layer.provide(makeProviderRegistryLayer(snapshots)))
-      : makeProviderRegistryLayer(snapshots);
+    const providerLayer =
+      options.refreshInstance || options.providerRegistry
+        ? Layer.effect(
+            ProviderRegistry,
+            Effect.gen(function* () {
+              const base = yield* ProviderRegistry;
+              return ProviderRegistry.of({
+                ...base,
+                ...(options.refreshInstance ? { refreshInstance: options.refreshInstance } : {}),
+                ...(options.providerRegistry ? yield* options.providerRegistry : {}),
+              });
+            }),
+          ).pipe(Layer.provide(makeProviderRegistryLayer(snapshots)))
+        : makeProviderRegistryLayer(snapshots);
     const dependencies = Layer.mergeAll(
       ServerConfig.layerTest(root, NodePath.join(root, "state")),
       ServerSettings.layerTest({
@@ -211,6 +219,9 @@ describe("ProviderAccountsService", () => {
                     ),
                     displayName: undefined,
                     enabled: true,
+                    ...(instanceId === claudeId && options.invalidateClaudeCaches
+                      ? { invalidateCaches: options.invalidateClaudeCaches }
+                      : {}),
                     continuationIdentity: {
                       driverKind: ProviderDriverKind.make("codex"),
                       continuationKey: "test",
@@ -1498,6 +1509,178 @@ describe("ProviderAccountsService", () => {
       },
     );
   });
+
+  /**
+   * The Claude instance caches its capabilities probe (identity and limits) per config home,
+   * which a hot switch doesn't change. This registry behaves like it: a refresh re-reads the
+   * active home's identity only after the instance's caches were invalidated. Runtime
+   * rate-limit events patch the published limits and keep its identity.
+   */
+  const makeLiveClaudeRegistry = (
+    activeHome: string,
+    usage: Map<string, ServerProvider["usageLimits"]>,
+  ) => {
+    // Created with the provider layer, before the service subscribes.
+    let changes: PubSub.PubSub<ReadonlyArray<ServerProvider>>;
+    let refreshed: Queue.Queue<string>;
+    const live = {
+      cachedEmail: undefined as string | undefined,
+      snapshot: undefined as ServerProvider | undefined,
+      sequence: 0,
+    };
+    const all = () => [provider, ...(live.snapshot ? [live.snapshot] : [])];
+    const stamp = () => new Date(Date.parse(checkedAt) + ++live.sequence * 1_000).toISOString();
+    const publish = Effect.suspend(() => PubSub.publish(changes, all())).pipe(Effect.asVoid);
+    const refreshClaude = Effect.gen(function* () {
+      if (live.cachedEmail === undefined) {
+        const config = yield* Effect.promise(() =>
+          NodeFSP.readFile(NodePath.join(activeHome, ".claude.json"), "utf8"),
+        );
+        live.cachedEmail = JSON.parse(config).oauthAccount.emailAddress as string;
+      }
+      const at = stamp();
+      const limits = usage.get(live.cachedEmail);
+      live.snapshot = decodeProvider({
+        instanceId: "claudeAgent",
+        driver: "claudeAgent",
+        enabled: true,
+        installed: true,
+        version: "1.0.0",
+        status: "ready",
+        auth: { status: "authenticated", email: live.cachedEmail, label: "Claude Max" },
+        checkedAt: at,
+        models: [],
+        ...(limits ? { usageLimits: { ...limits, checkedAt: at } } : {}),
+      });
+      yield* publish;
+      yield* Queue.offer(refreshed, live.cachedEmail);
+      return all();
+    });
+    const registry = Effect.gen(function* () {
+      changes = yield* PubSub.unbounded<ReadonlyArray<ServerProvider>>();
+      refreshed = yield* Queue.unbounded<string>();
+      return {
+        getProviders: Effect.sync(all),
+        refreshInstance: (instanceId: ProviderInstanceId) =>
+          instanceId === claudeId ? refreshClaude : Effect.sync(all),
+        streamChanges: Stream.fromPubSub(changes),
+      } satisfies Partial<ProviderRegistryShape>;
+    });
+    return {
+      registry,
+      /** Receipt of each Claude refresh: the identity it published. */
+      nextRefresh: Effect.suspend(() => Queue.take(refreshed)),
+      refreshClaude,
+      invalidate: Effect.sync(() => {
+        live.cachedEmail = undefined;
+      }),
+      /** A turn's rate-limit event: new numbers, the snapshot's identity untouched. */
+      rateLimit: (windows: NonNullable<ServerProvider["usageLimits"]>["windows"]) =>
+        Effect.gen(function* () {
+          const snapshot = live.snapshot!;
+          live.snapshot = { ...snapshot, usageLimits: { checkedAt: stamp(), windows } };
+          yield* publish;
+        }),
+    };
+  };
+  const claudeLimits = (sessionUsed: number, weeklyResetsAt: string) => ({
+    checkedAt,
+    windows: [
+      {
+        id: "five_hour",
+        label: "Session",
+        kind: "session" as const,
+        usedPercent: sessionUsed,
+        resetsAt: "2026-09-23T15:00:00.000Z",
+      },
+      {
+        id: "seven_day",
+        label: "Weekly",
+        kind: "weekly" as const,
+        usedPercent: 30,
+        resetsAt: weeklyResetsAt,
+      },
+    ],
+  });
+
+  // The 2026-09-25 incident: a proactive hot switch to marcos re-published the previous
+  // account's cached identity, so every later rate-limit event for marcos was treated as a
+  // foreign snapshot and dropped. marcos ran into its 5-hour limit with auto-switch watching.
+  it.effect(
+    "after an automatic hot switch, the new account's rate limits trigger the next switch",
+    () => {
+      let seeded: Awaited<ReturnType<typeof seedClaudeStores>>;
+      const usage = new Map([
+        ["default@example.test", claudeLimits(20, "2026-09-28T12:00:00.000Z")],
+        // b's weekly quota resets first, so auto-switch moves to it proactively.
+        ["b@example.test", claudeLimits(0, "2026-09-25T12:00:00.000Z")],
+        ["c@example.test", claudeLimits(0, "2026-09-29T12:00:00.000Z")],
+      ]);
+      const live = makeLiveClaudeRegistry(NodePath.join(root, "claude"), usage);
+      const probe: Probe = ((input: { homePath: string }) =>
+        Effect.succeed({
+          checkedAt,
+          status: "ready",
+          usage:
+            input.homePath === seeded.homes.b
+              ? usage.get("b@example.test")
+              : usage.get("c@example.test"),
+        } satisfies AccountUsage)) as unknown as Probe;
+      return run(
+        Effect.gen(function* () {
+          const service = yield* ProviderAccountsService;
+          // The instance probed Default before the switch; its probe cache is warm.
+          yield* live.refreshClaude;
+          expect(yield* live.nextRefresh).toBe("default@example.test");
+          const events = yield* Stream.toQueue(service.autoSwitchEvents, { capacity: "unbounded" });
+          const nextSwitch = Effect.gen(function* () {
+            for (;;) {
+              const event = yield* Queue.take(events);
+              if (event._tag === "switched") return event;
+            }
+          });
+          yield* service.setAutoSwitch({ driver: "claudeAgent", enabled: true });
+          expect(yield* nextSwitch).toMatchObject({
+            toAccountId: seeded.ids.b,
+            trigger: "expiring",
+          });
+          // The switch's own snapshot refresh must describe b, not the cached Default.
+          expect(yield* live.nextRefresh).toBe("b@example.test");
+          const active = claudeGroup(yield* service.list()).accounts.find(
+            (account) => account.active,
+          )!;
+          expect(active).toMatchObject({ id: seeded.ids.b, email: "b@example.test" });
+          expect(active.usage?.windows.map((window) => window.usedPercent)).toEqual([0, 30]);
+          // A running turn reports b's 5-hour limit crossing the 10% threshold.
+          yield* live.rateLimit(claudeLimits(92, "2026-09-25T12:00:00.000Z").windows);
+          expect(yield* nextSwitch).toMatchObject({
+            fromAccountId: seeded.ids.b,
+            trigger: "session",
+          });
+        }),
+        false,
+        {
+          claudeHomePath: NodePath.join(root, "claude"),
+          probe,
+          providerRegistry: live.registry,
+          invalidateClaudeCaches: live.invalidate,
+          before: async () => {
+            seeded = await seedClaudeStores(["b", "c"]);
+            const registry = await createProviderAccountRegistry({ stateDir: seeded.stateDir });
+            for (const name of ["b", "c"] as const)
+              await registry.update(seeded.ids[name]!, {
+                lastUsage: {
+                  email: `${name}@example.test`,
+                  accountUuid: `uuid-${name}`,
+                  checkedAt,
+                  usage: usage.get(`${name}@example.test`),
+                },
+              });
+          },
+        },
+      );
+    },
+  );
 
   it.effect(
     "recovers a journal before exposing the checked-out account after service restart",

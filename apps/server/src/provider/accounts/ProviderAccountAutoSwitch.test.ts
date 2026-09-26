@@ -107,6 +107,8 @@ const makeHarness = Effect.fnUntraced(function* (options?: {
   probeBlockedUntil?: number;
   /** The refresh runs but its probes measure nothing (gated or dropped). */
   unmeasured?: boolean;
+  /** The active account's usage is its stored measurement, not the live snapshot. */
+  staleActive?: boolean;
 }) {
   const events = yield* Queue.unbounded<ProviderAccountAutoSwitchEvent>();
   const completions = yield* Queue.unbounded<void>();
@@ -136,7 +138,11 @@ const makeHarness = Effect.fnUntraced(function* (options?: {
     subscriptions: 0,
     idleSubscriptions: 0,
     claudeEnabled: options?.claudeEnabled ?? false,
+    activeRefreshes: 0,
+    /** What a live re-read of the active account reports; undefined keeps it stale. */
+    liveUsed: undefined as number | undefined,
   };
+  if (options?.staleActive) state.snapshot = { ...state.snapshot, activeUsageLive: false };
   if (options?.unknown) {
     state.snapshot = {
       ...state.snapshot,
@@ -203,6 +209,23 @@ const makeHarness = Effect.fnUntraced(function* (options?: {
           },
         };
         return ids;
+      }),
+    refreshActive: () =>
+      Effect.sync(() => {
+        state.activeRefreshes++;
+        const used = state.liveUsed;
+        if (used === undefined) return;
+        const live = group(used, options?.candidateUsed, options?.reset, options?.driver);
+        state.snapshot = {
+          ...state.snapshot,
+          activeUsageLive: true,
+          group: {
+            ...state.snapshot.group,
+            accounts: state.snapshot.group.accounts.map((account) =>
+              account.active ? live.accounts[0]! : account,
+            ),
+          },
+        };
       }),
     switchAccount: (id) =>
       Effect.gen(function* () {
@@ -390,6 +413,58 @@ describe("ProviderAccountAutoSwitch", () => {
       ]);
       expect(yield* Queue.take(h.events)).toMatchObject({ _tag: "switched", trigger: "expiring" });
       expect(h.state.switches).toEqual([work]);
+    }).pipe(Effect.scoped),
+  );
+
+  // After a hot switch the active account's numbers may be its stored ones, from before it was
+  // used; they can't show it running low. A re-read finds the real numbers.
+  it.effect("re-reads stale active usage after a minute and switches on the live numbers", () =>
+    Effect.gen(function* () {
+      const h = yield* makeHarness({ driver: "claudeAgent", used: 50, staleActive: true });
+      yield* completed(h.completions, 2);
+      expect(h.reactor.getState("claudeAgent").state).toBe("watching");
+      expect(h.state.activeRefreshes).toBe(0);
+      h.state.liveUsed = 95;
+      yield* TestClock.adjust(60_000);
+      expect(yield* Queue.take(h.events)).toMatchObject({
+        _tag: "switched",
+        driver: "claudeAgent",
+        fromAccountId: personal,
+        toAccountId: work,
+        trigger: "session",
+      });
+      expect(h.state.activeRefreshes).toBe(1);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("active usage that stays unknown is shown and retried with backoff", () =>
+    Effect.gen(function* () {
+      const h = yield* makeHarness({ driver: "claudeAgent", used: 50, staleActive: true });
+      yield* completed(h.completions, 2);
+      yield* TestClock.adjust(60_000);
+      const blocked = yield* Queue.take(h.events);
+      expect(blocked).toMatchObject({ _tag: "blocked", driver: "claudeAgent" });
+      expect(blocked._tag === "blocked" && blocked.reason).toContain(
+        "Can't see Personal's current usage",
+      );
+      expect(h.state.activeRefreshes).toBe(1);
+      expect(h.reactor.getState("claudeAgent")).toMatchObject({
+        state: "waiting",
+        wakeAt: new Date(180_000).toISOString(),
+      });
+      yield* TestClock.adjust(120_000);
+      expect((yield* Queue.take(h.events))._tag).toBe("blocked");
+      expect(h.state.activeRefreshes).toBe(2);
+      expect(h.reactor.getState("claudeAgent").wakeAt).toBe(new Date(420_000).toISOString());
+      // A switch starts a new episode: the next account gets its own grace minute.
+      yield* h.reactor.clear("claudeAgent");
+      expect(h.reactor.getState("claudeAgent").state).toBe("watching");
+      h.state.snapshot = { ...h.state.snapshot, activeUsageLive: true };
+      yield* h.reactor.notify("claudeAgent");
+      yield* completed(h.completions);
+      expect(h.reactor.getState("claudeAgent").state).toBe("watching");
+      yield* TestClock.adjust(600_000);
+      expect(h.state.activeRefreshes).toBe(2);
     }).pipe(Effect.scoped),
   );
 
