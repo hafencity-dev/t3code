@@ -31,6 +31,7 @@ import {
 } from "./ProviderAccountActivityLog.ts";
 import { nextAutoSwitchTarget, usageConfirmed } from "./autoSwitchPolicy.ts";
 import { makeProviderAccountWindowPrimer } from "./ProviderAccountWindowPrimer.ts";
+import { makeClaudeHotSwitchUsageGuard } from "./ClaudeHotSwitchUsageGuard.ts";
 import {
   claudeWindowPrimeLaunch,
   runClaudeWindowPrime,
@@ -501,6 +502,9 @@ const make = (
     const switcher = makeProviderAccountSwitch({ settings, engine, snapshots, instances });
     const observedAccounts = new Map<ProviderAccountDriver, { id: string; checkedAt?: string }>();
     const staleSnapshots = new Map<ProviderAccountDriver, string>();
+    // Hot switches keep the instance running; see ClaudeHotSwitchUsageGuard for why its usage
+    // stays unverified for the new account until a probe confirms it.
+    const hotSwitchUsage = makeClaudeHotSwitchUsageGuard();
     let autoSwitch: Effect.Success<ReturnType<typeof makeProviderAccountAutoSwitch>> | undefined;
     let windowPrimer:
       | Effect.Success<ReturnType<typeof makeProviderAccountWindowPrimer>>
@@ -694,6 +698,19 @@ const make = (
             .filter(Boolean)
             .join(" ");
           const now = yield* Clock.currentTimeMillis;
+          const verdict =
+            driver === "claudeAgent"
+              ? hotSwitchUsage.resolve(state.activeAccountId, snapshot)
+              : ({ live: true } as const);
+          // Unverified live usage never labels the active account; its verified (or stored)
+          // numbers do, while identity and sign-in status still come from the snapshot.
+          const activeSnapshot =
+            verdict.live || !snapshot
+              ? snapshot
+              : (() => {
+                  const { usageLimits: _unverified, ...rest } = snapshot;
+                  return verdict.usage ? { ...rest, usageLimits: verdict.usage } : rest;
+                })();
           const accounts = state.accounts.map((entry) => {
             const active = entry.id === state.activeAccountId;
             // When a manual check may run next, including the shared probe budget.
@@ -706,10 +723,10 @@ const make = (
                   true,
                 );
             const rateLimited = entry.lastUsage?.lastFailureKind === "rateLimited";
-            return accountFromEntry(
+            const account = accountFromEntry(
               entry,
               active,
-              active ? snapshot : undefined,
+              active ? activeSnapshot : undefined,
               nextAllowedAt > now || entry.lastUsage?.lastFailureKind
                 ? {
                     ...(nextAllowedAt > 0
@@ -719,10 +736,13 @@ const make = (
                   }
                 : undefined,
             );
+            return active && !verdict.live ? { ...account, usagePending: true as const } : account;
           });
           const activeEntry = state.accounts.find((entry) => entry.id === state.activeAccountId);
           const activeUsageLive =
-            activeEntry !== undefined && ownSnapshot(activeEntry, snapshot) !== undefined;
+            verdict.live &&
+            activeEntry !== undefined &&
+            ownSnapshot(activeEntry, snapshot) !== undefined;
           const { identities, duplicateOf } = accountIdentities(state.accounts, accounts, live);
           const groupAccounts = state.accounts.map((entry, index) => {
             const original = duplicateOf(entry);
@@ -966,6 +986,23 @@ const make = (
                 })
             ).pipe(Effect.provide(context)),
           );
+          // A probe measures whoever is signed in to the store. Numbers of another identity
+          // must never land on this entry.
+          const expectedEmail = entry.lastUsage?.email;
+          const reportedEmail = "email" in result ? result.email : undefined;
+          if (
+            reportedEmail &&
+            expectedEmail &&
+            reportedEmail.toLowerCase() !== expectedEmail.toLowerCase()
+          ) {
+            yield* Effect.logWarning("Dropped a usage probe that reported another account", {
+              accountId: entry.id,
+              driver: entry.driver,
+            });
+            return yield* Effect.fail(
+              new AccountUsageProbeStaleError("Usage probe reported another account."),
+            );
+          }
           // The store was probed before a checkout moved its credentials; drop the result.
           if (
             generation !== checkoutGeneration[entry.driver] ||
@@ -1342,6 +1379,9 @@ const make = (
           .find((group) => group.driver === "claudeAgent")
           ?.accounts.find((account) => account.active);
         // Live plan and limits are the source's only while the active home holds its identity.
+        // list() only shows the active account usage verified as its own (after an earlier hot
+        // switch, its saved numbers until a probe confirmed it), so this never files another
+        // account's numbers under the source.
         const live = yield* liveClaudeIdentity(state);
         const sourceIdentity = storedIdentity(source);
         if (
@@ -1416,6 +1456,13 @@ const make = (
         checkoutGeneration.claudeAgent++;
         cache.forget(ProviderAccountId.make(source.id));
         cache.forget(ProviderAccountId.make(target.id));
+        hotSwitchUsage.switched({
+          toAccountId: target.id,
+          toEmail: target.lastUsage?.email,
+          toStored: target.lastUsage?.usage,
+          previous: [current?.usage, source.lastUsage?.usage],
+          now: yield* Clock.currentTimeMillis,
+        });
         yield* refreshClaudeSnapshot;
         return yield* list();
       }
@@ -1936,20 +1983,40 @@ const make = (
 
     // A terminal login shows up in the next Claude snapshot; file it without waiting for a list.
     let lastClaudeSnapshotKey: string | undefined;
+    let lastRejectedUsage: string | undefined;
     yield* providers.streamChanges.pipe(
       Stream.runForEach((all) => {
         const claude = all.find((item) => item.instanceId === claudeInstanceId);
+        // A verifying probe may be followed by a runtime update before anything lists.
+        hotSwitchUsage.observe(claude);
+        const active = observedAccounts.get("claudeAgent")?.id;
+        const verdict = claude && active ? hotSwitchUsage.resolve(active, claude) : undefined;
+        const rejected =
+          verdict?.live === false && verdict.reason === "previousAccount"
+            ? claude?.usageLimits?.checkedAt
+            : undefined;
+        const warnRejected =
+          rejected !== undefined && rejected !== lastRejectedUsage
+            ? Effect.logWarning(
+                "Ignored Claude usage that still reports the previous account's limits",
+              )
+            : Effect.void;
+        if (rejected !== undefined) lastRejectedUsage = rejected;
         const key =
           claude && `${claude.checkedAt}:${claude.auth.status}:${claude.auth.email ?? ""}`;
-        if (!key || key === lastClaudeSnapshotKey) return Effect.void;
+        if (!key || key === lastClaudeSnapshotKey) return warnRejected;
         lastClaudeSnapshotKey = key;
-        return mutation
-          .withPermit(reconcileClaudeUnlocked())
-          .pipe(
-            Effect.catchCause((cause) =>
-              Effect.logWarning("Reconciling the active Claude account failed", cause),
-            ),
-          );
+        return warnRejected.pipe(
+          Effect.andThen(
+            mutation
+              .withPermit(reconcileClaudeUnlocked())
+              .pipe(
+                Effect.catchCause((cause) =>
+                  Effect.logWarning("Reconciling the active Claude account failed", cause),
+                ),
+              ),
+          ),
+        );
       }),
       Effect.forkIn(scope),
     );

@@ -31,6 +31,11 @@ export const ProviderAccount = Schema.Struct({
     }),
   ),
   message: Schema.optional(TrimmedNonEmptyString),
+  /**
+   * The active account's live usage isn't confirmed as its own yet (right after a hot switch);
+   * `usage` holds its saved numbers meanwhile.
+   */
+  usagePending: Schema.optional(Schema.Literal(true)),
   /** Set on a saved account signed in as the same identity as this (kept) account. */
   duplicateOf: Schema.optional(ProviderAccountId),
   /** Auto-switch never moves to this account; a manual switch still can. Absent means false. */

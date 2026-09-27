@@ -360,6 +360,20 @@ export function accountFreshness(
       refreshTooltip: "Checking usage",
     };
   const cooldownTooltip = (until: number) => `You can refresh again in ${formatWait(until - now)}`;
+  // Right after a switch the live numbers may still be the previous account's.
+  if (account.active && account.usagePending)
+    return {
+      ...plain("Checking…"),
+      tone: "muted",
+      refreshing: false,
+      tooltip: `Confirming this account's usage after the switch. ${
+        usage && usage.windows.length > 0 && age
+          ? `Showing its saved numbers from ${age === "Just now" ? "just now" : age}.`
+          : "No saved numbers yet."
+      }`,
+      canRefresh: cooldown === null,
+      refreshTooltip: cooldown === null ? "Refresh usage" : cooldownTooltip(cooldown),
+    };
   if (account.active)
     return {
       ...(age ? aged(age) : plain("Not checked")),

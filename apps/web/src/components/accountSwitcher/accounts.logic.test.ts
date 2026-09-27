@@ -389,6 +389,20 @@ describe("freshness", () => {
       "Not checked",
     );
   });
+  it("says the active account's usage is being confirmed after a switch", () => {
+    const pending = account("active", 40, {
+      active: true,
+      usagePending: true,
+      usage: { checkedAt: "2026-09-23T12:00:00Z", windows: [window(40)] },
+    });
+    expect(accountFreshness(pending, now, idle)).toMatchObject({
+      text: "Checking…",
+      refreshing: false,
+      tooltip:
+        "Confirming this account's usage after the switch. Showing its saved numbers from 35m ago.",
+      canRefresh: true,
+    });
+  });
   it("reports a rate limit with the age of the retained numbers", () => {
     const limited = account("work", 40, {
       usage: {

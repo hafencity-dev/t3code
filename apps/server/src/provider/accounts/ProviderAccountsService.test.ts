@@ -1527,6 +1527,8 @@ describe("ProviderAccountsService", () => {
       cachedEmail: undefined as string | undefined,
       snapshot: undefined as ServerProvider | undefined,
       sequence: 0,
+      /** The probe's usage request fails: like the real instance, it keeps the old windows. */
+      usageFails: false,
     };
     const all = () => [provider, ...(live.snapshot ? [live.snapshot] : [])];
     const stamp = () => new Date(Date.parse(checkedAt) + ++live.sequence * 1_000).toISOString();
@@ -1540,6 +1542,7 @@ describe("ProviderAccountsService", () => {
       }
       const at = stamp();
       const limits = usage.get(live.cachedEmail);
+      const retained = live.usageFails ? live.snapshot?.usageLimits : undefined;
       live.snapshot = decodeProvider({
         instanceId: "claudeAgent",
         driver: "claudeAgent",
@@ -1550,7 +1553,11 @@ describe("ProviderAccountsService", () => {
         auth: { status: "authenticated", email: live.cachedEmail, label: "Claude Max" },
         checkedAt: at,
         models: [],
-        ...(limits ? { usageLimits: { ...limits, checkedAt: at } } : {}),
+        ...(retained
+          ? { usageLimits: retained }
+          : limits
+            ? { usageLimits: { ...limits, checkedAt: at } }
+            : {}),
       });
       yield* publish;
       yield* Queue.offer(refreshed, live.cachedEmail);
@@ -1574,6 +1581,11 @@ describe("ProviderAccountsService", () => {
       invalidate: Effect.sync(() => {
         live.cachedEmail = undefined;
       }),
+      snapshotNow: () => live.snapshot,
+      failUsage: (fails: boolean) =>
+        Effect.sync(() => {
+          live.usageFails = fails;
+        }),
       /** A turn's rate-limit event: new numbers, the snapshot's identity untouched. */
       rateLimit: (windows: NonNullable<ServerProvider["usageLimits"]>["windows"]) =>
         Effect.gen(function* () {
@@ -1681,6 +1693,192 @@ describe("ProviderAccountsService", () => {
       );
     },
   );
+
+  /** Each account's windows reset at its own instants, like real accounts. */
+  const accountLimits = (
+    sessionUsed: number,
+    weeklyUsed: number,
+    resets: { session: string; weekly: string },
+  ) => ({
+    checkedAt,
+    windows: [
+      {
+        id: "five_hour",
+        label: "Session",
+        kind: "session" as const,
+        usedPercent: sessionUsed,
+        resetsAt: resets.session,
+      },
+      {
+        id: "seven_day",
+        label: "Weekly",
+        kind: "weekly" as const,
+        usedPercent: weeklyUsed,
+        resetsAt: resets.weekly,
+      },
+    ],
+  });
+  const resetsOf = {
+    default: { session: "2026-09-23T14:00:00.000Z", weekly: "2026-09-28T12:00:00.000Z" },
+    b: { session: "2026-09-23T15:30:00.000Z", weekly: "2026-09-29T09:00:00.000Z" },
+    c: { session: "2026-09-23T16:10:00.000Z", weekly: "2026-09-30T07:00:00.000Z" },
+  };
+  const sessionUsed = (usage: ServerProvider["usageLimits"] | undefined) =>
+    usage?.windows.find((window) => window.id === "five_hour")?.usedPercent;
+
+  // The 2026-09-27 incident: Default ran out, auto-switch moved to b. The switch's own probe
+  // lost its usage request and kept Default's windows under b's identity, and turns still on
+  // Default's token kept reporting Default's limits. b showed 0% left, auto-switch moved on
+  // again five seconds later, and the switch-away filed Default's numbers under b.
+  it.effect(
+    "after a hot switch, the previous account's usage never labels, moves or is filed as the new one",
+    () => {
+      let seeded: Awaited<ReturnType<typeof seedClaudeStores>>;
+      const usage = new Map([
+        ["default@example.test", accountLimits(100, 40, resetsOf.default)],
+        ["b@example.test", accountLimits(10, 20, resetsOf.b)],
+        ["c@example.test", accountLimits(50, 30, resetsOf.c)],
+      ]);
+      const live = makeLiveClaudeRegistry(NodePath.join(root, "claude"), usage);
+      const probe: Probe = ((input: { homePath: string }) =>
+        Effect.succeed({
+          checkedAt,
+          status: "ready",
+          usage:
+            input.homePath === seeded.homes.b
+              ? usage.get("b@example.test")
+              : usage.get("c@example.test"),
+        } satisfies AccountUsage)) as unknown as Probe;
+      return run(
+        Effect.gen(function* () {
+          const service = yield* ProviderAccountsService;
+          const stored = (id: string) =>
+            Effect.promise(async () => {
+              const registry = await createProviderAccountRegistry({ stateDir: seeded.stateDir });
+              return (await registry.get(id)).lastUsage?.usage;
+            });
+          const activeAccount = Effect.gen(function* () {
+            return claudeGroup(yield* service.list()).accounts.find((account) => account.active)!;
+          });
+          yield* live.refreshClaude;
+          expect(yield* live.nextRefresh).toBe("default@example.test");
+          const events = yield* Stream.toQueue(service.autoSwitchEvents, { capacity: "unbounded" });
+          const nextSwitch = Effect.gen(function* () {
+            for (;;) {
+              const event = yield* Queue.take(events);
+              if (event._tag === "switched") return event;
+            }
+          });
+          // The switch's own probe will lose its usage request.
+          yield* live.failUsage(true);
+          yield* service.setAutoSwitch({ driver: "claudeAgent", enabled: true });
+          expect(yield* nextSwitch).toMatchObject({
+            fromAccountId: seeded.ids.default,
+            toAccountId: seeded.ids.b,
+          });
+          expect(yield* live.nextRefresh).toBe("b@example.test");
+          // b's identity, Default's retained windows: b keeps its own saved numbers.
+          expect(sessionUsed(live.snapshotNow()?.usageLimits)).toBe(100);
+          let active = yield* activeAccount;
+          expect(active).toMatchObject({ id: seeded.ids.b, usagePending: true });
+          expect(sessionUsed(active.usage)).toBe(10);
+          // A turn still on Default's token reports Default's limits.
+          yield* live.rateLimit(accountLimits(100, 41, resetsOf.default).windows);
+          active = yield* activeAccount;
+          expect(active).toMatchObject({ id: seeded.ids.b, usagePending: true });
+          expect(sessionUsed(active.usage)).toBe(10);
+          expect(sessionUsed(yield* stored(seeded.ids.b!))).toBe(10);
+
+          // A probe that measured b verifies it.
+          yield* live.failUsage(false);
+          yield* live.refreshClaude;
+          expect(yield* live.nextRefresh).toBe("b@example.test");
+          active = yield* activeAccount;
+          expect(active.usagePending).toBeUndefined();
+          expect(sessionUsed(active.usage)).toBe(10);
+          // Default's token still reports after the verification: b keeps its accepted numbers.
+          yield* live.rateLimit(accountLimits(100, 41, resetsOf.default).windows);
+          active = yield* activeAccount;
+          expect(active.usagePending).toBe(true);
+          expect(sessionUsed(active.usage)).toBe(10);
+
+          // b's own turn reports its limit running low: that one counts and moves on.
+          yield* live.rateLimit(accountLimits(95, 21, resetsOf.b).windows);
+          const next = yield* nextSwitch;
+          // Never the cascade on Default's 0% left.
+          expect(next).toMatchObject({ fromAccountId: seeded.ids.b, toAccountId: seeded.ids.c });
+          expect(next.reason).toContain("b has 5% of its 5-hour limit left");
+          // The switch-away filed b's own verified numbers, never Default's.
+          const filed = yield* stored(seeded.ids.b!);
+          expect(sessionUsed(filed)).toBe(95);
+          expect(filed?.windows.find((window) => window.id === "five_hour")?.resetsAt).toBe(
+            resetsOf.b.session,
+          );
+        }),
+        false,
+        {
+          claudeHomePath: NodePath.join(root, "claude"),
+          probe,
+          providerRegistry: live.registry,
+          invalidateClaudeCaches: live.invalidate,
+          before: async () => {
+            seeded = await seedClaudeStores(["b", "c"]);
+            const registry = await createProviderAccountRegistry({ stateDir: seeded.stateDir });
+            for (const name of ["b", "c"] as const)
+              await registry.update(seeded.ids[name]!, {
+                lastUsage: {
+                  email: `${name}@example.test`,
+                  accountUuid: `uuid-${name}`,
+                  checkedAt,
+                  usage: usage.get(`${name}@example.test`),
+                },
+              });
+          },
+        },
+      );
+    },
+  );
+
+  it.effect("drops a usage probe that reports another account's identity", () => {
+    let seeded: Awaited<ReturnType<typeof seedClaudeStores>>;
+    const probe: Probe = (() =>
+      Effect.succeed({
+        checkedAt: "2026-09-23T13:00:00.000Z",
+        status: "ready",
+        email: "someone-else@example.test",
+        usage: accountLimits(100, 90, resetsOf.default),
+      } satisfies AccountUsage)) as unknown as Probe;
+    return run(
+      Effect.gen(function* () {
+        const service = yield* ProviderAccountsService;
+        const b = ProviderAccountId.make(seeded.ids.b!);
+        yield* service.refreshUsage({ accountIds: [b], force: true });
+        const registry = yield* Effect.promise(() =>
+          createProviderAccountRegistry({ stateDir: seeded.stateDir }),
+        );
+        const entry = yield* Effect.promise(() => registry.get(b));
+        expect(entry.lastUsage).toMatchObject({ email: "b@example.test", checkedAt });
+        expect(sessionUsed(entry.lastUsage?.usage)).toBe(10);
+      }),
+      false,
+      {
+        claudeHomePath: NodePath.join(root, "claude"),
+        probe,
+        before: async () => {
+          seeded = await seedClaudeStores(["b"]);
+          const registry = await createProviderAccountRegistry({ stateDir: seeded.stateDir });
+          await registry.update(seeded.ids.b!, {
+            lastUsage: {
+              email: "b@example.test",
+              accountUuid: "uuid-b",
+              checkedAt,
+              usage: accountLimits(10, 20, resetsOf.b),
+            },
+          });
+        },
+      },
+    );
+  });
 
   it.effect(
     "recovers a journal before exposing the checked-out account after service restart",
