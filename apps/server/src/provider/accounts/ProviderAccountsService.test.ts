@@ -1,3 +1,5 @@
+// fork: real filesystem/CLI fixtures use native I/O, wall-clock timestamps and injected failures.
+// @effect-diagnostics globalDate:off globalDateInEffect:off globalErrorInEffectFailure:off globalTimers:off nodeBuiltinImport:off preferSchemaOverJson:off
 // fork: provider accounts
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
@@ -41,6 +43,30 @@ import {
 import { makeProviderAccountsRpcHandlers } from "./providerAccountsRpcHandlers.ts";
 import type { AccountUsage, probeAccountUsage } from "./ProviderAccountUsage.ts";
 import type { ClaudeWindowPrimeLaunch, runClaudeWindowPrime } from "./ClaudeWindowPrime.ts";
+
+// The service fixture seeds credential files; never use the host's macOS Keychain.
+vi.mock("./ClaudeCredentialSwitch.ts", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./ClaudeCredentialSwitch.ts")>();
+  return {
+    ...actual,
+    switchClaudeCredentials: (
+      input: Parameters<typeof actual.switchClaudeCredentials>[0],
+      deps: Parameters<typeof actual.switchClaudeCredentials>[1] = {},
+    ) =>
+      actual.switchClaudeCredentials(input, {
+        credentials: actual.claudeFileCredentialAdapter,
+        ...deps,
+      }),
+    recoverClaudeCredentialSwitch: (
+      input: Parameters<typeof actual.recoverClaudeCredentialSwitch>[0],
+      deps: Parameters<typeof actual.recoverClaudeCredentialSwitch>[1] = {},
+    ) =>
+      actual.recoverClaudeCredentialSwitch(input, {
+        credentials: actual.claudeFileCredentialAdapter,
+        ...deps,
+      }),
+  };
+});
 
 type Probe = typeof probeAccountUsage;
 const idleProbe = () => Effect.never;
@@ -264,8 +290,7 @@ describe("ProviderAccountsService", () => {
         ),
       );
     }).pipe(
-      Effect.provide(instanceLayer),
-      Effect.provide(dependencies),
+      Effect.provide(instanceLayer.pipe(Layer.provideMerge(dependencies))),
       Effect.scoped,
       Effect.provide(NodeServices.layer),
     );

@@ -1,3 +1,5 @@
+// fork: native credential/CLI boundary uses Node I/O and wall-clock timing outside the Effect runtime.
+// @effect-diagnostics globalTimers:off
 // fork: provider accounts — CLI-owned credentials, never copied between homes.
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodeChildProcess from "node:child_process";

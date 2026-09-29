@@ -1,3 +1,5 @@
+// fork: native credential/CLI boundary uses Node I/O and wall-clock timing outside the Effect runtime.
+// @effect-diagnostics globalDate:off nodeBuiltinImport:off
 // fork: append-only record of what the account switcher did, per environment.
 import * as NodeCrypto from "node:crypto";
 import * as NodeFSP from "node:fs/promises";

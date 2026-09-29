@@ -1,3 +1,5 @@
+// fork: real filesystem/CLI fixtures use native I/O, wall-clock timestamps and injected failures.
+// @effect-diagnostics globalDate:off nodeBuiltinImport:off
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 import * as NodeOS from "node:os";
@@ -9,12 +11,22 @@ import {
   ClaudeCredentialSwitchError,
   createClaudeKeychainCredentialAdapter,
   createSystemClaudeKeychain,
-  recoverClaudeCredentialSwitch,
-  switchClaudeCredentials,
+  recoverClaudeCredentialSwitch as recoverCredentials,
+  switchClaudeCredentials as switchCredentials,
   type ClaudeCredentialAdapter,
   type ClaudeCredentialSwitchInput,
   type ClaudeCredentialSwitchPhase,
 } from "./ClaudeCredentialSwitch.ts";
+
+// File-backed fixtures must not depend on or access the host Keychain.
+const switchClaudeCredentials = (
+  input: Parameters<typeof switchCredentials>[0],
+  deps: Parameters<typeof switchCredentials>[1] = {},
+) => switchCredentials(input, { credentials: claudeFileCredentialAdapter, ...deps });
+const recoverClaudeCredentialSwitch = (
+  input: Parameters<typeof recoverCredentials>[0],
+  deps: Parameters<typeof recoverCredentials>[1] = {},
+) => recoverCredentials(input, { credentials: claudeFileCredentialAdapter, ...deps });
 
 const oauth = (name: string) => ({
   accessToken: `access-${name}`,

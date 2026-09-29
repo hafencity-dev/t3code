@@ -1,3 +1,5 @@
+// fork: real filesystem/CLI fixtures use native I/O, wall-clock timestamps and injected failures.
+// @effect-diagnostics globalDate:off
 // fork: account rotation scenarios use fixed time and no provider I/O.
 import { ProviderAccountId, type ServerProviderUsageWindow } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";

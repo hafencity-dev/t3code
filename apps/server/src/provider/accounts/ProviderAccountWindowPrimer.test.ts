@@ -1,3 +1,5 @@
+// fork: real filesystem/CLI fixtures use native I/O, wall-clock timestamps and injected failures.
+// @effect-diagnostics globalDate:off
 import { describe, expect, it } from "@effect/vitest";
 import {
   ProviderAccountError,

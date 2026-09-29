@@ -1,3 +1,5 @@
+// fork: native credential/CLI boundary uses Node I/O and wall-clock timing outside the Effect runtime.
+// @effect-diagnostics nodeBuiltinImport:off
 // fork: provider accounts
 import * as NodeFSP from "node:fs/promises";
 

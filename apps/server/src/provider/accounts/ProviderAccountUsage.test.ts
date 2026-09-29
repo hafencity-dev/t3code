@@ -1,3 +1,5 @@
+// fork: real filesystem/CLI fixtures use native I/O, wall-clock timestamps and injected failures.
+// @effect-diagnostics globalDate:off globalDateInEffect:off globalErrorInEffectFailure:off preferSchemaOverJson:off
 // fork: provider accounts
 import { ClaudeSettings, ProviderAccountId } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";

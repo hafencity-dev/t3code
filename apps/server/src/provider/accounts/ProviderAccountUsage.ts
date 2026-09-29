@@ -1,5 +1,6 @@
 // fork: provider accounts
-import type {
+import {
+  ProviderAccountError,
   ClaudeSettings,
   CodexSettings,
   ProviderAccountId,
@@ -288,7 +289,11 @@ export const makeAccountUsageCache = <E, R>(dependencies: {
           permits.withPermit,
           Effect.flatMap((value) =>
             value.usage?.unavailable?.reason === "probeFailed"
-              ? Effect.fail(new Error(value.usage.unavailable.message ?? "Usage probe failed"))
+              ? Effect.fail(
+                  new ProviderAccountError({
+                    message: value.usage.unavailable.message ?? "Usage probe failed",
+                  }),
+                )
               : Effect.succeed(value),
           ),
           Effect.map((value): AccountUsage => {

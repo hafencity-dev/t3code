@@ -1,3 +1,5 @@
+// fork: real filesystem/CLI fixtures use native I/O, wall-clock timestamps and injected failures.
+// @effect-diagnostics globalDate:off globalTimers:off nodeBuiltinImport:off
 import * as NodeFS from "node:fs";
 import * as NodeFSP from "node:fs/promises";
 import * as NodeModule from "node:module";
@@ -56,7 +58,10 @@ describe("withClaudeCredentialLocks", () => {
   let home: string;
 
   beforeEach(async () => {
-    root = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "claude-credential-lock-"));
+    // Lock acquisition resolves symlinks, including macOS /var -> /private/var.
+    root = await NodeFSP.realpath(
+      await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "claude-credential-lock-")),
+    );
     home = NodePath.join(root, "home");
     await NodeFSP.mkdir(home);
   });

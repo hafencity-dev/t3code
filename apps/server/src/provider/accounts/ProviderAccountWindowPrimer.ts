@@ -163,7 +163,10 @@ export const makeProviderAccountWindowPrimer = Effect.fn("makeProviderAccountWin
       return current ? Fiber.interrupt(current) : Effect.void;
     });
     const setState = Effect.fnUntraced(function* (next: ProviderAccountWindowPrimerState) {
-      const changed = JSON.stringify(next) !== JSON.stringify(state);
+      const changed =
+        next.nextPrimeAt !== state.nextPrimeAt ||
+        next.nextPrimeAccountId !== state.nextPrimeAccountId ||
+        next.message !== state.message;
       state = next;
       if (changed) yield* deps.publish;
     });

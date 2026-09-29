@@ -1,3 +1,5 @@
+// fork: real filesystem/CLI fixtures use native I/O, wall-clock timestamps and injected failures.
+// @effect-diagnostics nodeBuiltinImport:off
 import * as NodeEvents from "node:events";
 import * as NodeStream from "node:stream";
 import type * as NodeChildProcess from "node:child_process";

@@ -1,3 +1,5 @@
+// fork: native credential/CLI boundary uses Node I/O and wall-clock timing outside the Effect runtime.
+// @effect-diagnostics globalDate:off globalDateInEffect:off nodeBuiltinImport:off
 // fork: provider accounts
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
@@ -23,7 +25,18 @@ import {
   type ServerProvider,
   type ServerSettings,
 } from "@t3tools/contracts";
-import { Clock, Context, DateTime, Effect, Layer, PubSub, Queue, Semaphore, Stream } from "effect";
+import {
+  Clock,
+  Context,
+  Data,
+  DateTime,
+  Effect,
+  Layer,
+  PubSub,
+  Queue,
+  Semaphore,
+  Stream,
+} from "effect";
 import { makeProviderAccountAutoSwitch } from "./ProviderAccountAutoSwitch.ts";
 import {
   createProviderAccountActivityLog,
@@ -122,10 +135,18 @@ function claudeCredentialLocation(state: {
   };
 }
 
+// Preserve the native cause for local classification; only redacted typed errors cross RPCs.
+class AccountStorageFailure extends Data.TaggedError("AccountStorageFailure")<{
+  readonly cause: unknown;
+}> {}
+
 /** Like `io`, but interruption abandons the promise; only for waits a finalizer aborts. */
 const interruptibleIo = <A>(operation: () => Promise<A>) =>
-  Effect.tryPromise({ try: operation, catch: (cause) => cause }).pipe(
-    Effect.catch((cause) => {
+  Effect.tryPromise({
+    try: operation,
+    catch: (cause) => new AccountStorageFailure({ cause }),
+  }).pipe(
+    Effect.catch(({ cause }) => {
       if (
         cause instanceof ProviderAccountRegistryGuardError ||
         cause instanceof ClaudeCredentialSwitchError ||
@@ -444,11 +465,11 @@ const make = (
               ...claudeCredentialLocation(claude),
               commit: (result) => commitClaudeSwitch(registry, result),
             }),
-          catch: (cause) => cause,
+          catch: (cause) => new AccountStorageFailure({ cause }),
         }).pipe(Effect.uninterruptible),
       );
       if (outcome._tag === "Failure") {
-        const cause = outcome.failure;
+        const cause = outcome.failure.cause;
         claudeBarrier =
           cause instanceof ClaudeCredentialSwitchError
             ? cause.message
@@ -1728,8 +1749,11 @@ const make = (
     }, mutation.withPermit);
 
     const readActivity = (input: ProviderAccountsActivityInput) =>
-      Effect.tryPromise({ try: () => activity.read(input), catch: (cause) => cause }).pipe(
-        Effect.catch((cause) =>
+      Effect.tryPromise({
+        try: () => activity.read(input),
+        catch: (cause) => new AccountStorageFailure({ cause }),
+      }).pipe(
+        Effect.catch(({ cause }) =>
           Effect.logWarning("Could not read the account activity log", {
             causeType: cause instanceof Error ? cause.name : typeof cause,
           }).pipe(

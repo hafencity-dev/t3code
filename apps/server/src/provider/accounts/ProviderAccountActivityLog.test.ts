@@ -1,3 +1,5 @@
+// fork: real filesystem/CLI fixtures use native I/O, wall-clock timestamps and injected failures.
+// @effect-diagnostics globalDate:off nodeBuiltinImport:off
 // fork: provider accounts
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
