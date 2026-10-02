@@ -42,6 +42,7 @@ type RpcMethod<TTag extends EnvironmentRpcTag> = WsRpcProtocolClient[TTag];
 
 export type EnvironmentSubscriptionRpcTag =
   | typeof WS_METHODS.providerAccountsAutoSwitchEvents // fork: provider accounts
+  | typeof WS_METHODS.codexAuthCallbackSubscribe
   | typeof WS_METHODS.providerAuthSubscribe
   | typeof WS_METHODS.providerInstallSubscribe
   | typeof ORCHESTRATION_WS_METHODS.subscribeShell
@@ -64,6 +65,7 @@ export type EnvironmentSubscriptionRpcTag =
 
 export type EnvironmentStreamCommandRpcTag =
   | typeof WS_METHODS.providerAccountsStartLogin // fork: provider accounts
+  | typeof WS_METHODS.chatGptHandoffSubscribe
   | typeof WS_METHODS.cloudInstallRelayClient
   | typeof WS_METHODS.serverUpdateServerWithProgress
   // fork: f5 — same one-shot login lifecycle as provider sign-in.
