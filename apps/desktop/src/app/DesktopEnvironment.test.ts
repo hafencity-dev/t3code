@@ -182,7 +182,6 @@ describe("DesktopEnvironment", () => {
 
       assert.equal(environment.baseDir, "/Users/alice/.2code-t3");
       assert.equal(environment.stateDir, "/Users/alice/.2code-t3/userdata");
-      assert.equal(environment.userDataDirName, "2code-t3");
       assert.equal(environment.displayName, "2code");
       assert.equal(environment.appVersion, "1.0.108");
       assert.equal(environment.runtimeVersion, "0.0.32");

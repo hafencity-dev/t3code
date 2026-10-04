@@ -9,7 +9,8 @@ import { ChildProcessSpawner } from "effect/unstable/process";
 
 import { WS_METHODS } from "@t3tools/contracts";
 import type { VcsInvalidationDomain } from "@t3tools/contracts";
-import { ProjectionSnapshotQuery } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import { ProjectionStoreV2 } from "../../orchestration-v2/ProjectionStore.ts";
+import { ProjectStoreV2 } from "../../orchestration-v2/ProjectStore.ts";
 import * as ProviderRegistry from "../../provider/Services/ProviderRegistry.ts";
 import * as ServerSettings from "../../serverSettings.ts";
 import * as TextGeneration from "../../textGeneration/TextGeneration.ts";
@@ -38,6 +39,11 @@ const makeLayer = (options: {
 }) =>
   WorkingCopy.layer.pipe(
     Layer.provide(
+      Layer.mock(ProjectStoreV2)({
+        listShells: () => Effect.succeed([{ workspaceRoot: REPO }] as never),
+      }),
+    ),
+    Layer.provide(
       Layer.mock(VcsDriverRegistry.VcsDriverRegistry)({
         resolve: (input) =>
           Effect.succeed({
@@ -56,7 +62,7 @@ const makeLayer = (options: {
       }),
     ),
     Layer.provide(
-      Layer.mock(ProjectionSnapshotQuery)({
+      Layer.mock(ProjectionStoreV2)({
         getShellSnapshot: () =>
           Effect.succeed({
             snapshotSequence: 0,

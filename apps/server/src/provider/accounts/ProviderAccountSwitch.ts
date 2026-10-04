@@ -1,9 +1,6 @@
-import * as NodeCrypto from "node:crypto";
-
 import {
   ClaudeSettings,
   CodexSettings,
-  CommandId,
   defaultInstanceIdForDriver,
   ProviderAccountBusyError,
   ProviderAccountError,
@@ -12,10 +9,10 @@ import {
   type ServerSettings,
   type ServerSettingsPatch,
 } from "@t3tools/contracts";
-import { DateTime, Effect, Equal, Option, PubSub, Schema, Stream } from "effect";
+import { Effect, Equal, PubSub, Schema } from "effect";
 
-import type { OrchestrationEngineShape } from "../../orchestration/Services/OrchestrationEngine.ts";
-import type { ProjectionSnapshotQueryShape } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import type { ProviderSessionManagerV2Shape } from "../../orchestration-v2/ProviderSessionManager.ts";
+import type { ProjectionStoreV2Shape } from "../../orchestration-v2/ProjectionStore.ts";
 import type { ServerSettingsService } from "../../serverSettings.ts";
 import type { ProviderInstanceRegistryShape } from "../Services/ProviderInstanceRegistry.ts";
 
@@ -94,8 +91,8 @@ export function makeProviderAccountSwitchPatch(
 
 export function makeProviderAccountSwitch(dependencies: {
   readonly settings: Pick<ServerSettingsService["Service"], "getSettings" | "updateSettings">;
-  readonly engine: Pick<OrchestrationEngineShape, "subscribeDomainEvents" | "dispatch">;
-  readonly snapshots: Pick<ProjectionSnapshotQueryShape, "getShellSnapshot">;
+  readonly sessions: Pick<ProviderSessionManagerV2Shape, "closeInstance">;
+  readonly snapshots: Pick<ProjectionStoreV2Shape, "getShellSnapshot">;
   readonly instances: Pick<ProviderInstanceRegistryShape, "getInstance" | "subscribeChanges">;
 }) {
   const switchAccount = Effect.fn("ProviderAccountSwitch.switchAccount")(function* (
@@ -112,12 +109,12 @@ export function makeProviderAccountSwitch(dependencies: {
       Effect.map((snapshot) =>
         snapshot.threads.filter(
           (thread) =>
-            thread.session !== null &&
-            (thread.session.providerInstanceId ?? thread.session.providerName) === instanceId &&
-            (thread.latestTurn?.state === "running" ||
-              thread.session.activeTurnId !== null ||
-              thread.session.status === "starting" ||
-              thread.session.status === "running"),
+            thread.providerInstanceId === instanceId &&
+            (thread.activeRunId !== null ||
+              thread.status === "preparing" ||
+              thread.status === "running" ||
+              thread.status === "waiting" ||
+              (thread.pendingBackgroundTasks?.length ?? 0) > 0),
         ),
       ),
     );
@@ -126,49 +123,17 @@ export function makeProviderAccountSwitch(dependencies: {
       return yield* new ProviderAccountBusyError({ runningTurnCount: running.length });
     }
 
-    for (const thread of running) {
-      yield* Effect.scoped(
-        Effect.gen(function* () {
-          // Acquire first: a fast reactor may emit its completion before dispatch returns.
-          const events = yield* dependencies.engine.subscribeDomainEvents;
-          const createdAt = DateTime.formatIso(yield* DateTime.now);
-          const receipt = yield* dependencies.engine
-            .dispatch({
-              type: "thread.session.stop",
-              commandId: CommandId.make(`provider-account-switch:${NodeCrypto.randomUUID()}`),
-              threadId: thread.id,
-              createdAt,
-            })
-            .pipe(Effect.mapError((error) => new ProviderAccountError({ message: error.message })));
-          const completion = yield* events.pipe(
-            Stream.filter(
-              (event) =>
-                event.sequence > receipt.sequence &&
-                ((event.type === "thread.session-set" &&
-                  event.payload.threadId === thread.id &&
-                  event.payload.session.status === "stopped" &&
-                  event.payload.session.updatedAt === createdAt) ||
-                  (event.type === "thread.activity-appended" &&
-                    event.payload.threadId === thread.id &&
-                    event.payload.activity.kind === "provider.session.stop.failed" &&
-                    event.payload.activity.createdAt === createdAt)),
-            ),
-            Stream.runHead,
-            Effect.timeout(20_000),
-            Effect.catchTag("TimeoutError", () =>
-              Effect.fail(
-                new ProviderAccountError({
-                  message: `Timed out stopping session for thread ${thread.id}.`,
-                }),
-              ),
-            ),
-          );
-          if (Option.isNone(completion) || completion.value.type === "thread.activity-appended") {
-            return yield* new ProviderAccountError({
-              message: `Could not stop session for thread ${thread.id}.`,
-            });
-          }
-        }),
+    if (target.interruptRunning) {
+      // Use V2's explicit logout/shutdown path and wait for its release records.
+      // A session-detached event alone is only a request, not a shutdown receipt.
+      yield* dependencies.sessions.closeInstance(instanceId).pipe(
+        Effect.timeout(20_000),
+        Effect.catchTag("TimeoutError", () =>
+          Effect.fail(
+            new ProviderAccountError({ message: "Timed out stopping provider sessions." }),
+          ),
+        ),
+        Effect.mapError((error) => new ProviderAccountError({ message: error.message })),
       );
     }
 

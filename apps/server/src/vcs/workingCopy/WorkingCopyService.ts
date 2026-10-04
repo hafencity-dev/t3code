@@ -63,7 +63,8 @@ import {
   type WorkingCopyStatusResult,
   type WorkingCopyTagCommitInput,
 } from "@t3tools/contracts";
-import { ProjectionSnapshotQuery } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import * as ProjectionStore from "../../orchestration-v2/ProjectionStore.ts";
+import * as ProjectStore from "../../orchestration-v2/ProjectStore.ts";
 // fork: f4 AI commit message — the existing text-generation stack, reused whole.
 import * as ProviderRegistry from "../../provider/Services/ProviderRegistry.ts";
 import * as ServerSettings from "../../serverSettings.ts";
@@ -185,7 +186,8 @@ export class WorkingCopyService extends Context.Service<
 
 export const make = Effect.gen(function* () {
   const registry = yield* VcsDriverRegistry.VcsDriverRegistry;
-  const projections = yield* ProjectionSnapshotQuery;
+  const projections = yield* ProjectionStore.ProjectionStoreV2;
+  const projects = yield* ProjectStore.ProjectStoreV2;
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const semaphores = yield* Ref.make(new Map<string, Semaphore.Semaphore>());
@@ -205,7 +207,8 @@ export const make = Effect.gen(function* () {
       .getShellSnapshot()
       .pipe(Effect.orElseSucceed(() => ({ projects: [], threads: [] }) as const));
     const roots = new Set<string>();
-    for (const project of snapshot.projects) {
+    const projectShells = yield* projects.listShells().pipe(Effect.orElseSucceed(() => []));
+    for (const project of projectShells) {
       roots.add(normalizeContainmentPath(project.workspaceRoot));
     }
     for (const thread of snapshot.threads) {

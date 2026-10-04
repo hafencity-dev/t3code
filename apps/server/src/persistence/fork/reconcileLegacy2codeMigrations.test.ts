@@ -73,17 +73,23 @@ layer("reconcileLegacy2codeMigrationLedger", (it) => {
       assert.strictEqual(forkLedger.at(-1)?.migration_id, 52);
       assert.strictEqual(forkLedger[40]?.name, "ReconcileForkMigrationCollisions");
 
-      // The regular startup path repairs the ledger and then applies 52 and 53.
+      // The regular startup path repairs the ledger and then applies the remaining migrations, including V2.
       const executed = yield* runMigrations();
 
       assert.deepStrictEqual(
         executed.map(([id, name]) => `${id}_${name}`),
-        ["52_ProjectionThreadTitleState", "53_PullRequestFilesViewed"],
+        [
+          "52_ProjectionThreadTitleState",
+          "53_PullRequestFilesViewed",
+          "54_ProjectionThreadsAutoSettleDisabledAt",
+          "55_OrchestrationV2",
+          "56_RemoveRedundantProjectionIndexes",
+        ],
       );
       const repaired = yield* readLedger;
       assert.deepStrictEqual(repaired.slice(0, upstreamLedger.length), upstreamLedger);
-      assert.strictEqual(repaired.length, upstreamLedger.length + 2);
-      assert.strictEqual(repaired.at(-1)?.name, "PullRequestFilesViewed");
+      assert.strictEqual(repaired.length, upstreamLedger.length + 5);
+      assert.strictEqual(repaired.at(-1)?.name, "RemoveRedundantProjectionIndexes");
 
       // Running again changes nothing.
       assert.strictEqual(yield* reconcileLegacy2codeMigrationLedger(), false);

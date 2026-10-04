@@ -6,7 +6,7 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import { NodeServices } from "@effect/platform-node";
 import {
-  OrchestrationShellSnapshot,
+  OrchestrationV2ThreadShellSnapshot,
   ProviderAccountId,
   ProviderInstanceId,
   ProviderDriverKind,
@@ -19,8 +19,10 @@ import { TestClock } from "effect/testing";
 import { afterEach, beforeEach, vi } from "vite-plus/test";
 import { describe, expect, it } from "@effect/vitest";
 import * as ServerConfig from "../../config.ts";
-import { OrchestrationEngineService } from "../../orchestration/Services/OrchestrationEngine.ts";
-import { ProjectionSnapshotQuery } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import { ThreadManagementService } from "../../orchestration-v2/ThreadManagementService.ts";
+import { ProviderSessionManagerV2 } from "../../orchestration-v2/ProviderSessionManager.ts";
+import { accountThreadShell } from "./accountTestFixtures.ts";
+import { ProjectionStoreV2 } from "../../orchestration-v2/ProjectionStore.ts";
 import * as ServerSettings from "../../serverSettings.ts";
 import { makeProviderRegistryLayer } from "../testUtils/providerRegistryMock.ts";
 import { ProviderInstanceRegistry } from "../Services/ProviderInstanceRegistry.ts";
@@ -87,8 +89,10 @@ const provider = decodeProvider({
   models: [],
   usageLimits: { checkedAt, windows: [] },
 });
-const decodeShell = Schema.decodeUnknownSync(OrchestrationShellSnapshot);
+const decodeShell = Schema.decodeUnknownSync(OrchestrationV2ThreadShellSnapshot);
 const shell = decodeShell({
+  schemaVersion: 2,
+  archivedThreads: [],
   snapshotSequence: 0,
   updatedAt: checkedAt,
   projects: [],
@@ -182,44 +186,16 @@ describe("ProviderAccountsService", () => {
         },
       }),
       providerLayer,
-      Layer.mock(OrchestrationEngineService)({
-        subscribeDomainEvents: Effect.succeed(Stream.empty),
-      }),
-      Layer.mock(ProjectionSnapshotQuery)({
+      Layer.mock(ThreadManagementService)({ streamDomainEvents: Stream.empty }),
+      Layer.mock(ProviderSessionManagerV2)({ closeInstance: () => Effect.void }),
+      Layer.mock(ProjectionStoreV2)({
         getShellSnapshot: () =>
           Effect.succeed(
             !options.runningClaude
               ? shell
               : decodeShell({
                   ...shell,
-                  threads: [
-                    {
-                      id: "claude-running",
-                      projectId: "project-1",
-                      title: "Running Claude",
-                      modelSelection: { instanceId: claudeId, model: "test-model" },
-                      runtimeMode: "full-access",
-                      branch: null,
-                      worktreePath: null,
-                      createdAt: checkedAt,
-                      updatedAt: checkedAt,
-                      latestTurn: null,
-                      latestUserMessageAt: null,
-                      hasPendingApprovals: false,
-                      hasPendingUserInput: false,
-                      hasActionableProposedPlan: false,
-                      session: {
-                        threadId: "claude-running",
-                        providerName: "claudeAgent",
-                        providerInstanceId: claudeId,
-                        status: "running",
-                        activeTurnId: "turn-1",
-                        runtimeMode: "full-access",
-                        lastError: null,
-                        updatedAt: checkedAt,
-                      },
-                    },
-                  ],
+                  threads: [accountThreadShell(claudeId)],
                 }),
           ),
       }),
@@ -255,7 +231,7 @@ describe("ProviderAccountsService", () => {
                     get snapshot(): never {
                       throw new Error("Unused snapshot");
                     },
-                    get adapter(): never {
+                    get orchestrationAdapter(): never {
                       throw new Error("Unused adapter");
                     },
                     get textGeneration(): never {
@@ -748,8 +724,9 @@ describe("ProviderAccountsService", () => {
     },
   );
 
-  for (const identity of ["other@example.test", "new@example.test", "default@example.test"]) {
-    it.effect(`re-login persists authoritative identity ${identity}`, () => {
+  it.effect.each(["other@example.test", "new@example.test", "default@example.test"])(
+    "re-login persists authoritative identity %s",
+    (identity) => {
       let callbacks: ProviderAccountLoginOptions;
       return run(
         Effect.gen(function* () {
@@ -800,8 +777,8 @@ describe("ProviderAccountsService", () => {
           },
         },
       );
-    });
-  }
+    },
+  );
 
   it.effect(
     "re-login of Default or of an account's own identity is never rejected as a duplicate",

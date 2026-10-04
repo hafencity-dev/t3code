@@ -28,9 +28,8 @@ import * as Schema from "effect/Schema";
 import { writeFileStringAtomically } from "../atomicWrite.ts";
 import * as ServerConfig from "../config.ts";
 import * as ServerSettings from "../serverSettings.ts";
-import * as OrchestrationEngine from "../orchestration/Services/OrchestrationEngine.ts";
-import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
-import * as ProviderSessionDirectory from "../provider/Services/ProviderSessionDirectory.ts";
+import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
+import * as ProjectService from "../project/ProjectService.ts";
 
 const MIGRATION_DIRECTORY_NAME = "legacy-2code-electron-v1";
 const IMPORT_MANIFEST_FILE_NAME = "import.json";
@@ -155,9 +154,8 @@ export const importLegacy2CodeManifest = Effect.gen(function* () {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const serverConfig = yield* ServerConfig.ServerConfig;
-  const orchestrationEngine = yield* OrchestrationEngine.OrchestrationEngineService;
-  const projectionSnapshotQuery = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
-  const providerSessionDirectory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+  const orchestrationEngine = yield* Orchestrator.OrchestratorV2;
+  const projects = yield* ProjectService.ProjectService;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const paths = resolveLegacy2CodeImportPaths(serverConfig.stateDir, path);
 
@@ -199,8 +197,7 @@ export const importLegacy2CodeManifest = Effect.gen(function* () {
   let projectsCreated = 0;
   let projectsReused = 0;
   for (const [workspaceRoot, title] of uniqueProjects(manifest)) {
-    const existingProject =
-      yield* projectionSnapshotQuery.getActiveProjectByWorkspaceRoot(workspaceRoot);
+    const existingProject = yield* projects.getByWorkspaceRoot(workspaceRoot);
     if (Option.isSome(existingProject)) {
       projectIds.set(workspaceRoot, existingProject.value.id);
       projectsReused += 1;
@@ -208,13 +205,11 @@ export const importLegacy2CodeManifest = Effect.gen(function* () {
     }
 
     const projectId = stableProjectId(manifest, workspaceRoot);
-    yield* orchestrationEngine.dispatch({
-      type: "project.create",
+    yield* projects.create({
       commandId: stableCommandId("project-create", projectId),
       projectId,
       title,
       workspaceRoot,
-      createdAt: manifest.createdAt,
     });
     projectIds.set(workspaceRoot, projectId);
     projectsCreated += 1;
@@ -234,8 +229,8 @@ export const importLegacy2CodeManifest = Effect.gen(function* () {
 
     const threadId = stableThreadId(manifest, thread.legacyId);
     const modelSelection = modelSelectionForThread(thread);
-    const existingThread = yield* projectionSnapshotQuery.getThreadShellById(threadId);
-    if (Option.isNone(existingThread)) {
+    const existingThread = yield* orchestrationEngine.getThreadShell(threadId);
+    if (existingThread === null) {
       yield* orchestrationEngine.dispatch({
         type: "thread.create",
         commandId: stableCommandId("thread-create", threadId),
@@ -247,27 +242,23 @@ export const importLegacy2CodeManifest = Effect.gen(function* () {
         runtimeMode: "approval-required",
         branch: null,
         worktreePath: null,
-        createdAt: thread.createdAt ?? manifest.createdAt,
+        createdBy: "user",
+        creationSource: "server",
+        importedNativeThread: {
+          ref: {
+            driver: providerForThread(thread),
+            nativeId:
+              thread.provider === "claude"
+                ? thread.resumeCursor.resume
+                : thread.resumeCursor.threadId,
+            strength: "strong",
+          },
+        },
       });
       threadsCreated += 1;
     } else {
       threadsReused += 1;
     }
-
-    const provider = providerForThread(thread);
-    yield* providerSessionDirectory.upsert({
-      threadId,
-      provider,
-      providerInstanceId: ProviderInstanceId.make(provider),
-      adapterKey: provider,
-      status: "stopped",
-      runtimeMode: "approval-required",
-      resumeCursor: thread.resumeCursor,
-      runtimePayload: {
-        cwd: thread.projectPath,
-        modelSelection,
-      },
-    });
   }
 
   if (manifest.claudeCodexRouting) {

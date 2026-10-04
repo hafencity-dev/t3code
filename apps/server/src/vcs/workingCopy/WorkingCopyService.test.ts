@@ -11,7 +11,8 @@ import {
   WorkingCopyCwdDeniedError,
   WorkingCopyNothingStagedError,
 } from "@t3tools/contracts";
-import { ProjectionSnapshotQuery } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import { ProjectionStoreV2 } from "../../orchestration-v2/ProjectionStore.ts";
+import { ProjectStoreV2 } from "../../orchestration-v2/ProjectStore.ts";
 import * as ProviderRegistry from "../../provider/Services/ProviderRegistry.ts";
 import * as ServerSettings from "../../serverSettings.ts";
 import * as TextGeneration from "../../textGeneration/TextGeneration.ts";
@@ -36,26 +37,32 @@ interface Workspace {
 }
 
 const projectionsLayer = (workspace: Workspace) =>
-  Layer.mock(ProjectionSnapshotQuery)({
-    getShellSnapshot: () =>
-      Effect.succeed({
-        snapshotSequence: 0,
-        updatedAt: TEST_EPOCH,
-        projects: workspace.projectRoots.map((workspaceRoot, index) => ({
-          id: `project-${index}`,
-          title: `project-${index}`,
-          workspaceRoot,
-          defaultModelSelection: null,
-          scripts: [],
-          createdAt: TEST_EPOCH,
+  Layer.merge(
+    Layer.mock(ProjectStoreV2)({
+      listShells: () =>
+        Effect.succeed(workspace.projectRoots.map((workspaceRoot) => ({ workspaceRoot })) as never),
+    }),
+    Layer.mock(ProjectionStoreV2)({
+      getShellSnapshot: () =>
+        Effect.succeed({
+          snapshotSequence: 0,
           updatedAt: TEST_EPOCH,
-        })),
-        threads: workspace.worktreePaths.map((worktreePath, index) => ({
-          id: `thread-${index}`,
-          worktreePath,
-        })),
-      } as never),
-  });
+          projects: workspace.projectRoots.map((workspaceRoot, index) => ({
+            id: `project-${index}`,
+            title: `project-${index}`,
+            workspaceRoot,
+            defaultModelSelection: null,
+            scripts: [],
+            createdAt: TEST_EPOCH,
+            updatedAt: TEST_EPOCH,
+          })),
+          threads: workspace.worktreePaths.map((worktreePath, index) => ({
+            id: `thread-${index}`,
+            worktreePath,
+          })),
+        } as never),
+    }),
+  );
 
 /**
  * A registry that answers with a fixed repository root and a recorded

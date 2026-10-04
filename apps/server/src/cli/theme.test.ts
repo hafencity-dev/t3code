@@ -5,14 +5,11 @@ import * as NodePath from "node:path";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as ConfigProvider from "effect/ConfigProvider";
-import * as NetService from "@t3tools/shared/Net";
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
-import * as Layer from "effect/Layer";
-import * as TestConsole from "effect/testing/TestConsole";
 import { Command } from "effect/unstable/cli";
 
-import { cli } from "../bin.ts";
+import { themeCommand } from "./theme.ts";
 import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 
@@ -20,10 +17,10 @@ import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 // cannot use to make a file unreadable, so the failure never happens there.
 const windowsHost = HostProcessPlatform.defaultValue() === "win32";
 
+// Exercise the theme command without constructing unrelated server runtime layers.
+const cli = Command.make("t3").pipe(Command.withSubcommands([themeCommand]));
 const runCli = (args: ReadonlyArray<string>) =>
-  Command.runWith(cli, { version: "0.0.0" })(args).pipe(
-    Effect.provide(Layer.mergeAll(NodeServices.layer, NetService.layer, TestConsole.layer)),
-  );
+  Command.runWith(cli, { version: "0.0.0" })(args).pipe(Effect.provide(NodeServices.layer));
 
 const makeBaseDir = () => NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3code-theme-cli-"));
 

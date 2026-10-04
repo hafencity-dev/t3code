@@ -54,8 +54,9 @@ import type * as FileSystem from "effect/FileSystem";
 import type * as Path from "effect/Path";
 import type { ChildProcessSpawner } from "effect/unstable/process";
 import { ServerConfig } from "../../config.ts";
-import { OrchestrationEngineService } from "../../orchestration/Services/OrchestrationEngine.ts";
-import { ProjectionSnapshotQuery } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import * as ThreadManagement from "../../orchestration-v2/ThreadManagementService.ts";
+import * as ProviderSessionManager from "../../orchestration-v2/ProviderSessionManager.ts";
+import * as ProjectionStore from "../../orchestration-v2/ProjectionStore.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { resolveClaudeHomePath } from "../Drivers/ClaudeHome.ts";
 import { resolveCodexHomeLayout } from "../Drivers/CodexHomeLayout.ts";
@@ -324,8 +325,9 @@ const make = (
     const settings = yield* ServerSettingsService;
     const providers = yield* ProviderRegistry;
     const instances = yield* ProviderInstanceRegistry;
-    const engine = yield* OrchestrationEngineService;
-    const snapshots = yield* ProjectionSnapshotQuery;
+    const threads = yield* ThreadManagement.ThreadManagementService;
+    const sessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
+    const snapshots = yield* ProjectionStore.ProjectionStoreV2;
     const scope = yield* Effect.scope;
     const context = yield* Effect.context<
       FileSystem.FileSystem | Path.Path | ChildProcessSpawner.ChildProcessSpawner
@@ -520,7 +522,7 @@ const make = (
     const mutation = yield* Semaphore.make(1);
     // Bumped per group on every switch so an in-flight probe can tell it started earlier.
     const checkoutGeneration = { claudeAgent: 0, codex: 0 };
-    const switcher = makeProviderAccountSwitch({ settings, engine, snapshots, instances });
+    const switcher = makeProviderAccountSwitch({ settings, sessions, snapshots, instances });
     const observedAccounts = new Map<ProviderAccountDriver, { id: string; checkedAt?: string }>();
     const staleSnapshots = new Map<ProviderAccountDriver, string>();
     // Hot switches keep the instance running; see ClaudeHotSwitchUsageGuard for why its usage
@@ -1764,22 +1766,25 @@ const make = (
         ),
       );
 
-    // OrchestrationEngine commits projectEventDeferred's SQL projections before
-    // publishing domain events. Only attachment cleanup is deferred, so idle
-    // evaluations can read the updated shell immediately (no timer/poll needed).
-    const idleChanges = Stream.unwrap(engine.subscribeDomainEvents).pipe(
-      Stream.filter((event) => event.type === "thread.session-set"),
-      Stream.flatMap((event) => {
-        const instanceId =
-          event.payload.session.providerInstanceId ?? event.payload.session.providerName;
-        return Stream.fromIterable(
-          (["claudeAgent", "codex"] as const).filter(
-            (driver) =>
-              autoSwitch?.needsIdle(driver) &&
-              defaultInstanceIdForDriver(ProviderDriverKind.make(driver)) === instanceId,
-          ),
-        );
-      }),
+    // V2 publishes after projection commit; re-evaluate pending rotations on completion.
+    const idleChanges = threads.streamDomainEvents.pipe(
+      Stream.filter(
+        (event) =>
+          event.type === "run.updated" ||
+          event.type === "provider-session.detached" ||
+          event.type === "provider-session.updated" ||
+          event.type === "provider-thread.updated",
+      ),
+      Stream.catchCause((cause) =>
+        Stream.fromEffect(Effect.logWarning("Account idle observation failed", { cause })).pipe(
+          Stream.drain,
+        ),
+      ),
+      Stream.flatMap(() =>
+        Stream.fromIterable(
+          (["claudeAgent", "codex"] as const).filter((driver) => autoSwitch?.needsIdle(driver)),
+        ),
+      ),
     );
     autoSwitch = yield* makeProviderAccountAutoSwitch({
       read: (driver) =>

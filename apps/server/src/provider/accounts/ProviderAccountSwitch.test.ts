@@ -1,14 +1,15 @@
+import { accountThreadShell } from "./accountTestFixtures.ts";
+import { ProviderSessionId } from "@t3tools/contracts";
+import { ProviderSessionCloseError } from "../../orchestration-v2/ProviderSessionManager.ts";
 import { describe, expect, it } from "@effect/vitest";
 import {
   defaultInstanceIdForDriver,
-  OrchestrationEvent,
   ProviderDriverKind,
   ProviderInstanceId,
-  OrchestrationShellSnapshot,
   ServerSettings,
   type ServerSettingsPatch,
 } from "@t3tools/contracts";
-import { Deferred, Effect, Fiber, Path, PubSub, Queue, Schema, Semaphore, Stream } from "effect";
+import { Deferred, Effect, Fiber, Path, PubSub, Queue, Schema, Semaphore } from "effect";
 import { TestClock } from "effect/testing";
 
 import type { ProviderInstance } from "../ProviderDriver.ts";
@@ -21,44 +22,13 @@ import {
 } from "./ProviderAccountSwitch.ts";
 
 const decodeSettings = Schema.decodeUnknownSync(ServerSettings);
-const decodeSnapshot = Schema.decodeUnknownSync(OrchestrationShellSnapshot);
-const decodeEvent = Schema.decodeUnknownSync(OrchestrationEvent);
-const timestamp = "2026-09-23T12:00:00.000Z";
 const codexId = defaultInstanceIdForDriver(ProviderDriverKind.make("codex"));
-const snapshot = (instanceId = codexId) =>
-  decodeSnapshot({
-    snapshotSequence: 0,
-    projects: [],
-    updatedAt: timestamp,
-    threads: [
-      {
-        id: "thread-1",
-        projectId: "project-1",
-        title: "Running thread",
-        modelSelection: { instanceId, model: "test-model" },
-        runtimeMode: "full-access",
-        branch: null,
-        worktreePath: null,
-        createdAt: timestamp,
-        updatedAt: timestamp,
-        latestTurn: null,
-        latestUserMessageAt: null,
-        hasPendingApprovals: false,
-        hasPendingUserInput: false,
-        hasActionableProposedPlan: false,
-        session: {
-          threadId: "thread-1",
-          providerName: "codex",
-          providerInstanceId: instanceId,
-          status: "running",
-          activeTurnId: "turn-1",
-          runtimeMode: "full-access",
-          lastError: null,
-          updatedAt: timestamp,
-        },
-      },
-    ],
-  });
+const snapshot = (instanceId = codexId) => ({
+  schemaVersion: 2,
+  snapshotSequence: 0,
+  archivedThreads: [],
+  threads: [accountThreadShell(instanceId)],
+});
 
 const settings = decodeSettings({
   providers: { codex: { homePath: "/shared", shadowHomePath: "/old" } },
@@ -163,7 +133,7 @@ function makeInstance(): ProviderInstance {
     get snapshot(): never {
       throw new Error("Switch must not use a usage snapshot as a rebuild receipt");
     },
-    get adapter(): never {
+    get orchestrationAdapter(): never {
       throw new Error("Switch must not call an adapter directly");
     },
     get textGeneration(): never {
@@ -180,7 +150,6 @@ const makeHarness = Effect.fnUntraced(function* (
     blockRebuild?: boolean;
   } = {},
 ) {
-  const bus = yield* PubSub.unbounded<OrchestrationEvent>();
   const registryChanges = yield* PubSub.unbounded<void>();
   const patched = yield* Deferred.make<void>();
   const dispatched = yield* Deferred.make<void>();
@@ -237,61 +206,17 @@ const makeHarness = Effect.fnUntraced(function* (
         }),
     },
     snapshots: { getShellSnapshot: () => Effect.succeed(shell) },
-    engine: {
-      subscribeDomainEvents: trackSubscription.pipe(
-        Effect.andThen(PubSub.subscribe(bus)),
-        Effect.map((subscription) => {
-          order.push("subscribe");
-          return Stream.fromSubscription(subscription);
-        }),
-      ),
-      dispatch: (command) =>
+    sessions: {
+      closeInstance: () =>
         Effect.gen(function* () {
-          if (command.type !== "thread.session.stop") throw new Error("Unexpected command");
-          order.push("dispatch");
+          order.push("close");
           yield* Deferred.succeed(dispatched, undefined);
-          if (options.blockStop) return { sequence: 1 };
-          const payload = options.failStop
-            ? {
-                threadId: command.threadId,
-                activity: {
-                  id: "failure-1",
-                  tone: "error",
-                  kind: "provider.session.stop.failed",
-                  summary: "Failed",
-                  payload: {},
-                  turnId: null,
-                  createdAt: command.createdAt,
-                },
-              }
-            : {
-                threadId: command.threadId,
-                session: {
-                  ...shell.threads[0]!.session,
-                  status: "stopped",
-                  activeTurnId: null,
-                  updatedAt: command.createdAt,
-                },
-              };
-          // Publish while dispatch is still in flight: lazy stream subscription would miss this.
-          yield* PubSub.publish(
-            bus,
-            decodeEvent({
-              sequence: 2,
-              eventId: "event-2",
-              aggregateKind: "thread",
-              aggregateId: command.threadId,
-              occurredAt: command.createdAt,
-              commandId: null,
-              causationEventId: null,
-              correlationId: null,
-              metadata: {},
-              type: options.failStop ? "thread.activity-appended" : "thread.session-set",
-              payload,
-            }),
-          );
+          if (options.blockStop) return yield* Effect.never;
+          if (options.failStop)
+            return yield* new ProviderSessionCloseError({
+              providerSessionId: ProviderSessionId.make("session-1"),
+            });
           order.push("completion");
-          return { sequence: 1 };
         }),
     },
   });
@@ -364,9 +289,8 @@ describe("ProviderAccountSwitch orchestration", () => {
                 return reads === 1 ? { ...snapshot(), threads: [] } : snapshot();
               }),
           },
-          engine: {
-            subscribeDomainEvents: Effect.succeed(Stream.empty),
-            dispatch: () => Effect.die("Automatic switching must not interrupt a turn"),
+          sessions: {
+            closeInstance: () => Effect.die("Automatic switching must not interrupt a turn"),
           },
         });
         expect(
@@ -387,13 +311,12 @@ describe("ProviderAccountSwitch orchestration", () => {
     }),
   );
 
-  it.effect("subscribes before stop and patches only after completion", () =>
+  it.effect("awaits V2 session closure before patching", () =>
     Effect.gen(function* () {
       const harness = yield* makeHarness();
       yield* harness.switchAccount({ driver: "codex", homePath: "/new", interruptRunning: true });
       expect(harness.order).toEqual([
-        "subscribe",
-        "dispatch",
+        "close",
         "completion",
         "read-settings",
         "subscribe-registry",
@@ -403,7 +326,7 @@ describe("ProviderAccountSwitch orchestration", () => {
     }),
   );
 
-  it.effect("does not patch when the reactor reports stop failure", () =>
+  it.effect("does not patch when the V2 session shutdown fails", () =>
     Effect.gen(function* () {
       const harness = yield* makeHarness({ failStop: true });
       expect(
