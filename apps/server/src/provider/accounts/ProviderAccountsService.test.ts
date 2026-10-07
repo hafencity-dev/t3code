@@ -24,9 +24,9 @@ import { ProviderSessionManagerV2 } from "../../orchestration-v2/ProviderSession
 import { accountThreadShell } from "./accountTestFixtures.ts";
 import { ProjectionStoreV2 } from "../../orchestration-v2/ProjectionStore.ts";
 import * as ServerSettings from "../../serverSettings.ts";
-import { makeProviderRegistryLayer } from "../testUtils/providerRegistryMock.ts";
-import { ProviderInstanceRegistry } from "../Services/ProviderInstanceRegistry.ts";
-import { ProviderRegistry, type ProviderRegistryShape } from "../Services/ProviderRegistry.ts";
+import * as ProviderRegistryMock from "../testUtils/providerRegistryMock.ts";
+import { ProviderInstanceRegistry } from "../ProviderInstanceRegistry.ts";
+import { ProviderRegistry } from "../ProviderRegistry.ts";
 import type { ProviderInstance } from "../ProviderDriver.ts";
 import { ProviderAccountLogin, type ProviderAccountLoginOptions } from "./ProviderAccountLogin.ts";
 import { createProviderAccountRegistry } from "./ProviderAccountRegistry.ts";
@@ -130,10 +130,10 @@ describe("ProviderAccountsService", () => {
       environment?: ReadonlyArray<{ name: string; value: string; sensitive: boolean }>;
       probe?: Probe;
       runPrime?: typeof runClaudeWindowPrime;
-      refreshInstance?: ProviderRegistryShape["refreshInstance"];
+      refreshInstance?: ProviderRegistry["Service"]["refreshInstance"];
       providers?: ReadonlyArray<ServerProvider>;
       /** Overrides the static provider registry, e.g. with a live Claude snapshot. */
-      providerRegistry?: Effect.Effect<Partial<ProviderRegistryShape>>;
+      providerRegistry?: Effect.Effect<Partial<ProviderRegistry["Service"]>>;
       invalidateClaudeCaches?: Effect.Effect<void>;
     } = {},
   ) {
@@ -150,8 +150,8 @@ describe("ProviderAccountsService", () => {
                 ...(options.providerRegistry ? yield* options.providerRegistry : {}),
               });
             }),
-          ).pipe(Layer.provide(makeProviderRegistryLayer(snapshots)))
-        : makeProviderRegistryLayer(snapshots);
+          ).pipe(Layer.provide(ProviderRegistryMock.layer(snapshots)))
+        : ProviderRegistryMock.layer(snapshots);
     const dependencies = Layer.mergeAll(
       ServerConfig.layerTest(root, NodePath.join(root, "state")),
       ServerSettings.layerTest({
@@ -455,8 +455,6 @@ describe("ProviderAccountsService", () => {
         const handlers = makeProviderAccountsRpcHandlers({
           providerAccounts: service,
           currentSessionId: "test-session",
-          observeRpcEffect: (_method, effect) => effect,
-          observeRpcStream: (_method, stream) => stream,
         });
         const error = yield* handlers[WS_METHODS.providerAccountsSwitch]({
           accountId: managed.id,
@@ -1573,7 +1571,7 @@ describe("ProviderAccountsService", () => {
         refreshInstance: (instanceId: ProviderInstanceId) =>
           instanceId === claudeId ? refreshClaude : Effect.sync(all),
         streamChanges: Stream.fromPubSub(changes),
-      } satisfies Partial<ProviderRegistryShape>;
+      } satisfies Partial<ProviderRegistry["Service"]>;
     });
     return {
       registry,

@@ -5,7 +5,7 @@
  * cancels it; reconnecting must not silently begin a fresh authorization.
  */
 import { WS_METHODS, type ClaudeCodexBridgeSignInEvent } from "@t3tools/contracts";
-import { Atom } from "effect/unstable/reactivity";
+import { Atom } from "effect/reactivity";
 
 import type { EnvironmentRegistry } from "../connection/registry.ts";
 import { runStream } from "../rpc/client.ts";

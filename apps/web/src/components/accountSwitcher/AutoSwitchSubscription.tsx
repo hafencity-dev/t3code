@@ -4,7 +4,7 @@ import type {
   ProviderAccountAutoSwitchEvent,
   ProviderAccountDriver,
 } from "@t3tools/contracts";
-import { Atom } from "effect/unstable/reactivity";
+import { Atom } from "effect/reactivity";
 import { useCallback, useContext, useEffect } from "react";
 import { environmentPresentations } from "../../state/presentation";
 import { toastManager } from "../ui/toast";

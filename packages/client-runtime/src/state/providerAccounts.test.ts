@@ -1,5 +1,7 @@
-import { expect, it, vi } from "@effect/vitest";
+import { expect, it } from "@effect/vitest";
+import { vi } from "vite-plus/test";
 import {
+  AuthProvidersManageScope,
   EnvironmentId,
   ProviderAccountId,
   WS_METHODS,
@@ -13,7 +15,7 @@ import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
-import { AsyncResult, Atom, AtomRegistry } from "effect/unstable/reactivity";
+import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
 
 import {
   AVAILABLE_CONNECTION_STATE,
@@ -394,6 +396,26 @@ it.effect("an activity hint refetches only the open activity log; other events t
       yield* Queue.take(received);
       yield* settled(list);
       expect({ lists, reads }).toEqual({ lists: 2, reads: 2 });
+    }),
+  ),
+);
+
+// These transport fixtures exercise login lifecycle; permission denial is covered
+// by commandPermissions.test.ts.
+vi.mock("./session.ts", () => ({
+  createEnvironmentSessionAtoms: () => ({ sessionStateAtom: grantedSessions }),
+}));
+const grantedSessions = Atom.family((_id: EnvironmentId) =>
+  Atom.make(
+    AsyncResult.success({
+      authenticated: true,
+      auth: {
+        policy: "remote-reachable",
+        bootstrapMethods: [],
+        sessionMethods: [],
+        sessionCookieName: "test",
+      },
+      scopes: [AuthProvidersManageScope],
     }),
   ),
 );

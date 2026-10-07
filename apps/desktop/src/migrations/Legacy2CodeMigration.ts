@@ -9,7 +9,7 @@ import {
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
-import * as Encoding from "effect/Encoding";
+import * as Hex from "effect/encoding/Hex";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
@@ -539,7 +539,7 @@ const prepareWorkspaceImport = Effect.fn("desktop.legacy2code.prepareWorkspaceIm
     const checksum = yield* crypto
       .digest("SHA-256", new TextEncoder().encode(selected.snapshot.contents))
       .pipe(
-        Effect.map(Encoding.encodeHex),
+        Effect.map(Hex.encode),
         Effect.mapError(
           (cause) =>
             new Legacy2CodeMigrationError({

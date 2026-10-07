@@ -14,13 +14,10 @@ import { query as claudeQuery, type SDKUserMessage } from "@anthropic-ai/claude-
 import { makeClaudeEnvironment } from "../Drivers/ClaudeHome.ts";
 import { resolveClaudeSdkExecutablePath } from "../Drivers/ClaudeExecutable.ts";
 import * as Semaphore from "effect/Semaphore";
-import {
-  claudeAuthMetadata,
-  buildClaudeCapabilitiesProbeQueryOptions,
-} from "../Layers/ClaudeProvider.ts";
-import { codexPlanLabel, withCodexAppServerClient } from "../Layers/CodexProvider.ts";
-import { claudeUsageResponseToLimits } from "../Layers/claudeUsageLimits.ts";
-import { codexRateLimitsToLimits } from "../Layers/codexUsageLimits.ts";
+import { claudeAuthMetadata, buildClaudeCapabilitiesProbeQueryOptions } from "../ClaudeProvider.ts";
+import { codexPlanLabel, withCodexAppServerClient } from "../CodexProvider.ts";
+import { claudeUsageResponseToLimits } from "../claudeUsageLimits.ts";
+import { codexRateLimitsToLimits } from "../codexUsageLimits.ts";
 import { makeUnavailableUsageLimits } from "../providerUsageLimits.ts";
 import { inactiveUsageStaleness } from "@t3tools/shared/fork/accountUsageWindows";
 
@@ -64,7 +61,7 @@ export const probeAccountUsage = Effect.fn("providerAccounts.probeUsage")(functi
     const abort = new AbortController();
     const result = yield* Effect.tryPromise(async () => {
       const q = claudeQuery({
-        // oxlint-disable-next-line require-yield
+        // oxlint-disable-next-line require-yield -- Keep the SDK input open without sending a user message during the usage probe.
         prompt: (async function* (): AsyncGenerator<SDKUserMessage> {
           await new Promise<void>((resolve) => {
             if (abort.signal.aborted) resolve();

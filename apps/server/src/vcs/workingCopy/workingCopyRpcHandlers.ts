@@ -17,7 +17,6 @@ import * as Effect from "effect/Effect";
 
 import { WS_METHODS } from "@t3tools/contracts";
 import type {
-  EnvironmentAuthorizationError,
   WorkingCopyAbortOperationInput,
   WorkingCopyAmendCommitInput,
   WorkingCopyApplyPatchInput,
@@ -45,29 +44,14 @@ import type {
 import type { WorkingCopyService } from "./WorkingCopyService.ts";
 import { WorkingCopyMutationObserver } from "./WorkingCopyMutationObserver.ts"; // fork: repository invalidation
 
-/**
- * `ws.ts`'s scope-checking wrapper. Declared as an interface so the generic
- * call signature survives being passed as a value.
- */
-export interface WorkingCopyObserveRpcEffect {
-  <A, E, R>(
-    method: string,
-    effect: Effect.Effect<A, E, R>,
-    traceAttributes?: Readonly<Record<string, unknown>>,
-  ): Effect.Effect<A, E | EnvironmentAuthorizationError, R>;
-}
-
 export interface WorkingCopyRpcHandlerDeps {
   readonly workingCopy: WorkingCopyService["Service"];
-  readonly observeRpcEffect: WorkingCopyObserveRpcEffect;
   /** Settled mutation notification; never fails the RPC. */
   readonly refreshGitStatus: (
     cwd: string,
     domains?: ReadonlyArray<VcsInvalidationDomain>,
   ) => Effect.Effect<void>;
 }
-
-const TRACE = { "rpc.aggregate": "vcs" } as const;
 
 export function workingCopyMutationDomains(method: string): ReadonlyArray<VcsInvalidationDomain> {
   switch (method) {
@@ -90,23 +74,23 @@ export function workingCopyMutationDomains(method: string): ReadonlyArray<VcsInv
 }
 
 export function makeWorkingCopyRpcHandlers(deps: WorkingCopyRpcHandlerDeps) {
-  const { workingCopy, observeRpcEffect, refreshGitStatus } = deps;
+  const { workingCopy, refreshGitStatus } = deps;
 
   /** Reads: nothing to invalidate. */
-  const read = <A, E, R>(method: string, effect: Effect.Effect<A, E, R>) =>
-    observeRpcEffect(method, effect, TRACE);
+  const read = <A, E, R>(_method: string, effect: Effect.Effect<A, E, R>): Effect.Effect<A, E, R> =>
+    effect;
 
   // The service calls this observer only after containment and lane acquisition.
   // An ensuring at this RPC boundary would incorrectly announce rejected cwds.
-  const mutate = <A, E, R>(method: string, _cwd: string, effect: Effect.Effect<A, E, R>) =>
-    observeRpcEffect(
-      method,
-      effect.pipe(
-        Effect.provideService(WorkingCopyMutationObserver, {
-          settled: (root) => refreshGitStatus(root, workingCopyMutationDomains(method)),
-        }),
-      ),
-      TRACE,
+  const mutate = <A, E, R>(
+    method: string,
+    _cwd: string,
+    effect: Effect.Effect<A, E, R>,
+  ): Effect.Effect<A, E, R> =>
+    effect.pipe(
+      Effect.provideService(WorkingCopyMutationObserver, {
+        settled: (root) => refreshGitStatus(root, workingCopyMutationDomains(method)),
+      }),
     );
 
   return {

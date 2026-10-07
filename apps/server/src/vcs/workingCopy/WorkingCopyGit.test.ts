@@ -4,7 +4,7 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as TestClock from "effect/testing/TestClock";
-import { ChildProcessSpawner } from "effect/unstable/process";
+import { ChildProcessSpawner } from "effect/process";
 
 import { VcsProcessExitError, WorkingCopyIndexLockedError } from "@t3tools/contracts";
 import type * as VcsProcess from "../VcsProcess.ts";

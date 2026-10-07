@@ -3,7 +3,7 @@ import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
-import { ChildProcessSpawner } from "effect/unstable/process";
+import { ChildProcessSpawner } from "effect/process";
 
 import type { WorkingCopyStashEntry } from "@t3tools/contracts";
 import { LOG_FIELD_SEPARATOR, LOG_RECORD_SEPARATOR } from "./commands.ts";

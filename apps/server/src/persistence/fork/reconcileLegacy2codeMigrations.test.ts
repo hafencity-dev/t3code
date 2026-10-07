@@ -1,7 +1,7 @@
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import { runMigrations } from "../Migrations.ts";
@@ -84,12 +84,14 @@ layer("reconcileLegacy2codeMigrationLedger", (it) => {
           "54_ProjectionThreadsAutoSettleDisabledAt",
           "55_OrchestrationV2",
           "56_RemoveRedundantProjectionIndexes",
+          "57_ScheduledTaskWebhooks",
+          "58_WebhookRelayDeliveries",
         ],
       );
       const repaired = yield* readLedger;
       assert.deepStrictEqual(repaired.slice(0, upstreamLedger.length), upstreamLedger);
-      assert.strictEqual(repaired.length, upstreamLedger.length + 5);
-      assert.strictEqual(repaired.at(-1)?.name, "RemoveRedundantProjectionIndexes");
+      assert.strictEqual(repaired.length, upstreamLedger.length + 7);
+      assert.strictEqual(repaired.at(-1)?.name, "WebhookRelayDeliveries");
 
       // Running again changes nothing.
       assert.strictEqual(yield* reconcileLegacy2codeMigrationLedger(), false);

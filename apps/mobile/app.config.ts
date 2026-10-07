@@ -264,6 +264,9 @@ const config: ExpoConfig = {
       NSLocalNetworkUsageDescription:
         "Allow 2code to connect to 2code servers on your local network or tailnet.",
       NSPhotoLibraryAddUsageDescription: "Allow 2code to save images to your photo library.",
+      // "Audio, AirPlay, and Picture in Picture": the browser screen's system
+      // picture in picture needs it to start and to stay up outside the app.
+      UIBackgroundModes: ["audio"],
       ITSAppUsesNonExemptEncryption: false,
       // The App Store screenshot harness rotates the iPad interface from
       // inside the app (CI denies osascript the Accessibility access that

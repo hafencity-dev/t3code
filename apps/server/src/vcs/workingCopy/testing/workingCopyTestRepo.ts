@@ -24,7 +24,7 @@ const ServerConfigLayer = ServerConfig.layerTest(process.cwd(), {
   prefix: "t3-working-copy-test-",
 });
 
-export const WorkingCopyTestLayer = Layer.mergeAll(GitVcsDriver.vcsLayer, GitVcsDriver.layer).pipe(
+export const WorkingCopyTestLayer = Layer.mergeAll(GitVcsDriver.layerVcs, GitVcsDriver.layer).pipe(
   Layer.provide(ServerConfigLayer),
   Layer.provideMerge(VcsProcess.layer),
   Layer.provideMerge(NodeServices.layer),

@@ -14,7 +14,7 @@
  * `confirmedDestructive: true`. Current clients confirm every discard before
  * sending that flag; the refusal remains load-bearing for older clients.
  */
-import * as NodeCrypto from "node:crypto";
+import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 
 import {
@@ -135,7 +135,7 @@ export const discardPaths = Effect.fn("workingCopy.discardPaths")(function* (
     /** fork: f4 — "no backup is possible, do it anyway"; see the contract. */
     readonly confirmedDestructive?: boolean | undefined;
   },
-): Effect.fn.Return<WorkingCopyDiscardResult, WorkingCopyError> {
+): Effect.fn.Return<WorkingCopyDiscardResult, WorkingCopyError, Crypto.Crypto> {
   const version = yield* git.run({ operation: OPERATION, args: commands.versionArgs() });
   const recoverableGit = version.exitCode === 0 && supportsPathspecStash(version.stdout);
   // An unborn HEAD has nothing to stash against.
@@ -156,7 +156,7 @@ export const discardPaths = Effect.fn("workingCopy.discardPaths")(function* (
 
   // The marker finds this exact backup even when an agent or another client
   // pushes a stash before the list is read back. `stash@{0}` is not evidence.
-  const marker = `[t3-operation:${NodeCrypto.randomUUID()}]`;
+  const marker = `[t3-operation:${yield* (yield* Crypto.Crypto).randomUUIDv4.pipe(Effect.orDie)}]`;
   const stashed = yield* git.run({
     operation: OPERATION,
     args: commands.stashPushArgs({

@@ -1,3 +1,4 @@
+import * as Crypto from "effect/Crypto";
 /**
  * fork: f4 — the source-control panel's server facade.
  *
@@ -66,7 +67,7 @@ import {
 import * as ProjectionStore from "../../orchestration-v2/ProjectionStore.ts";
 import * as ProjectStore from "../../orchestration-v2/ProjectStore.ts";
 // fork: f4 AI commit message — the existing text-generation stack, reused whole.
-import * as ProviderRegistry from "../../provider/Services/ProviderRegistry.ts";
+import * as ProviderRegistry from "../../provider/ProviderRegistry.ts";
 import * as ServerSettings from "../../serverSettings.ts";
 import * as TextGeneration from "../../textGeneration/TextGeneration.ts";
 import * as VcsDriverRegistry from "../VcsDriverRegistry.ts";
@@ -185,6 +186,7 @@ export class WorkingCopyService extends Context.Service<
 >()("t3/vcs/workingCopy/WorkingCopyService") {}
 
 export const make = Effect.gen(function* () {
+  const crypto = yield* Crypto.Crypto;
   const registry = yield* VcsDriverRegistry.VcsDriverRegistry;
   const projections = yield* ProjectionStore.ProjectionStoreV2;
   const projects = yield* ProjectStore.ProjectStoreV2;
@@ -387,7 +389,7 @@ export const make = Effect.gen(function* () {
         // negative instead. The containment guard still runs first, so this
         // does not weaken the security boundary: a denied cwd raises
         // `WorkingCopyCwdDeniedError`, which is a different tag.
-        Effect.catchTag("VcsUnsupportedOperationError", () => Effect.succeed(NOT_A_REPOSITORY)),
+        Effect.catchTags({ VcsUnsupportedOperationError: () => Effect.succeed(NOT_A_REPOSITORY) }),
       ),
     diff: (input) =>
       withRepository("workingCopy.diff", input.cwd, (git) => Diff.readDiff(git, input)),
@@ -404,7 +406,9 @@ export const make = Effect.gen(function* () {
     applyPatch: (input) =>
       runMutating("workingCopy.applyPatch", input.cwd, (git) => Staging.applyPatch(git, input)),
     discardPaths: (input) =>
-      runMutating("workingCopy.discardPaths", input.cwd, (git) => Discard.discardPaths(git, input)),
+      runMutating("workingCopy.discardPaths", input.cwd, (git) =>
+        Discard.discardPaths(git, input).pipe(Effect.provideService(Crypto.Crypto, crypto)),
+      ),
     restoreDiscardBackup: (input) =>
       runMutating("workingCopy.restoreDiscardBackup", input.cwd, (git) =>
         Discard.restoreDiscardBackup(git, input),

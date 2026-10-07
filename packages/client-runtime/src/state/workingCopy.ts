@@ -19,7 +19,7 @@
  */
 import { type EnvironmentId, type VcsInvalidationDomain, WS_METHODS } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
-import type { Atom } from "effect/unstable/reactivity";
+import type { Atom } from "effect/reactivity";
 
 import {
   createAtomCommandScheduler,
@@ -38,7 +38,11 @@ import {
 } from "./repositoryInvalidation.ts";
 import { EnvironmentCacheStore } from "../platform/persistence.ts";
 import type { EnvironmentRegistry } from "../connection/registry.ts";
-import { request, type EnvironmentRpcInput, type EnvironmentUnaryRpcTag } from "../rpc/client.ts";
+import {
+  requestGuarded,
+  type EnvironmentRpcInput,
+  type EnvironmentUnaryRpcTag,
+} from "../rpc/client.ts";
 
 export {
   bumpWorkingCopyRevision,
@@ -190,7 +194,7 @@ export function createWorkingCopyEnvironmentAtoms<R, E>(
         Effect.gen(function* () {
           const scope = { environmentId, cwd: cwdOf(input) };
           const observedBefore = registry.get(repositoryObservationAtom(scope));
-          return yield* request(tag, input).pipe(
+          return yield* requestGuarded(tag, input).pipe(
             Effect.ensuring(
               Effect.suspend(() => {
                 // A revision-aware server pushes for every settled mutation, so

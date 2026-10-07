@@ -1,3 +1,4 @@
+import { RpcPermissionGuard } from "../rpc/client.ts";
 // fork: repository invalidation — two independent client registries against
 // one simulated server, wired through the real atom families.
 import {
@@ -18,7 +19,7 @@ import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
-import { AsyncResult, Atom, AtomRegistry } from "effect/unstable/reactivity";
+import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
 
 import {
   AVAILABLE_CONNECTION_STATE,
@@ -208,7 +209,9 @@ const makeClient = Effect.fn("makeClient")(function* (options: {
     retryNow: Effect.void,
   } satisfies EnvironmentSupervisor.EnvironmentSupervisor["Service"]);
   const run: EnvironmentRegistry.EnvironmentRegistry["Service"]["run"] = (_environmentId, effect) =>
-    Effect.provideService(effect, EnvironmentSupervisor.EnvironmentSupervisor, supervisor);
+    Effect.provideService(effect, EnvironmentSupervisor.EnvironmentSupervisor, supervisor).pipe(
+      Effect.provideService(RpcPermissionGuard, { authorize: () => Effect.void }),
+    );
   const followStream: EnvironmentRegistry.EnvironmentRegistry["Service"]["followStream"] = (
     _environmentId,
     stream,

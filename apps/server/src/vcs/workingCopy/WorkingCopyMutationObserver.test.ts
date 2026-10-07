@@ -5,13 +5,13 @@ import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
-import { ChildProcessSpawner } from "effect/unstable/process";
+import { ChildProcessSpawner } from "effect/process";
 
 import { WS_METHODS } from "@t3tools/contracts";
 import type { VcsInvalidationDomain } from "@t3tools/contracts";
 import { ProjectionStoreV2 } from "../../orchestration-v2/ProjectionStore.ts";
 import { ProjectStoreV2 } from "../../orchestration-v2/ProjectStore.ts";
-import * as ProviderRegistry from "../../provider/Services/ProviderRegistry.ts";
+import * as ProviderRegistry from "../../provider/ProviderRegistry.ts";
 import * as ServerSettings from "../../serverSettings.ts";
 import * as TextGeneration from "../../textGeneration/TextGeneration.ts";
 import * as VcsDriverRegistry from "../VcsDriverRegistry.ts";
@@ -115,7 +115,6 @@ it.effect(
       const workingCopy = yield* WorkingCopyService;
       const handlers = makeWorkingCopyRpcHandlers({
         workingCopy,
-        observeRpcEffect: (_method, effect) => effect,
         refreshGitStatus: (cwd, domains = []) =>
           Effect.sync(() => {
             notifications.push([cwd, domains]);

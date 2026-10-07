@@ -1,4 +1,4 @@
-import * as NodeCrypto from "node:crypto";
+import * as Crypto from "effect/Crypto";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
@@ -13,7 +13,6 @@ import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Scope from "effect/Scope";
-import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import * as SynchronizedRef from "effect/SynchronizedRef";
 import type {
@@ -24,8 +23,10 @@ import type {
   VcsStatusRemoteResult,
   VcsStatusResult,
   VcsStatusStreamEvent,
+  VcsStatusSubscriptionInput,
 } from "@t3tools/contracts";
 import { mergeGitStatusParts } from "@t3tools/shared/git";
+import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 
 import * as BackgroundPolicy from "../background/BackgroundPolicy.ts";
@@ -158,7 +159,7 @@ export class VcsAutoPullPolicy extends Context.Reference<{
   defaultValue: () => ({ isEnabled: () => Effect.succeed(false) }),
 }) {}
 
-export const autoPullPolicyLayer = Layer.effect(
+export const layerAutoPullPolicy = Layer.effect(
   VcsAutoPullPolicy,
   Effect.gen(function* () {
     const projects = yield* ProjectStore.ProjectStoreV2;
@@ -215,7 +216,7 @@ export class VcsStatusBroadcaster extends Context.Service<
       cwd: string,
     ) => Effect.Effect<VcsStatusRemoteResult | null, GitManagerServiceError>;
     readonly streamStatus: (
-      input: VcsStatusInput,
+      input: VcsStatusSubscriptionInput,
       options?: StreamStatusOptions,
     ) => Stream.Stream<VcsStatusStreamEvent, GitManagerServiceError>;
   }
@@ -261,7 +262,7 @@ export const make = Effect.gen(function* () {
   );
   const cacheRef = yield* Ref.make(new Map<string, CachedVcsStatus>());
   // fork: revisions are independent of the aggregate status fingerprint.
-  const epoch = NodeCrypto.randomUUID();
+  const epoch = yield* (yield* Crypto.Crypto).randomUUIDv4.pipe(Effect.orDie);
   const counters = new Map<string, number>();
   const revision = (cwd: string) => ({ epoch, counter: counters.get(cwd) ?? 0 });
   const advanceRevision = (cwd: string) => {
@@ -271,15 +272,9 @@ export const make = Effect.gen(function* () {
   // One permit per cwd for remote reads that write the cache. Without it a
   // periodic poll that started before `gh pr create` can finish after the
   // turn-end refresh and overwrite the fresh PR with its stale `pr: null`.
-  const remoteWriteLocks = new Map<string, Semaphore.Semaphore>();
-  const withRemoteWriteLock = <A, E, R>(cwd: string, effect: Effect.Effect<A, E, R>) => {
-    let lock = remoteWriteLocks.get(cwd);
-    if (lock === undefined) {
-      lock = Semaphore.makeUnsafe(1);
-      remoteWriteLocks.set(cwd, lock);
-    }
-    return lock.withPermits(1)(effect);
-  };
+  const remoteWriteLocks = yield* KeyedLock.make<string>();
+  const withRemoteWriteLock = <A, E, R>(cwd: string, effect: Effect.Effect<A, E, R>) =>
+    remoteWriteLocks.withLock(cwd, effect);
   const pollersRef = yield* SynchronizedRef.make(new Map<string, ActiveRemotePoller>());
 
   const getCachedStatus = Effect.fn("VcsStatusBroadcaster.getCachedStatus")(function* (
@@ -913,15 +908,19 @@ export const make = Effect.gen(function* () {
         const initialLocal = yield* getOrLoadLocalStatus(cwd);
         const cachedStatus = yield* getCachedStatus(cwd);
         const initialRemote = cachedStatus?.remote?.value ?? null;
-        yield* retainRemotePoller(
-          cwd,
-          input.cwd,
-          options?.automaticRemoteRefreshInterval ??
-            Effect.succeed(DEFAULT_VCS_STATUS_REFRESH_INTERVAL),
-          cachedStatus?.remote === null || cachedStatus?.remote === undefined,
-        );
-
-        const release = releaseRemotePoller(cwd, input.cwd).pipe(Effect.ignore, Effect.asVoid);
+        if (input.includeRemote !== false) {
+          yield* retainRemotePoller(
+            cwd,
+            input.cwd,
+            options?.automaticRemoteRefreshInterval ??
+              Effect.succeed(DEFAULT_VCS_STATUS_REFRESH_INTERVAL),
+            cachedStatus?.remote === null || cachedStatus?.remote === undefined,
+          );
+        }
+        const release =
+          input.includeRemote === false
+            ? Effect.void
+            : releaseRemotePoller(cwd, input.cwd).pipe(Effect.ignore, Effect.asVoid);
 
         return Stream.concat(
           Stream.make({

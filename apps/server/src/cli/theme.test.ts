@@ -7,7 +7,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as ConfigProvider from "effect/ConfigProvider";
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
-import { Command } from "effect/unstable/cli";
+import { Command } from "effect/cli";
 
 import { themeCommand } from "./theme.ts";
 import { symlinksSupported } from "@t3tools/shared/testing/symlinks";

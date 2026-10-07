@@ -14,7 +14,7 @@ import { Effect, Equal, PubSub, Schema } from "effect";
 import type { ProviderSessionManagerV2Shape } from "../../orchestration-v2/ProviderSessionManager.ts";
 import type { ProjectionStoreV2Shape } from "../../orchestration-v2/ProjectionStore.ts";
 import type { ServerSettingsService } from "../../serverSettings.ts";
-import type { ProviderInstanceRegistryShape } from "../Services/ProviderInstanceRegistry.ts";
+import type { ProviderInstanceRegistry } from "../ProviderInstanceRegistry.ts";
 
 const decodeConfigRecord = Schema.decodeUnknownSync(Schema.Record(Schema.String, Schema.Unknown));
 const decodeCodexSettings = Schema.decodeUnknownSync(CodexSettings);
@@ -93,7 +93,7 @@ export function makeProviderAccountSwitch(dependencies: {
   readonly settings: Pick<ServerSettingsService["Service"], "getSettings" | "updateSettings">;
   readonly sessions: Pick<ProviderSessionManagerV2Shape, "closeInstance">;
   readonly snapshots: Pick<ProjectionStoreV2Shape, "getShellSnapshot">;
-  readonly instances: Pick<ProviderInstanceRegistryShape, "getInstance" | "subscribeChanges">;
+  readonly instances: Pick<ProviderInstanceRegistry["Service"], "getInstance" | "subscribeChanges">;
 }) {
   const switchAccount = Effect.fn("ProviderAccountSwitch.switchAccount")(function* (
     target: ProviderAccountSwitchTarget & { readonly interruptRunning?: boolean },

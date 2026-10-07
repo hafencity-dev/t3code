@@ -106,6 +106,8 @@ const executeBundle = (source, sandboxModules) => {
   NodeVM.runInNewContext(
     source,
     {
+      // Electron preload runs in a renderer and can register DOM listeners.
+      window: new EventTarget(),
       process: sandboxProcess,
       require: requireSandboxModule,
     },

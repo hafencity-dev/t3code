@@ -1,3 +1,4 @@
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- Legacy IDs and receipt paths require synchronous deterministic hashing.
 import * as NodeCrypto from "node:crypto";
 
 import {

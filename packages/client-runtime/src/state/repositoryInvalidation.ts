@@ -8,7 +8,7 @@ import type {
   WorkingCopyRevision,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
-import { Atom, type AtomRegistry } from "effect/unstable/reactivity";
+import { Atom, type AtomRegistry } from "effect/reactivity";
 import { invalidateCachedVcsRefs } from "./vcsRefInvalidation.ts";
 
 export interface WorkingCopyTarget {

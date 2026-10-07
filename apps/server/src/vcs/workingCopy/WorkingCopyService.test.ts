@@ -3,7 +3,7 @@ import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
-import { ChildProcessSpawner } from "effect/unstable/process";
+import { ChildProcessSpawner } from "effect/process";
 
 import {
   ServerSettingsError,
@@ -13,7 +13,7 @@ import {
 } from "@t3tools/contracts";
 import { ProjectionStoreV2 } from "../../orchestration-v2/ProjectionStore.ts";
 import { ProjectStoreV2 } from "../../orchestration-v2/ProjectStore.ts";
-import * as ProviderRegistry from "../../provider/Services/ProviderRegistry.ts";
+import * as ProviderRegistry from "../../provider/ProviderRegistry.ts";
 import * as ServerSettings from "../../serverSettings.ts";
 import * as TextGeneration from "../../textGeneration/TextGeneration.ts";
 import * as VcsDriverRegistry from "../VcsDriverRegistry.ts";
