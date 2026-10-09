@@ -112,6 +112,8 @@ interface LoginSession {
   readonly finish: () => void;
   child?: NodeChildProcess.ChildProcessWithoutNullStreams;
   acceptsCode: boolean;
+  readonly emit: (event: ProviderAccountLoginEvent) => void;
+  submissionFailure?: ProviderAccountLoginError;
   accountId?: string;
 }
 
@@ -181,6 +183,7 @@ export class ProviderAccountLogin {
       done,
       finish,
       acceptsCode: false,
+      emit,
       ...(input.accountId ? { accountId: input.accountId } : {}),
     };
     this.#sessions.set(loginId, session);
@@ -240,11 +243,13 @@ export class ProviderAccountLogin {
       // Never forward CLI output or arbitrary errors: either can contain credentials.
       emit({
         _tag: "failed",
-        message: controller.signal.aborted
-          ? "Sign-in was cancelled or timed out."
-          : error instanceof LoginFailure
-            ? error.message
-            : "Unable to sign in. Please try again.",
+        message:
+          session.submissionFailure?.message ??
+          (controller.signal.aborted
+            ? "Sign-in was cancelled or timed out."
+            : error instanceof LoginFailure
+              ? error.message
+              : "Unable to sign in. Please try again."),
       });
     } finally {
       clearTimeout(timeout);
@@ -271,11 +276,21 @@ export class ProviderAccountLogin {
       throw new LoginFailure("Invalid sign-in code.");
     const child = session.child;
     session.acceptsCode = false;
-    await new Promise<void>((resolve, reject) => {
-      child.stdin.write(`${code.trim()}\n`, (error) =>
-        error ? reject(new LoginFailure("Unable to submit sign-in code.")) : resolve(),
+    // Keep every client in sync while the CLI exchanges the code, before it exits.
+    session.emit({ _tag: "verifying" });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        child.stdin.write(`${code.trim()}\n`, (error) =>
+          error ? reject(new LoginFailure("Unable to submit sign-in code.")) : resolve(),
+        );
+      });
+    } catch {
+      session.submissionFailure = new LoginFailure(
+        "Unable to submit sign-in code. Start a new sign-in and try again.",
       );
-    });
+      session.controller.abort();
+      throw session.submissionFailure;
+    }
   }
 
   async cancel(owner: string, loginId: string): Promise<void> {

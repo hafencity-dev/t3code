@@ -18,7 +18,7 @@ import {
   InfoIcon,
   TriangleAlertIcon,
 } from "lucide-react";
-import { useContext, useEffect, useId, useState, type ReactNode } from "react";
+import { useContext, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { ensureLocalApi } from "../../localApi";
 import { useEnvironmentQuery } from "../../state/query";
@@ -172,6 +172,7 @@ export function AddAccountWizard({
   const registry = useContext(RegistryContext);
   const [code, setCode] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const submittedLoginId = useRef<string | null>(null);
   const nameId = useId();
   const events = useEnvironmentQuery(eventAtom);
   const event = events.data;
@@ -196,6 +197,8 @@ export function AddAccountWizard({
     );
   }, [eventAtom, registry]);
   const start = () => {
+    submittedLoginId.current = null;
+    setSubmitting(false);
     setCode("");
     setLoginId(null);
     setPrompt(null);
@@ -216,10 +219,23 @@ export function AddAccountWizard({
     onOpenChange(false);
   };
   const confirm = async () => {
-    if (!loginId || !code.trim() || submitting) return;
+    if (
+      !loginId ||
+      !code.trim() ||
+      submittedLoginId.current === loginId ||
+      view.kind !== "prompt" ||
+      view.verifying
+    )
+      return;
+    // Lock synchronously: repeated Enter presses can arrive before React renders.
+    submittedLoginId.current = loginId;
     setSubmitting(true);
     const result = await submit({ environmentId, input: { loginId, code: code.trim() } });
-    setSubmitting(false);
+    if (result._tag === "Failure" && submittedLoginId.current === loginId) {
+      submittedLoginId.current = null;
+      setSubmitting(false);
+    }
+    if (result._tag === "Success") setCode("");
     if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
       const error = squashAtomCommandFailure(result);
       toastManager.add({
@@ -231,7 +247,7 @@ export function AddAccountWizard({
   };
   const failed = view.kind === "failed" ? view.message : null;
   const link = view.kind === "prompt" ? view.prompt : null;
-  const verifying = view.kind === "prompt" && view.verifying;
+  const verifying = view.kind === "prompt" && (view.verifying || submitting);
   const steps = relogin ? ["Sign in", "Done"] : ["Name", "Sign in", "Done"];
   const currentStep = completed ? steps.length - 1 : eventAtom || relogin ? steps.length - 2 : 0;
   const active = group.accounts.find((candidate) => candidate.active);
@@ -370,7 +386,7 @@ export function AddAccountWizard({
                                 aria-label="Sign-in code"
                                 placeholder="Paste code"
                                 value={code}
-                                disabled={submitting}
+                                disabled={submitting || verifying}
                                 onChange={(changeEvent) => setCode(changeEvent.target.value)}
                               />
                               <InputGroupAddon align="inline-end">

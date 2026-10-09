@@ -282,6 +282,12 @@ describe("ProviderAccountLogin", () => {
     );
     await f.login.submitCode("owner", f.loginId(), "secret-code#state");
     expect(child.stdin.read()?.toString()).toBe("secret-code#state\n");
+    // The CLI is still running: clients must already stop requesting another code.
+    expect(f.events.at(-1)).toEqual({ _tag: "verifying" });
+    await expect(f.login.submitCode("owner", f.loginId(), "duplicate-code")).rejects.toThrow(
+      "not waiting for a code",
+    );
+    expect(child.stdin.read()).toBeNull();
     expect(f.spawn.mock.calls[0]?.[2].env).toEqual({
       KEEP: "yes",
       BROWSER: "true",
@@ -299,6 +305,26 @@ describe("ProviderAccountLogin", () => {
     expect(f.events.at(-1)).toMatchObject({ _tag: "completed", email: "person@example.test" });
     expect(JSON.stringify(f.events)).not.toContain("secret-code");
     expect(f.spawn.mock.calls[1]?.[1]).toEqual(["auth", "status", "--json"]);
+  });
+
+  it("ends the sign-in with a retryable failure when the code cannot reach the CLI", async () => {
+    const f = fixture();
+    const running = f.start();
+    const child = await f.spawned.promise;
+    child.stdout.write(claudePrompt);
+    child.stdin.destroy();
+    await expect(f.login.submitCode("owner", f.loginId(), "secret-code#state")).rejects.toThrow(
+      "Start a new sign-in",
+    );
+    await running;
+    expect(f.events.at(-1)).toEqual({
+      _tag: "failed",
+      message: "Unable to submit sign-in code. Start a new sign-in and try again.",
+    });
+    expect(f.children[0]?.kill).toHaveBeenCalledWith("SIGTERM");
+    expect(f.cleanup).toHaveBeenCalledExactlyOnceWith(f.account);
+    expect(f.complete).not.toHaveBeenCalled();
+    expect(JSON.stringify(f.events)).not.toContain("secret-code");
   });
 
   it("rejects another owner's concurrent sign-in and abort cleans up only after logout", async () => {
