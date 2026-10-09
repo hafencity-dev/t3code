@@ -18,7 +18,6 @@ export * from "./provider.ts";
 export * from "./providerInstance.ts";
 export * from "./providerSetup.ts";
 export * from "./providerRuntime.ts";
-export * from "./claudeCodexRouting.ts"; // fork: f5 Claude Code → Codex routing
 export * from "./providerUsageLimits.ts";
 export * from "./providerAccounts.ts"; // fork: provider accounts
 export * from "./usageLimitSourceId.ts";

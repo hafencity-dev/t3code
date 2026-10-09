@@ -1,4 +1,5 @@
 // fork: gating-window selection for account headroom.
+import * as DateTime from "effect/DateTime";
 import type { ServerProviderUsageWindow } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 import {
@@ -38,7 +39,7 @@ describe("inactiveUsageStaleness", () => {
   const minute = 60_000;
   const checkedAt = "2026-09-26T12:00:00.000Z";
   const at = (minutes: number) => Date.parse(checkedAt) + minutes * minute;
-  const iso = (minutes: number) => new Date(at(minutes)).toISOString();
+  const iso = (minutes: number) => DateTime.formatIso(DateTime.makeUnsafe(at(minutes)));
   const measured = (windows: ServerProviderUsageWindow[] = []) => ({ checkedAt, windows });
 
   it("keeps a measurement fresh for 30 minutes", () => {

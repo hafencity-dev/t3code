@@ -33,13 +33,12 @@ import {
   providerModelsFromSettings,
   spawnAndCollect,
   type ServerProviderDraft,
-} from "./providerSnapshot.ts";
+} from "@t3tools/provider-core/server/snapshotProbe";
 import { resolveClaudeSdkExecutablePath } from "./Drivers/ClaudeExecutable.ts";
 import { makeClaudeEnvironment } from "./Drivers/ClaudeHome.ts";
 import { discoverClaudeSkills } from "./Drivers/ClaudeSkills.ts";
-import type { ProviderWorkspaceSnapshot } from "./ProviderDriver.ts";
-import { makeUnavailableUsageLimits } from "./providerUsageLimits.ts";
-import { withClaudeCodexRoutedModel } from "./claudeCodex/ClaudeCodexModelCatalog.ts"; // fork: f5
+import type { ProviderWorkspaceSnapshot } from "@t3tools/provider-core/server/driver";
+import { makeUnavailableUsageLimits } from "@t3tools/provider-core/server/usageLimits";
 import {
   type ClaudeScopedLimitNames,
   claudeUsageResponseToLimits,
@@ -50,6 +49,7 @@ import {
   type ClaudeModelCatalog,
   formatClaudeVersionUpgradeMessage,
   resolveClaudeModelsForVersion,
+  resolveClaudeUpdateRequiredModels,
 } from "./ClaudeModelCatalog.ts";
 
 const DEFAULT_CLAUDE_MODEL_CAPABILITIES: ModelCapabilities = createModelCapabilities({
@@ -167,6 +167,38 @@ function apiProviderAuthMetadata(
   return apiProvider === "bedrock" ? { type: "bedrock", label: "Amazon Bedrock" } : undefined;
 }
 
+/**
+ * Whether the SDK's account payload evidences a credential the CLI can use.
+ *
+ * The capability probe resolves for a logged-out CLI, so a completed probe only
+ * proves Claude Code started. `tokenSource: "none"` is the CLI reporting it
+ * found no token at all, and is the one shape that disproves authentication.
+ * Everything else either names a credential or, on a third-party backend, omits
+ * these fields by design because auth lives with AWS or gcloud instead.
+ *
+ * Silence is deliberately not disproof. Profile-authenticated installs report no
+ * token source, and a CLI too old to send an account payload reports nothing at
+ * all; treating either as logged out would sign working setups out of Settings.
+ * `apiKeySource: "none"` means no API key is in use, so it is no evidence either.
+ */
+function claudeAuthStatus(
+  capabilities: Pick<
+    ClaudeCapabilitiesProbe,
+    "email" | "subscriptionType" | "tokenSource" | "apiKeySource" | "apiProvider"
+  >,
+): "authenticated" | "unauthenticated" {
+  if (capabilities.apiProvider !== undefined && capabilities.apiProvider !== "firstParty") {
+    return "authenticated";
+  }
+  if (capabilities.tokenSource !== "none") return "authenticated";
+  // An `ANTHROPIC_API_KEY` install reports no token source but is authenticated
+  // all the same, so the key and account fields still get a say.
+  const hasApiKey = Boolean(capabilities.apiKeySource) && capabilities.apiKeySource !== "none";
+  return hasApiKey || capabilities.email || capabilities.subscriptionType
+    ? "authenticated"
+    : "unauthenticated";
+}
+
 // ── SDK capability probe ────────────────────────────────────────────
 
 // Amazon Bedrock initializes far slower than first-party auth: the SDK boots the
@@ -232,6 +264,8 @@ type ClaudeCapabilitiesProbe = {
   readonly email: string | undefined;
   readonly subscriptionType: string | undefined;
   readonly tokenSource: string | undefined;
+  /** Where the CLI found an API key, when it authenticates with one. */
+  readonly apiKeySource: string | undefined;
   /**
    * Active API backend reported by the SDK's `AccountInfo`. Anthropic OAuth
    * login only applies when `"firstParty"`; for Amazon Bedrock (`"bedrock"`)
@@ -326,9 +360,8 @@ function waitForAbortSignal(signal: AbortSignal): Promise<void> {
  * We pass a never-yielding AsyncIterable as the prompt so that no user
  * message is ever written to the subprocess stdin. This means the Claude
  * Code subprocess completes its local initialization IPC (returning
- * account info and slash commands) but never starts a model inference request.
- * For claude.ai subscriptions we also read the structured `/usage` payload,
- * then abort the subprocess.
+ * account info and slash commands) but never starts an API request to
+ * Anthropic. We read the init data and then abort the subprocess.
  *
  * This is used as a fallback when `claude auth status` does not include
  * subscription type information.
@@ -388,6 +421,7 @@ const probeClaudeCapabilities = (
               readonly email?: string;
               readonly subscriptionType?: string;
               readonly tokenSource?: string;
+              readonly apiKeySource?: string;
               readonly apiProvider?: string;
             }
           | undefined;
@@ -395,6 +429,7 @@ const probeClaudeCapabilities = (
           email: account?.email,
           subscriptionType: account?.subscriptionType,
           tokenSource: account?.tokenSource,
+          apiKeySource: account?.apiKeySource,
           apiProvider: account?.apiProvider,
           slashCommands: parseClaudeInitializationCommands(init.commands),
           ...(usage ? { usage } : {}),
@@ -467,13 +502,10 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
 > {
   const resolvedEnvironment = environment ?? process.env;
   const checkedAt = DateTime.formatIso(yield* DateTime.now);
-  const allModels = withClaudeCodexRoutedModel(
-    providerModelsFromSettings(
-      modelCatalog.models.map((entry) => entry.model),
-      claudeSettings.customModels,
-      DEFAULT_CLAUDE_MODEL_CAPABILITIES,
-    ),
-    claudeSettings,
+  const allModels = providerModelsFromSettings(
+    modelCatalog.models.map((entry) => entry.model),
+    claudeSettings.customModels,
+    DEFAULT_CLAUDE_MODEL_CAPABILITIES,
   );
 
   if (!claudeSettings.enabled) {
@@ -487,7 +519,7 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
         version: null,
         status: "warning",
         auth: { status: "unknown" },
-        message: "Claude is disabled in 2code settings.",
+        message: "Claude is disabled in T3 Code settings.",
       },
     });
   }
@@ -560,14 +592,12 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
     });
   }
 
-  const models = withClaudeCodexRoutedModel(
-    providerModelsFromSettings(
-      resolveClaudeModelsForVersion(modelCatalog, parsedVersion),
-      claudeSettings.customModels,
-      DEFAULT_CLAUDE_MODEL_CAPABILITIES,
-    ),
-    claudeSettings,
+  const models = providerModelsFromSettings(
+    resolveClaudeModelsForVersion(modelCatalog, parsedVersion),
+    claudeSettings.customModels,
+    DEFAULT_CLAUDE_MODEL_CAPABILITIES,
   );
+  const updateRequiredModels = resolveClaudeUpdateRequiredModels(modelCatalog, parsedVersion);
   const versionUpgradeMessage = formatClaudeVersionUpgradeMessage(modelCatalog, parsedVersion);
 
   const capabilities = resolveCapabilities
@@ -583,6 +613,7 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
       enabled: claudeSettings.enabled,
       checkedAt,
       models,
+      updateRequiredModels,
       slashCommands: dedupedSlashCommands,
       skills,
       probe: {
@@ -591,6 +622,24 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
         status: "warning",
         auth: { status: "unknown" },
         message: "Could not verify Claude authentication status from initialization result.",
+      },
+    });
+  }
+
+  if (claudeAuthStatus(capabilities) === "unauthenticated") {
+    return buildServerProvider({
+      presentation: CLAUDE_PRESENTATION,
+      enabled: claudeSettings.enabled,
+      checkedAt,
+      models,
+      slashCommands: dedupedSlashCommands,
+      skills,
+      probe: {
+        installed: true,
+        version: parsedVersion,
+        status: "error",
+        auth: { status: "unauthenticated" },
+        message: "Claude Code is not authenticated. Run `claude auth login` and try again.",
       },
     });
   }
@@ -620,6 +669,7 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
     enabled: claudeSettings.enabled,
     checkedAt,
     models,
+    updateRequiredModels,
     slashCommands: dedupedSlashCommands,
     skills,
     probe: {
@@ -645,13 +695,10 @@ export const makePendingClaudeProvider = (
 ): Effect.Effect<ServerProviderDraft> =>
   Effect.gen(function* () {
     const checkedAt = yield* nowIso;
-    const models = withClaudeCodexRoutedModel(
-      providerModelsFromSettings(
-        modelCatalog.models.map((entry) => entry.model),
-        claudeSettings.customModels,
-        DEFAULT_CLAUDE_MODEL_CAPABILITIES,
-      ),
-      claudeSettings,
+    const models = providerModelsFromSettings(
+      modelCatalog.models.map((entry) => entry.model),
+      claudeSettings.customModels,
+      DEFAULT_CLAUDE_MODEL_CAPABILITIES,
     );
 
     if (!claudeSettings.enabled) {
@@ -665,7 +712,7 @@ export const makePendingClaudeProvider = (
           version: null,
           status: "warning",
           auth: { status: "unknown" },
-          message: "Claude is disabled in 2code settings.",
+          message: "Claude is disabled in T3 Code settings.",
         },
       });
     }

@@ -10,11 +10,13 @@ import {
 import { buildClaudeCodexRoutingPatch, readClaudeCodexRouting } from "./ModelRoutingSettings.logic";
 
 describe("ModelRoutingSettings logic", () => {
-  it("reads and updates the legacy default Claude instance", () => {
+  it("initializes preferences in the default Claude instance envelope", () => {
     const id = ProviderInstanceId.make("claudeAgent");
     const routing = { ...DEFAULT_CLAUDE_CODEX_ROUTING_SETTINGS, enabled: true };
     expect(buildClaudeCodexRoutingPatch(DEFAULT_SERVER_SETTINGS, id, routing)).toEqual({
-      providers: { claudeAgent: { codexRouting: routing } },
+      providerInstances: {
+        [id]: { driver: "claudeAgent", config: { codexRouting: routing } },
+      },
     });
   });
 

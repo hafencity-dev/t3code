@@ -4,7 +4,7 @@
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodeChildProcess from "node:child_process";
 import * as NodePath from "node:path";
-import { expandHomePath } from "../../pathExpansion.ts";
+import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
 import { inactiveClaudeProbeEnvironment } from "./ClaudeAccountHome.ts";
 
 /**

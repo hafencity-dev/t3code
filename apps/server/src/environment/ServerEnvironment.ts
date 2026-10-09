@@ -242,8 +242,6 @@ export const make = Effect.gen(function* () {
       threadActiveReorder: true,
       threadAutoSettleOptOut: true,
       threadTitleRegeneration: true,
-      claudeCodexRouting: true, // fork: f5 Claude Code → Codex routing
-      claudeCodexFastMode: true, // fork: f5
       workingCopyRevision: true, // fork: remote Git
       workingCopyStashIdentity: true, // fork: remote Git
       threadVisitedTracking: true,

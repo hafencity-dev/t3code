@@ -12,7 +12,7 @@ import {
 import { Deferred, Effect, Fiber, Path, PubSub, Queue, Schema, Semaphore } from "effect";
 import { TestClock } from "effect/testing";
 
-import type { ProviderInstance } from "../ProviderDriver.ts";
+import type { ProviderInstance } from "@t3tools/provider-core/server/driver";
 
 import { resolveCodexHomeLayout } from "../Drivers/CodexHomeLayout.ts";
 import {
@@ -31,21 +31,21 @@ const snapshot = (instanceId = codexId) => ({
 });
 
 const settings = decodeSettings({
-  providers: { codex: { homePath: "/shared", shadowHomePath: "/old" } },
+  providerInstances: {
+    [codexId]: { driver: "codex", config: { homePath: "/shared", shadowHomePath: "/old" } },
+  },
 });
 
 describe("ProviderAccountSwitch config", () => {
-  it.effect("prefers explicit default config without merging legacy defaults", () =>
+  it.effect("reads the default instance config and supplies defaults for missing config", () =>
     Effect.gen(function* () {
       const current = decodeSettings({
-        providers: { codex: { homePath: "/legacy", shadowHomePath: "/legacy-shadow" } },
         providerInstances: { [codexId]: { driver: "codex", config: { homePath: "/explicit" } } },
       });
       const resolved = yield* resolveProviderAccountConfig(current, "codex");
       expect(resolved.homePath).toBe("/explicit");
       expect(resolved.shadowHomePath).toBe("");
       const empty = decodeSettings({
-        providers: { codex: { homePath: "/legacy" } },
         providerInstances: { [codexId]: { driver: "codex" } },
       });
       expect((yield* resolveProviderAccountConfig(empty, "codex")).homePath).toBe("");
@@ -63,20 +63,29 @@ describe("ProviderAccountSwitch config", () => {
     }),
   );
 
-  it("patches legacy config and restores original Default values", () => {
-    expect(makeProviderAccountSwitchPatch(settings, { driver: "codex", homePath: "/new" })).toEqual(
-      { providers: { codex: { shadowHomePath: "/new" } } },
-    );
+  it("creates default instances when absent and restores original Default values", () => {
+    const empty = decodeSettings({});
+    expect(makeProviderAccountSwitchPatch(empty, { driver: "codex", homePath: "/new" })).toEqual({
+      providerInstances: { [codexId]: { driver: "codex", config: { shadowHomePath: "/new" } } },
+    });
     expect(
       makeProviderAccountSwitchPatch(settings, {
         driver: "codex",
         homePath: "/shared",
         directMode: true,
       }),
-    ).toEqual({ providers: { codex: { shadowHomePath: "" } } });
-    expect(
-      makeProviderAccountSwitchPatch(settings, { driver: "claudeAgent", homePath: "" }),
-    ).toEqual({ providers: { claudeAgent: { homePath: "" } } });
+    ).toEqual({
+      providerInstances: {
+        [codexId]: {
+          ...settings.providerInstances[codexId],
+          config: { homePath: "/shared", shadowHomePath: "" },
+        },
+      },
+    });
+    const claudeId = defaultInstanceIdForDriver(ProviderDriverKind.make("claudeAgent"));
+    expect(makeProviderAccountSwitchPatch(empty, { driver: "claudeAgent", homePath: "" })).toEqual({
+      providerInstances: { [claudeId]: { driver: "claudeAgent", config: { homePath: "" } } },
+    });
   });
 
   it.effect(
@@ -198,10 +207,7 @@ const makeHarness = Effect.fnUntraced(function* (
           }
           return {
             ...settings,
-            providers: {
-              ...settings.providers,
-              codex: { ...settings.providers.codex, ...patch.providers?.codex },
-            },
+            providerInstances: patch.providerInstances ?? settings.providerInstances,
           };
         }),
     },
@@ -322,7 +328,9 @@ describe("ProviderAccountSwitch orchestration", () => {
         "subscribe-registry",
         "patch",
       ]);
-      expect(harness.patches).toEqual([{ providers: { codex: { shadowHomePath: "/new" } } }]);
+      expect(harness.patches).toEqual([
+        makeProviderAccountSwitchPatch(settings, { driver: "codex", homePath: "/new" }),
+      ]);
     }),
   );
 

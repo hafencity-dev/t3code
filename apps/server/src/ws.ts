@@ -56,6 +56,7 @@ import {
   type AcpRegistrySetProviderInput,
   OrchestrationGetFullThreadDiffError,
   OrchestrationSearchThreadsError,
+  OrchestrationV2SearchThreadError,
   OrchestrationGetTurnDiffError,
   ORCHESTRATION_V2_WS_METHODS,
   ORCHESTRATION_PROTOCOL_QUERY_PARAM,
@@ -106,12 +107,9 @@ import {
   WsRpcGroup,
   WsCoreRpcGroup,
   WsForkRpcGroup,
-  ClaudeCodexBridgeError,
-  type ClaudeCodexBridgeSignInEvent,
   type VcsInvalidationDomain, // fork: repository invalidation
   GitCommandError, // fork: repository invalidation
 } from "@t3tools/contracts";
-import { HostProcessArchitecture, HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { resolveServerBackgroundActivitySettings } from "@t3tools/shared/backgroundActivitySettings";
 import {
   HttpRouter,
@@ -131,7 +129,7 @@ import * as McpAppRequests from "./mcpApps/McpAppRequests.ts";
 import * as ProviderSessionManager from "./orchestration-v2/ProviderSessionManager.ts";
 import * as ThreadLaunchService from "./orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadMessageIntake from "./orchestration-v2/ThreadMessageIntake.ts";
-import * as IdAllocator from "./orchestration-v2/IdAllocator.ts";
+import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ScheduledTasks from "./scheduledTasks/ScheduledTaskService.ts";
 import * as SecretRequests from "./secrets/SecretRequests.ts";
 import {
@@ -141,6 +139,7 @@ import {
   coalesceStoredThreadEvents,
   composeShellStreamWithEnrichment,
   dedupeShellEnrichment,
+  loadShellSnapshotParts,
   shellStreamItemFromEnrichmentRefresh,
   shellStreamItemFromThreadShell,
   shellStreamItemsFromInitialSnapshot,
@@ -174,12 +173,11 @@ import * as OrchestrationEventStore from "./persistence/OrchestrationEventStore.
 import { userFacingDispatchErrorMessage } from "./orchestration-v2/UserFacingErrors.ts";
 import * as ProviderRegistry from "./provider/ProviderRegistry.ts";
 import * as ProviderInstanceRegistry from "./provider/ProviderInstanceRegistry.ts";
-import * as AcpRegistrySupport from "./provider/acp/AcpRegistrySupport.ts";
-import * as AcpRegistryRuntimeCoordinator from "./provider/acp/AcpRegistryRuntimeCoordinator.ts";
+import * as AcpRegistrySupport from "@t3tools/provider-acp-registry/server/AcpRegistrySupport";
+import * as AcpRegistryRuntimeCoordinator from "@t3tools/provider-acp-registry/server/AcpRegistryRuntimeCoordinator";
 import * as ModelManifest from "./provider/ModelManifest.ts";
-import * as ProviderMaintenance from "./provider/providerMaintenance.ts";
+import * as ProviderMaintenance from "@t3tools/provider-core/server/maintenanceResolver";
 import * as ProviderMaintenanceRunner from "./provider/providerMaintenanceRunner.ts";
-import { getClaudeCodexBridge } from "./provider/claudeCodex/ClaudeCodexBridge.ts"; // fork: f5
 import * as ProviderAuthService from "./provider/ProviderAuthService.ts";
 import { makeProviderInstallation } from "./provider/providerInstallation.ts";
 import * as ServerSelfUpdate from "./cloud/selfUpdate.ts";
@@ -988,14 +986,12 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
       },
     );
     const loadSnapshot = Effect.fn("ws.orchestrationV2.loadShellSnapshot")(function* () {
-      const base = yield* sql.withTransaction(
-        Effect.gen(function* () {
-          const threads = yield* threadManagement.getShellSnapshot({ location: "active" });
-          return buildActiveShellSnapshot({
-            projects: yield* projects.listShells(),
-            threads,
-            snapshotSequence: yield* applicationEvents.latestApplicationSequence,
-          });
+      const base = buildActiveShellSnapshot(
+        yield* loadShellSnapshotParts({
+          sql,
+          readThreads: threadManagement.readShellSnapshot({ location: "active" }),
+          listProjects: projects.listShells(),
+          latestSequence: applicationEvents.latestApplicationSequence,
         }),
       );
       const enriched = yield* enrichProjectShells(base.projects);
@@ -1304,13 +1300,6 @@ const layerWsRpc = (
       const providerInstallation = yield* makeProviderInstallation();
       const serverSelfUpdate = yield* ServerSelfUpdate.ServerSelfUpdate;
       const config = yield* ServerConfig.ServerConfig;
-      const hostPlatform = yield* HostProcessPlatform;
-      const hostArchitecture = yield* HostProcessArchitecture;
-      const claudeCodexBridge = getClaudeCodexBridge(
-        config.stateDir,
-        hostPlatform,
-        hostArchitecture,
-      ); // fork: f5
       const lifecycleEvents = yield* ServerLifecycleEvents.ServerLifecycleEvents;
       const serverSettings = yield* ServerSettings.ServerSettingsService;
       const startup = yield* ServerRuntimeStartup.ServerRuntimeStartup;
@@ -1758,6 +1747,8 @@ const layerWsRpc = (
             shellResumeCompletionMarker: true,
             threadResumeCompletionMarker: true,
             threadSnapshotPagination: true,
+            threadFind: true,
+            threadFindProgressive: true,
             ...Option.match(scratchWorkspaceRoot, {
               onNone: () => ({}),
               onSome: (root) => ({ scratchWorkspaceRoot: root }),
@@ -1791,32 +1782,33 @@ const layerWsRpc = (
         <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E, R> =>
           effect.pipe(Effect.onExit((exit) => notifyGitExit(cwd)(exit)));
 
-      const getOrchestrationV2ArchivedShellSnapshot = sql
-        .withTransaction(
-          Effect.gen(function* () {
-            const threads = yield* threadManagement.getShellSnapshot({ location: "archive" });
-            return {
-              schemaVersion: threads.schemaVersion,
-              snapshotSequence: yield* applicationEvents.latestApplicationSequence,
-              projects: yield* projectStore.listShells(),
-              threads: threads.archivedThreads,
-            } as const;
-          }),
-        )
-        .pipe(
-          Effect.flatMap((snapshot) =>
-            enrichProjectShells(snapshot.projects).pipe(
-              Effect.map(({ projects }) => ({ ...snapshot, projects })),
-            ),
+      const getOrchestrationV2ArchivedShellSnapshot = Effect.gen(function* () {
+        const { threads, projects, snapshotSequence } = yield* loadShellSnapshotParts({
+          sql,
+          readThreads: threadManagement.readShellSnapshot({ location: "archive" }),
+          listProjects: projectStore.listShells(),
+          latestSequence: applicationEvents.latestApplicationSequence,
+        });
+        return {
+          schemaVersion: threads.schemaVersion,
+          snapshotSequence,
+          projects,
+          threads: threads.archivedThreads,
+        } as const;
+      }).pipe(
+        Effect.flatMap((snapshot) =>
+          enrichProjectShells(snapshot.projects).pipe(
+            Effect.map(({ projects }) => ({ ...snapshot, projects })),
           ),
-          Effect.mapError(
-            (cause) =>
-              new OrchestrationV2GetShellSnapshotError({
-                message: "Failed to load archived thread snapshot",
-                cause,
-              }),
-          ),
-        );
+        ),
+        Effect.mapError(
+          (cause) =>
+            new OrchestrationV2GetShellSnapshotError({
+              message: "Failed to load archived thread snapshot",
+              cause,
+            }),
+        ),
+      );
 
       const subscribeOrchestrationV2ArchivedShell = Effect.fn(
         "ws.orchestrationV2.subscribeArchivedShell",
@@ -1870,67 +1862,6 @@ const layerWsRpc = (
       const forkHandlers = ServerForkRpcGroup.of({
         ...workingCopyHandlers,
         ...providerAccountHandlers,
-        // fork: f5 — environment-owned Claude Code → Codex bridge. Device
-        // sign-in is streamed so closing the client dialog cancels the child.
-        [WS_METHODS.claudeCodexBridgeGetStatus]: (_input) =>
-          Effect.try({
-            try: () => claudeCodexBridge.status(),
-            catch: (cause) =>
-              new ClaudeCodexBridgeError({
-                operation: "status",
-                detail: cause instanceof Error ? cause.message : String(cause),
-              }),
-          }),
-        [WS_METHODS.claudeCodexBridgeInstall]: (_input) =>
-          Effect.tryPromise({
-            try: () => claudeCodexBridge.install(),
-            catch: (cause) =>
-              new ClaudeCodexBridgeError({
-                operation: "install",
-                detail: cause instanceof Error ? cause.message : String(cause),
-              }),
-          }),
-        [WS_METHODS.claudeCodexBridgeStartSignIn]: (_input) =>
-          Stream.callback<ClaudeCodexBridgeSignInEvent>((queue) =>
-            Effect.gen(function* () {
-              const abortController = new AbortController();
-              yield* Effect.addFinalizer(() => Effect.sync(() => abortController.abort()));
-              const context = yield* Effect.context<never>();
-              const runFork = Effect.runForkWith(context);
-              const emit = (event: ClaudeCodexBridgeSignInEvent) => {
-                runFork(Queue.offer(queue, event));
-              };
-              yield* Effect.tryPromise(() =>
-                claudeCodexBridge.signIn(emit, abortController.signal),
-              ).pipe(
-                Effect.catch((cause) =>
-                  Queue.offer(queue, {
-                    _tag: "failed" as const,
-                    message: cause instanceof Error ? cause.message : String(cause),
-                  }),
-                ),
-              );
-              yield* Queue.end(queue);
-            }).pipe(Effect.forkScoped),
-          ),
-        [WS_METHODS.claudeCodexBridgeSignOut]: (_input) =>
-          Effect.try({
-            try: () => claudeCodexBridge.signOut(),
-            catch: (cause) =>
-              new ClaudeCodexBridgeError({
-                operation: "sign-out",
-                detail: cause instanceof Error ? cause.message : String(cause),
-              }),
-          }),
-        [WS_METHODS.claudeCodexBridgeGetModels]: ({ refresh }) =>
-          Effect.tryPromise({
-            try: () => claudeCodexBridge.models(refresh === true),
-            catch: (cause) =>
-              new ClaudeCodexBridgeError({
-                operation: "models",
-                detail: cause instanceof Error ? cause.message : String(cause),
-              }),
-          }),
       });
       const handlers = ServerCoreRpcGroup.of({
         [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: (command) =>
@@ -2015,6 +1946,14 @@ const layerWsRpc = (
                 }),
             ),
           ),
+        [ORCHESTRATION_V2_WS_METHODS.searchThread]: (input) =>
+          threadManagement
+            .searchThread(input)
+            .pipe(Effect.mapError((cause) => new OrchestrationV2SearchThreadError({ cause }))),
+        [ORCHESTRATION_V2_WS_METHODS.searchThreadStream]: (input) =>
+          threadManagement
+            .searchThreadStream(input)
+            .pipe(Stream.mapError((cause) => new OrchestrationV2SearchThreadError({ cause }))),
         [ORCHESTRATION_V2_WS_METHODS.searchThreads]: (input) =>
           threadSearch.search(input).pipe(
             Effect.mapError(
@@ -3002,6 +2941,7 @@ const layerWsRpc = (
         [WS_METHODS.previewClose]: (input) => previewManager.close(input),
         [WS_METHODS.previewList]: (input) => previewManager.list(input),
         [WS_METHODS.previewClearProfile]: (input) => serverBrowser.clearProfile(input.profileId),
+        [WS_METHODS.previewReportProfiles]: (input) => serverBrowser.reportProfiles(input),
         [WS_METHODS.previewReportStatus]: (input) => previewManager.reportStatus(input),
         [WS_METHODS.subscribePreviewEvents]: (_input) => previewManager.events,
         [WS_METHODS.deviceConfigure]: (input) => deviceService.configure(input),
@@ -3331,7 +3271,17 @@ export const layer = Layer.unwrap(
         );
         return yield* Effect.acquireUseRelease(
           sessions.markConnected(session.sessionId),
-          () => rpcWebSocketHttpEffect,
+          () =>
+            Effect.raceFirst(
+              rpcWebSocketHttpEffect,
+              sessions.awaitInvalidation(session.sessionId).pipe(
+                Effect.as(HttpServerResponse.empty()),
+                Effect.catchTags({
+                  SessionCredentialVerificationError: (error) =>
+                    failEnvironmentInternal("internal_error", error),
+                }),
+              ),
+            ),
           () => sessions.markDisconnected(session.sessionId),
         );
       }).pipe(

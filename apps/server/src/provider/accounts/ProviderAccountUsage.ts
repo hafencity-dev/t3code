@@ -18,7 +18,7 @@ import { claudeAuthMetadata, buildClaudeCapabilitiesProbeQueryOptions } from "..
 import { codexPlanLabel, withCodexAppServerClient } from "../CodexProvider.ts";
 import { claudeUsageResponseToLimits } from "../claudeUsageLimits.ts";
 import { codexRateLimitsToLimits } from "../codexUsageLimits.ts";
-import { makeUnavailableUsageLimits } from "../providerUsageLimits.ts";
+import { makeUnavailableUsageLimits } from "@t3tools/provider-core/server/usageLimits";
 import { inactiveUsageStaleness } from "@t3tools/shared/fork/accountUsageWindows";
 
 export interface AccountUsage {

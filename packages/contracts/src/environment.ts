@@ -187,8 +187,6 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   serverSelfUpdateProgress: Schema.optionalKey(Schema.Boolean),
   /** Server can manage the local Codex compatibility bridge used to remap
       Claude Code's Haiku subagent slot. */
-  claudeCodexRouting: Schema.optionalKey(Schema.Boolean), // fork: f5
-  claudeCodexFastMode: Schema.optionalKey(Schema.Boolean), // fork: f5
   /** Server publishes repository mutation revisions to connected clients. */
   workingCopyRevision: Schema.optionalKey(Schema.Boolean), // fork: remote Git
   /** Server requires and validates immutable stash identities for mutations. */

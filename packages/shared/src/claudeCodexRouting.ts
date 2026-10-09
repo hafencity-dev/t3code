@@ -1,5 +1,5 @@
 /**
- * Managed Claude Code → Codex routing prompt (fork feature f5).
+ * Native V2 task and model preference prompt (fork feature f5).
  *
  * This is shared by the server and settings preview. Keeping one renderer is
  * what makes the UI preview byte-identical to the text attached to a session.
@@ -32,21 +32,15 @@ export function effectiveClaudeCodexModel(model: string | undefined): string {
   return !selected || selected === "gpt-5.6-sol" ? DEFAULT_CLAUDE_CODEX_MODEL : selected;
 }
 
-export function buildClaudeCodexBridgePrompt(model: string): string {
-  const selectedModel = effectiveClaudeCodexModel(model);
-  return `# Claude Code → Codex bridge (managed by T3 Code)
+function nativeDelegationInstructions(model: string): string {
+  return `# Native task delegation (configured in 2code)
 
-This Claude Code session has a Codex bridge. The Claude \`haiku\` subagent slot is remapped to the Codex model \`${selectedModel}\`.
-
-Runtime rules:
-- \`Agent(model: "haiku")\` and Workflow agents configured with \`model: "haiku"\` run \`${selectedModel}\` through the user's Codex account. They do not run Anthropic Haiku in this session.
-- The Agent/Workflow model field still accepts Claude Code's model aliases. Never pass a raw GPT/Codex model id to that field; use \`haiku\` to reach the configured Codex model.
-- Only the \`haiku\` alias is remapped. An explicit Anthropic Haiku model id such as \`claude-haiku-…\` remains real Anthropic Haiku.
-- Prefer the remapped Haiku slot for delegated Codex work: it preserves native agent streaming, task cards, permissions, and transcripts.
-- Give every delegated Codex agent a self-contained prompt with the relevant files, constraints, expected result, and verification steps.
-- If a remapped agent fails with a bridge, connection, or HTTP 502 error, retry the work with an available Claude model and report that the Codex bridge was unavailable. Do not silently claim that Codex completed the task.
-
-Treat the remapping above as a runtime fact for this session, not as a suggestion.`;
+The main session stays on its selected Claude model. Before delegating, call \`orchestrator_capabilities\` to discover enabled provider instances and their advertised models and constraints.
+- For Codex work, choose an available provider with \`driverKind: "codex"\` and \`canRunChildTask: true\`. Prefer model \`${effectiveClaudeCodexModel(model)}\` only when that instance advertises its exact ID. Pass the returned \`providerInstanceId\` and model ID in \`delegate_task.target\`; never invent an instance ID or model.
+- For Claude work, prefer the provider's native subagent tool only when it supports the selected Claude model. Otherwise use \`delegate_task\` with an advertised Claude instance and model.
+- Codex is a native provider, not a remapped Claude model alias. Claude's Haiku alias always means Claude Haiku; never use it to request Codex. Older bridge or alias-remapping instructions do not apply.
+- If the configured provider or model is unavailable, report that limitation and use an available suitable model only when the task allows a fallback. Never claim the configured model ran when it did not.
+- Give each child a self-contained prompt. Prefer \`mode: "async"\` for long work; completion notifies the parent automatically. Do not create polling watchers. Use \`task_status\` only when a result is needed during the current turn. Retain task IDs and stable retry IDs as documented by the tools.`;
 }
 
 type TaskPreferenceKey = Exclude<
@@ -109,9 +103,9 @@ function taskPreferenceInstruction(
     return `- ${label} → Claude subagent: Delegate ${scope} through \`Agent(model: "${claudeModel}")\` or a Workflow agent using \`model: "${claudeModel}"\` rather than doing the substantial work inline. The main session supplies context, evaluates the result, and owns the synthesis.`;
   }
   if (route === "codex") {
-    return `- ${label} → Codex subagent: Delegate ${scope} to \`${codexModel}\` through \`Agent(model: "haiku")\`. The main session supplies context, evaluates the result, and owns the synthesis.`;
+    return `- ${label} → Codex subagent: Delegate ${scope} through \`delegate_task\` to an available native Codex instance, preferring advertised model \`${codexModel}\`. The main session supplies context, evaluates the result, and owns the synthesis.`;
   }
-  return `- ${label} → best-fit subagent: Use \`Agent(model: "haiku")\` for self-contained, parallelizable, or mechanical parts of ${scope}; use \`Agent(model: "${claudeModel}")\` for interactive, unknown-shape, or judgment-heavy parts. Do not default substantial work to the main loop.`;
+  return `- ${label} → best-fit subagent: Use native Codex delegation through \`delegate_task\` for self-contained, parallelizable, or mechanical parts of ${scope}; use \`Agent(model: "${claudeModel}")\` for interactive, unknown-shape, or judgment-heavy parts. Do not default substantial work to the main loop.`;
 }
 
 function secondOpinionInstruction(
@@ -124,7 +118,7 @@ function secondOpinionInstruction(
   }
   const planningModel = claudeModelForTask(preferences, "planning");
   const reviewModel = claudeModelForTask(preferences, "review");
-  const commonEnding = `Pair the Claude opinion with one \`${codexModel}\` subagent through \`Agent(model: "haiku")\` and run both blind opinions in parallel. Do not show either agent the other's draft. The main session compares both views, adjudicates disagreements, and owns the final artifact. Routine or low-risk work does not need this extra pass.`;
+  const commonEnding = `Pair the Claude opinion with one native Codex subagent through \`delegate_task\`, preferring advertised model \`${codexModel}\`, and run both blind opinions in parallel. Do not show either agent the other's draft. The main session compares both views, adjudicates disagreements, and owns the final artifact. Routine or low-risk work does not need this extra pass.`;
   if (mode === "plans") {
     return `For consequential plans and architecture decisions, run the Claude opinion through \`Agent(model: "${planningModel}")\`. ${commonEnding}`;
   }
@@ -175,45 +169,18 @@ export function buildManagedClaudeCodexRoutingPrompt(
   preferences: ClaudeCodexModelPreferences = DEFAULT_CLAUDE_CODEX_MODEL_PREFERENCES,
 ): string {
   return composeSystemPromptText([
-    buildClaudeCodexBridgePrompt(model),
+    nativeDelegationInstructions(model),
     buildClaudeCodexModelPreferencesPrompt(model, preferences),
   ])!;
 }
 
-export function isClaudeCodexMainModel(
-  mainModel: string | undefined,
-  routedModel: string,
-): boolean {
-  return mainModel?.trim().replace(/\[1m\]$/u, "") === effectiveClaudeCodexModel(routedModel);
-}
-
-export function buildClaudeCodexMainSessionPrompt(model: string): string {
-  const selectedModel = effectiveClaudeCodexModel(model);
-  return `# Codex main session through Claude Code (managed by T3 Code)
-
-This session's main loop runs the Codex model \`${selectedModel}\` through T3 Code's Claude compatibility bridge. It is not running an Anthropic model.
-
-- The configured Claude-versus-Codex task preferences do not apply while Codex is the main model; there is no Claude main loop to assign work to.
-- Claude Code's Agent and Workflow model fields still accept Claude aliases, not raw GPT/Codex ids. \`model: "haiku"\` is remapped to \`${selectedModel}\` and is the native way to spawn a Codex subagent.
-- Keep the main loop thin: decompose, coordinate, inspect evidence, and synthesize. Delegate substantial implementation, planning, design, review, verification, and independent final-analysis drafts through the Haiku slot instead of doing them inline.
-- Run independent subagent workstreams in parallel and give every agent the relevant files, constraints, expected result, and verification steps. Avoid agents only for genuinely trivial steps.
-- If the bridge fails with a connection or HTTP 502 error, report that the Codex bridge is unavailable. Do not claim that work completed through another model unless it actually did.`;
-}
-
-/** Exact routing text prepended before the ordinary T3 system-prompt rules. */
+/** Native task preferences appended to the ordinary T3 system-prompt rules. */
 export function resolveClaudeCodexRoutingPrompt(
   routing: ClaudeCodexRoutingSettings | undefined,
   effectiveModel?: string,
-  mainModel?: string,
 ): string | undefined {
   if (routing?.enabled !== true) return undefined;
   const model = effectiveClaudeCodexModel(effectiveModel ?? routing.model);
-  if (isClaudeCodexMainModel(mainModel, model)) {
-    return composeSystemPromptText([
-      buildClaudeCodexMainSessionPrompt(model),
-      routing.additionalInstructions,
-    ]);
-  }
   const preferenceInstructions =
     routing.promptMode === "none"
       ? undefined
@@ -221,7 +188,7 @@ export function resolveClaudeCodexRoutingPrompt(
         ? routing.customPrompt
         : buildClaudeCodexModelPreferencesPrompt(model, routing.modelPreferences);
   return composeSystemPromptText([
-    buildClaudeCodexBridgePrompt(model),
+    nativeDelegationInstructions(model),
     preferenceInstructions,
     routing.additionalInstructions,
   ]);

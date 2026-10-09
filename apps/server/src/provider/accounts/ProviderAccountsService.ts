@@ -62,7 +62,7 @@ import { resolveClaudeHomePath } from "../Drivers/ClaudeHome.ts";
 import { resolveCodexHomeLayout } from "../Drivers/CodexHomeLayout.ts";
 import { ProviderRegistry } from "../ProviderRegistry.ts";
 import { ProviderInstanceRegistry } from "../ProviderInstanceRegistry.ts";
-import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment.ts";
+import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
 import { materializeCodexAccountHome } from "./CodexAccountHome.ts";
 import { inactiveClaudeProbeEnvironment } from "./ClaudeAccountHome.ts";
 import {

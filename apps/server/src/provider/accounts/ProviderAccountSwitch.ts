@@ -31,7 +31,7 @@ function effectiveConfig(settings: ServerSettings, driver: ProviderAccountDriver
     }
     return explicit.config ?? {};
   }
-  return settings.providers[driver];
+  return {};
 }
 
 export function resolveProviderAccountConfig(
@@ -78,15 +78,15 @@ export function makeProviderAccountSwitchPatch(
       ? { shadowHomePath: target.directMode ? "" : target.homePath }
       : { homePath: target.homePath };
   const config = decodeConfigRecord(effectiveConfig(settings, target.driver));
-  if (explicit !== undefined) {
-    return {
-      providerInstances: {
-        ...settings.providerInstances,
-        [instanceId]: { ...explicit, config: { ...config, ...change } },
+  return {
+    providerInstances: {
+      ...settings.providerInstances,
+      [instanceId]: {
+        ...(explicit ?? { driver: ProviderDriverKind.make(target.driver) }),
+        config: { ...config, ...change },
       },
-    };
-  }
-  return { providers: { [target.driver]: change } };
+    },
+  };
 }
 
 export function makeProviderAccountSwitch(dependencies: {

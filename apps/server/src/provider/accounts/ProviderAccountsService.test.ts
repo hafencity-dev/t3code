@@ -27,7 +27,7 @@ import * as ServerSettings from "../../serverSettings.ts";
 import * as ProviderRegistryMock from "../testUtils/providerRegistryMock.ts";
 import { ProviderInstanceRegistry } from "../ProviderInstanceRegistry.ts";
 import { ProviderRegistry } from "../ProviderRegistry.ts";
-import type { ProviderInstance } from "../ProviderDriver.ts";
+import type { ProviderInstance } from "@t3tools/provider-core/server/driver";
 import { ProviderAccountLogin, type ProviderAccountLoginOptions } from "./ProviderAccountLogin.ts";
 import { createProviderAccountRegistry } from "./ProviderAccountRegistry.ts";
 import {
@@ -155,17 +155,13 @@ describe("ProviderAccountsService", () => {
     const dependencies = Layer.mergeAll(
       ServerConfig.layerTest(root, NodePath.join(root, "state")),
       ServerSettings.layerTest({
-        providers: {
-          claudeAgent: { homePath: options.claudeHomePath ?? NodePath.join(root, "claude") },
-          codex: { homePath: NodePath.join(root, "codex"), binaryPath: "never-spawn-this-cli" },
-        },
         providerInstances: {
-          ...(options.claudeHomePath === undefined
-            ? {}
-            : {
-                [claudeId]: {
-                  driver: ProviderDriverKind.make("claudeAgent"),
-                  config: { homePath: options.claudeHomePath },
+          [claudeId]: {
+            driver: ProviderDriverKind.make("claudeAgent"),
+            config: { homePath: options.claudeHomePath ?? NodePath.join(root, "claude") },
+            ...(options.claudeHomePath === undefined
+              ? {}
+              : {
                   environment: [
                     {
                       name: "CLAUDE_CONFIG_DIR",
@@ -173,8 +169,8 @@ describe("ProviderAccountsService", () => {
                       sensitive: false,
                     },
                   ],
-                },
-              }),
+                }),
+          },
           [codexId]: {
             driver: ProviderDriverKind.make("codex"),
             displayName: "Keep this instance name",

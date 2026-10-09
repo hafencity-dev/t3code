@@ -1,3 +1,8 @@
+import {
+  OrchestrationV2SearchThreadError,
+  OrchestrationV2SearchThreadInput,
+  OrchestrationV2SearchThreadResult,
+} from "./orchestrationV2.ts";
 import { OrchestrationDispatchCommandError } from "./orchestrationDispatch.ts";
 import {
   McpAppCallToolInput,
@@ -150,12 +155,6 @@ import {
   OrchestrationSearchThreadsResult,
 } from "./threadSearch.ts";
 import {
-  ClaudeCodexBridgeError,
-  ClaudeCodexBridgeModelsResult,
-  ClaudeCodexBridgeSignInEvent,
-  ClaudeCodexBridgeStatus,
-} from "./claudeCodexRouting.ts"; // fork: f5 Claude Code → Codex routing
-import {
   ProviderUploadFeedbackError,
   ProviderUploadFeedbackInput,
   ProviderUploadFeedbackResult,
@@ -258,6 +257,7 @@ import {
   PreviewListResult,
   PreviewClearProfileError,
   PreviewClearProfileInput,
+  PreviewReportProfilesInput,
   PreviewNavigateInput,
   PreviewOpenInput,
   PreviewRefreshInput,
@@ -485,6 +485,7 @@ export const WS_METHODS = {
   previewClose: "preview.close",
   previewList: "preview.list",
   previewClearProfile: "preview.clearProfile",
+  previewReportProfiles: "preview.reportProfiles",
   previewReportStatus: "preview.reportStatus",
 
   // Device methods
@@ -534,12 +535,6 @@ export const WS_METHODS = {
   serverGetUsageSummary: "server.getUsageSummary",
   serverRefreshUsageRates: "server.refreshUsageRates",
 
-  // Claude Code → Codex bridge methods — fork: f5
-  claudeCodexBridgeGetStatus: "claudeCodexBridge.getStatus",
-  claudeCodexBridgeInstall: "claudeCodexBridge.install",
-  claudeCodexBridgeStartSignIn: "claudeCodexBridge.startSignIn",
-  claudeCodexBridgeSignOut: "claudeCodexBridge.signOut",
-  claudeCodexBridgeGetModels: "claudeCodexBridge.getModels",
   // Scheduled tasks
   scheduledTasksList: "scheduledTasks.list",
   scheduledTasksSubscribe: "scheduledTasks.subscribe",
@@ -961,38 +956,6 @@ const WsServerSignalProcessRpc = Rpc.make(WS_METHODS.serverSignalProcess, {
   payload: ServerSignalProcessInput,
   success: ServerSignalProcessResult,
   error: EnvironmentAuthorizationError,
-});
-
-export const WsClaudeCodexBridgeGetStatusRpc = Rpc.make(WS_METHODS.claudeCodexBridgeGetStatus, {
-  payload: Schema.Struct({}),
-  success: ClaudeCodexBridgeStatus,
-  error: Schema.Union([ClaudeCodexBridgeError, EnvironmentAuthorizationError]),
-});
-
-export const WsClaudeCodexBridgeInstallRpc = Rpc.make(WS_METHODS.claudeCodexBridgeInstall, {
-  payload: Schema.Struct({}),
-  success: ClaudeCodexBridgeStatus,
-  error: Schema.Union([ClaudeCodexBridgeError, EnvironmentAuthorizationError]),
-});
-
-export const WsClaudeCodexBridgeStartSignInRpc = Rpc.make(WS_METHODS.claudeCodexBridgeStartSignIn, {
-  // Client-only retry nonce; the server intentionally ignores it.
-  payload: Schema.Struct({ attempt: Schema.optional(Schema.Number) }),
-  success: ClaudeCodexBridgeSignInEvent,
-  error: Schema.Union([ClaudeCodexBridgeError, EnvironmentAuthorizationError]),
-  stream: true,
-});
-
-export const WsClaudeCodexBridgeSignOutRpc = Rpc.make(WS_METHODS.claudeCodexBridgeSignOut, {
-  payload: Schema.Struct({}),
-  success: ClaudeCodexBridgeStatus,
-  error: Schema.Union([ClaudeCodexBridgeError, EnvironmentAuthorizationError]),
-});
-
-export const WsClaudeCodexBridgeGetModelsRpc = Rpc.make(WS_METHODS.claudeCodexBridgeGetModels, {
-  payload: Schema.Struct({ refresh: Schema.optional(Schema.Boolean) }),
-  success: ClaudeCodexBridgeModelsResult,
-  error: Schema.Union([ClaudeCodexBridgeError, EnvironmentAuthorizationError]),
 });
 
 const WsCloudGetRelayClientStatusRpc = Rpc.make(WS_METHODS.cloudGetRelayClientStatus, {
@@ -1588,6 +1551,11 @@ const WsPreviewClearProfileRpc = Rpc.make(WS_METHODS.previewClearProfile, {
   error: Schema.Union([PreviewClearProfileError, EnvironmentAuthorizationError]),
 });
 
+const WsPreviewReportProfilesRpc = Rpc.make(WS_METHODS.previewReportProfiles, {
+  payload: PreviewReportProfilesInput,
+  error: EnvironmentAuthorizationError,
+});
+
 const WsPreviewReportStatusRpc = Rpc.make(WS_METHODS.previewReportStatus, {
   payload: PreviewReportStatusInput,
   error: Schema.Union([PreviewError, EnvironmentAuthorizationError]),
@@ -1680,6 +1648,22 @@ const WsOrchestrationV2GetFullThreadDiffRpc = Rpc.make(
     payload: OrchestrationV2RpcSchemas.getFullThreadDiff.input,
     success: OrchestrationV2RpcSchemas.getFullThreadDiff.output,
     error: Schema.Union([OrchestrationGetFullThreadDiffError, EnvironmentAuthorizationError]),
+  },
+);
+
+const WsOrchestrationV2SearchThreadRpc = Rpc.make(ORCHESTRATION_V2_WS_METHODS.searchThread, {
+  payload: OrchestrationV2SearchThreadInput,
+  success: OrchestrationV2SearchThreadResult,
+  error: Schema.Union([OrchestrationV2SearchThreadError, EnvironmentAuthorizationError]),
+});
+
+const WsOrchestrationV2SearchThreadStreamRpc = Rpc.make(
+  ORCHESTRATION_V2_WS_METHODS.searchThreadStream,
+  {
+    payload: OrchestrationV2SearchThreadInput,
+    success: OrchestrationV2SearchThreadResult,
+    error: Schema.Union([OrchestrationV2SearchThreadError, EnvironmentAuthorizationError]),
+    stream: true,
   },
 );
 
@@ -2083,11 +2067,6 @@ export class RpcScopeAuthorization extends RpcMiddleware.Service<RpcScopeAuthori
 // fork: keep extension registration separate from the upstream RPC tuple.
 export const WsForkRpcGroup = RpcGroup.make(
   ...PROVIDER_ACCOUNTS_RPCS, // fork: provider accounts
-  WsClaudeCodexBridgeGetStatusRpc, // fork: f5 Claude Code → Codex routing
-  WsClaudeCodexBridgeInstallRpc,
-  WsClaudeCodexBridgeStartSignInRpc,
-  WsClaudeCodexBridgeSignOutRpc,
-  WsClaudeCodexBridgeGetModelsRpc,
   WsWorkingCopyStatusRpc,
   WsWorkingCopyDiffRpc,
   WsWorkingCopyFileAtRefRpc,
@@ -2273,6 +2252,7 @@ export const WsCoreRpcGroup = RpcGroup.make(
   WsPreviewCloseRpc,
   WsPreviewListRpc,
   WsPreviewClearProfileRpc,
+  WsPreviewReportProfilesRpc,
   WsPreviewReportStatusRpc,
   WsSubscribePreviewEventsRpc,
   WsSubscribeDiscoveredLocalServersRpc,
@@ -2296,6 +2276,8 @@ export const WsCoreRpcGroup = RpcGroup.make(
   WsOrchestrationV2GetTurnDiffRpc,
   WsOrchestrationV2GetFullThreadDiffRpc,
   WsOrchestrationV2SearchThreadsRpc,
+  WsOrchestrationV2SearchThreadRpc,
+  WsOrchestrationV2SearchThreadStreamRpc,
   WsOrchestrationV2GetArchivedShellSnapshotRpc,
   WsOrchestrationV2GetThreadProjectionRpc,
   WsOrchestrationV2LaunchThreadRpc,

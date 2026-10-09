@@ -13,6 +13,8 @@ import {
   ChatFileAttachment,
   ChatImageAttachment,
   ClaudeSettings,
+  DEFAULT_MODEL_BY_PROVIDER,
+  ProviderDriverKind,
   EnvironmentId,
   MessageId,
   type ModelSelection,
@@ -52,7 +54,7 @@ import { SpawnExecutableResolution } from "@t3tools/shared/shell";
 
 import { attachmentRelativePath } from "../../attachmentStore.ts";
 import * as ServerConfig from "../../config.ts";
-import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
+import * as McpProviderSession from "@t3tools/provider-core/server/mcpSession";
 import { PreviewControlsToolkit } from "../../mcp/toolkits/previewControls/tools.ts";
 import { HtmlToolkit } from "../../mcp/toolkits/html/tools.ts";
 import { EnvironmentToolkit } from "../../mcp/toolkits/environment/tools.ts";
@@ -66,14 +68,14 @@ import {
   ProviderAdapterV2RuntimePolicy,
   type ProviderAdapterV2Event,
   type ProviderAdapterV2TurnInput,
-} from "../ProviderAdapter.ts";
-import type { ProviderContinuationRequest } from "../ProviderContinuationRequests.ts";
-import { makeProviderFailure } from "../ProviderFailure.ts";
+} from "@t3tools/provider-core/server/ProviderAdapter";
+import type { ProviderContinuationRequest } from "@t3tools/provider-core/server/continuationRequests";
+import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
 import * as ClaudeAdapterV2 from "./ClaudeAdapterV2.ts";
-import * as IdAllocator from "../IdAllocator.ts";
+import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 
-const decodeClaudeSettings = Schema.decodeEffect(ClaudeSettings);
-const DEFAULT_CLAUDE_SETTINGS = Schema.decodeSync(ClaudeSettings)({});
+const decodeClaudeSettings = Schema.decodeSync(ClaudeSettings);
+const DEFAULT_CLAUDE_SETTINGS = decodeClaudeSettings({});
 const AUTO_COMPACT_CLAUDE_SETTINGS = Schema.decodeSync(ClaudeSettings)({
   autoCompactWindow: "300000",
 });
@@ -161,6 +163,31 @@ function makeClaudeTestTurnInput(input: {
 }
 
 describe("ClaudeAdapterV2 runtime query policy", () => {
+  it("uses native task preferences without changing the Claude transport", () => {
+    const options = ClaudeAdapterV2.makeClaudeQueryOptions({
+      modelSelection: CLAUDE_TEST_MODEL_SELECTION,
+      nativeThreadId: "native-preferences-thread",
+      resume: false,
+      cwd: "/workspace",
+      settings: decodeClaudeSettings({
+        codexRouting: { enabled: true, model: "gpt-6-astra" },
+      }),
+      mcpServers: {},
+    });
+    assert.equal(options.model, CLAUDE_TEST_MODEL_SELECTION.model);
+    assert.isUndefined(options.env);
+    assert.isObject(options.systemPrompt);
+    if (
+      typeof options.systemPrompt === "object" &&
+      !Array.isArray(options.systemPrompt) &&
+      options.systemPrompt.type === "preset"
+    ) {
+      assert.include(options.systemPrompt.append, "orchestrator_capabilities");
+      assert.include(options.systemPrompt.append, "delegate_task");
+      assert.include(options.systemPrompt.append, "gpt-6-astra");
+    }
+  });
+
   it.each([false, true])("requests thinking summaries with resume=%s", (resume) => {
     const options = ClaudeAdapterV2.makeClaudeQueryOptions({
       modelSelection: CLAUDE_TEST_MODEL_SELECTION,
@@ -479,10 +506,13 @@ describe("ClaudeAdapterV2 MCP query overrides", () => {
       type: "http",
       url: "http://127.0.0.1:43123/mcp",
       headers: {
-        Authorization: "Bearer secret-claude-token",
+        Authorization: "${T3_CODE_MCP_AUTHORIZATION}",
       },
       timeout: ClaudeAdapterV2.CLAUDE_T3_MCP_TOOL_TIMEOUT_MS,
     },
+  } as const;
+  const T3_MCP_ENVIRONMENT = {
+    T3_CODE_MCP_AUTHORIZATION: "Bearer secret-claude-token",
   } as const;
 
   const withMcpSession = (threadId: ThreadId, run: () => void) => {
@@ -532,6 +562,7 @@ describe("ClaudeAdapterV2 MCP query overrides", () => {
       assert.deepEqual(overrides, {
         allowedTools: [ClaudeAdapterV2.CLAUDE_T3_MCP_TOOL_WILDCARD],
         mcpServers: T3_MCP_SERVERS,
+        mcpEnvironment: T3_MCP_ENVIRONMENT,
       });
     });
   });
@@ -548,6 +579,7 @@ describe("ClaudeAdapterV2 MCP query overrides", () => {
       assert.deepEqual(overrides, {
         allowedTools: ["Read", "mcp__t3-code__*"],
         mcpServers: T3_MCP_SERVERS,
+        mcpEnvironment: T3_MCP_ENVIRONMENT,
       });
     });
   });
@@ -567,6 +599,7 @@ describe("ClaudeAdapterV2 MCP query overrides", () => {
           ...ClaudeAdapterV2.CLAUDE_READ_ONLY_T3_MCP_ALLOWED_TOOLS,
         ],
         mcpServers: T3_MCP_SERVERS,
+        mcpEnvironment: T3_MCP_ENVIRONMENT,
       });
       assert.isFalse(overrides.allowedTools?.includes(ClaudeAdapterV2.CLAUDE_T3_MCP_TOOL_WILDCARD));
     });
@@ -698,11 +731,12 @@ describe("ClaudeAdapterV2 native protocol logging", () => {
             type: "http",
             url: "http://127.0.0.1:43123/mcp",
             headers: {
-              Authorization: "Bearer secret-claude-token",
+              Authorization: "${T3_CODE_MCP_AUTHORIZATION}",
             },
             timeout: ClaudeAdapterV2.CLAUDE_T3_MCP_TOOL_TIMEOUT_MS,
           },
         },
+        mcpEnvironment: { T3_CODE_MCP_AUTHORIZATION: "Bearer secret-claude-token" },
       });
 
       const options = ClaudeAdapterV2.makeClaudeQueryOptions({
@@ -713,8 +747,14 @@ describe("ClaudeAdapterV2 native protocol logging", () => {
         nativeThreadId: "native-thread-claude-mcp",
         resume: false,
         cwd: "/workspace",
-        ...overrides,
+        allowedTools: overrides.allowedTools ?? [],
+        mcpServers: overrides.mcpServers ?? {},
+        environment: { ...overrides.mcpEnvironment },
       });
+      // mcpServers becomes a CLI argument, readable by every local user; the
+      // credential may only travel in the child's environment.
+      assert.notInclude(JSON.stringify(options.mcpServers), "secret-claude-token");
+      assert.equal(options.env?.T3_CODE_MCP_AUTHORIZATION, "Bearer secret-claude-token");
       assert.isObject(options.systemPrompt);
       const systemPrompt = options.systemPrompt as {
         readonly type: string;
@@ -941,121 +981,6 @@ describe("ClaudeAdapterV2 session permissions", () => {
       },
     ]);
   });
-});
-
-// fork: exercise routing at the SDK boundary, including disabled instances.
-describe("ClaudeAdapterV2 Codex routing", () => {
-  it.effect.each([true, false])("routes SDK requests only when enabled: %s", (enabled) =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        const bridgeCalls: unknown[][] = [];
-        const modelSelection = {
-          instanceId: CLAUDE_TEST_MODEL_SELECTION.instanceId,
-          model: "gpt-6-sol",
-          options: [{ id: "reasoningEffort", value: "xhigh" }],
-        } satisfies ModelSelection;
-        const fileSystem = yield* FileSystem.FileSystem;
-        const idAllocator = yield* IdAllocator.IdAllocatorV2;
-        const attachmentsDir = yield* fileSystem.makeTempDirectoryScoped({
-          prefix: "t3-claude-codex-routing-",
-        });
-        let openedOptions: ClaudeAdapterV2.ClaudeAgentSdkQueryOptions | undefined;
-        const adapter = ClaudeAdapterV2.makeClaudeAdapterV2({
-          instanceId: ClaudeAdapterV2.CLAUDE_DEFAULT_INSTANCE_ID,
-          settings: yield* decodeClaudeSettings({
-            codexRouting: { enabled, model: "gpt-6-sol" },
-          }),
-          crypto: yield* Crypto.Crypto,
-          codexBridge: {
-            hybridEnvironment: async (model, upstream, timeout) => {
-              bridgeCalls.push([model, upstream, timeout]);
-              return {
-                model: "gpt-6-sol",
-                environment: {
-                  ANTHROPIC_BASE_URL: "http://127.0.0.1:9999",
-                  ANTHROPIC_DEFAULT_HAIKU_MODEL: "gpt-6-sol",
-                },
-              };
-            },
-          },
-          environment: { ANTHROPIC_BASE_URL: "https://anthropic.example" },
-          attachmentsDir,
-          fileSystem,
-          path: yield* Path.Path,
-          idAllocator,
-          queryRunner: {
-            allocateSessionId: Effect.succeed("native-thread-claude-accept-edits"),
-            open: (input) =>
-              Effect.sync(() => {
-                openedOptions = input.options;
-                return {
-                  messages: Stream.never,
-                  offer: () => Effect.void,
-                  setModel: () => Effect.void,
-                  setPermissionMode: () => Effect.void,
-                  interrupt: Effect.void,
-                  close: Effect.void,
-                };
-              }),
-            forkSession: () => Effect.die("unused"),
-            subagentLaunchToolUseId: () => Effect.succeed(null),
-            assertComplete: Effect.void,
-          },
-        });
-        const runtimePolicy = ProviderAdapterV2RuntimePolicy.make({
-          runtimeMode: "auto-accept-edits",
-          interactionMode: "default",
-          cwd: "/workspace",
-        });
-        const threadId = ThreadId.make("thread-claude-accept-edits");
-        const runtime = yield* adapter.openSession({
-          threadId,
-          providerSessionId: ProviderSessionId.make("provider-session-claude-accept-edits"),
-          modelSelection: modelSelection,
-          runtimePolicy,
-        });
-        const providerThread = yield* runtime.ensureThread({
-          threadId,
-          modelSelection: modelSelection,
-          runtimePolicy,
-        });
-        const now = yield* DateTime.now;
-        yield* runtime.startTurn(
-          makeClaudeTestTurnInput({
-            threadId,
-            providerThread,
-            now,
-            attemptId: RunAttemptId.make("attempt-claude-accept-edits"),
-            text: "Run node.",
-            attachments: [],
-            modelSelection,
-            runtimePolicy,
-          }),
-        );
-
-        assert.deepEqual(
-          bridgeCalls,
-          enabled ? [["gpt-6-sol", "https://anthropic.example", undefined]] : [],
-        );
-        assert.equal(openedOptions?.model, enabled ? "gpt-6-sol(xhigh)" : "gpt-6-sol");
-        assert.equal(
-          openedOptions?.env?.ANTHROPIC_BASE_URL,
-          enabled ? "http://127.0.0.1:9999" : "https://anthropic.example",
-        );
-        assert.equal(
-          openedOptions?.env?.ANTHROPIC_DEFAULT_HAIKU_MODEL,
-          enabled ? "gpt-6-sol" : undefined,
-        );
-        const prompt = openedOptions?.systemPrompt;
-        assert.equal(
-          typeof prompt === "object" &&
-            "append" in prompt &&
-            !!prompt.append?.includes("Claude Code → Codex bridge"),
-          enabled,
-        );
-      }).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
-    ),
-  );
 });
 
 describe("ClaudeAdapterV2 Auto-accept edits", () => {
@@ -2199,6 +2124,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     });
 
   const makeWakeHarnessWithOptions = (options?: {
+    readonly settings?: ClaudeSettings;
     readonly close?: (sdkMessages: Queue.Queue<SDKMessage>) => Effect.Effect<void>;
     readonly interrupt?: Effect.Effect<void>;
     readonly environment?: NodeJS.ProcessEnv;
@@ -2231,7 +2157,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       let openedOptions: ClaudeAdapterV2.ClaudeAgentSdkQueryOptions | undefined;
       const adapter = ClaudeAdapterV2.makeClaudeAdapterV2({
         instanceId: ClaudeAdapterV2.CLAUDE_DEFAULT_INSTANCE_ID,
-        settings: DEFAULT_CLAUDE_SETTINGS,
+        settings: options?.settings ?? DEFAULT_CLAUDE_SETTINGS,
         environment: options?.environment ?? {},
         attachmentsDir,
         fileSystem,
@@ -2362,6 +2288,40 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       };
     });
   const makeWakeHarness = makeWakeHarnessWithOptions();
+
+  it.effect("continues retired bridge threads with native Claude and a visible notice", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeWakeHarnessWithOptions({
+          settings: decodeClaudeSettings({ codexRouting: { enabled: true, model: "gpt-6-sol" } }),
+        });
+        const input = makeClaudeTestTurnInput({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          now: yield* DateTime.now,
+          attemptId: RunAttemptId.make("retired-bridge-attempt"),
+          text: "Continue the task.",
+          attachments: [],
+        });
+        yield* harness.runtime.startTurn({
+          ...input,
+          modelSelection: {
+            ...input.modelSelection,
+            model: "gpt-6-sol",
+            options: [{ id: "reasoningEffort", value: "xhigh" }],
+          },
+        });
+        const notice = (yield* Queue.take(harness.systemNoticeReceipts)).turnItem;
+        assert.equal(
+          harness.getOpenedOptions()?.model,
+          DEFAULT_MODEL_BY_PROVIDER[ProviderDriverKind.make("claudeAgent")],
+        );
+        assert.equal(notice.type, "system_notice");
+        if (notice.type === "system_notice") assert.include(notice.message, "instead of gpt-6-sol");
+        assert.equal(harness.offeredMessages.length, 1);
+      }).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+    ),
+  );
 
   it.effect.each([
     { isError: false, title: "Check weather" },

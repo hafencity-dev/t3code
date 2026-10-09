@@ -208,17 +208,6 @@ describe("custom model settings", () => {
       { slug: "named", name: "Named", capabilities },
     ]);
   });
-
-  it("accepts entries at the settings patch boundary", () => {
-    expect(
-      decodeServerSettingsPatch({
-        providers: { codex: { customModels: [{ slug: "x", capabilities }] } },
-      }).providers?.codex?.customModels,
-    ).toEqual([{ slug: "x", capabilities }]);
-    expect(() =>
-      decodeServerSettingsPatch({ providers: { codex: { customModels: [{ name: "no slug" }] } } }),
-    ).toThrow();
-  });
 });
 
 describe("ClaudeSettings auto-compaction", () => {
@@ -239,15 +228,6 @@ describe("ClaudeSettings auto-compaction", () => {
       expect(() => decodeClaudeSettings({ autoCompactWindow: value })).toThrow();
     },
   );
-
-  it("rejects an unsupported threshold at the settings patch boundary", () => {
-    expect(() =>
-      decodeServerSettingsPatch({ providers: { claudeAgent: { autoCompactWindow: "300k" } } }),
-    ).toThrow();
-    expect(
-      decodeServerSettingsPatch({ providers: { claudeAgent: { autoCompactWindow: "300000" } } }),
-    ).toBeDefined();
-  });
 });
 
 describe("ClientSettings notifications", () => {
@@ -752,13 +732,6 @@ describe("ServerSettings.providerInstances (slice-2 invariant)", () => {
   it("decodes a fully empty config (legacy on-disk shape) without complaint", () => {
     const decoded = decodeServerSettings({});
     expect(decoded.providerInstances).toEqual({});
-    // Legacy `providers` struct is still hydrated with its per-driver defaults
-    // so existing call sites keep working through the migration.
-    expect(decoded.providers.codex.enabled).toBe(true);
-    expect(decoded.providers.claudeAgent.enabled).toBe(true);
-    expect(decoded.providers.cursor.enabled).toBe(false);
-    expect(decoded.providers.grok.enabled).toBe(false);
-    expect(decoded.providers.opencode.enabled).toBe(false);
   });
 
   it("decodes a multi-instance map mixing first-party and fork drivers", () => {
@@ -804,158 +777,81 @@ describe("ServerSettings.providerInstances (slice-2 invariant)", () => {
   });
 });
 
-describe("Claude Code Codex routing", () => {
-  it("accepts disabling the routing deadline and preserves explicit limits", () => {
-    expect(
-      decodeClaudeSettings({ codexRouting: {} }).codexRouting?.requestTimeoutSeconds,
-    ).toBeUndefined();
-    for (const requestTimeoutSeconds of [0, 60, 1800, 7200]) {
-      const settings = decodeClaudeSettings({ codexRouting: { requestTimeoutSeconds } });
-      expect(settings.codexRouting?.requestTimeoutSeconds).toBe(requestTimeoutSeconds);
-      expect(
-        decodeServerSettingsPatch({
-          providers: { claudeAgent: { codexRouting: { requestTimeoutSeconds } } },
-        }).providers?.claudeAgent?.codexRouting?.requestTimeoutSeconds,
-      ).toBe(requestTimeoutSeconds);
-    }
-    for (const requestTimeoutSeconds of [-1, 1, 59, 7201, 1.5, "1800"]) {
-      expect(() => decodeClaudeSettings({ codexRouting: { requestTimeoutSeconds } })).toThrow();
-      expect(() =>
-        decodeServerSettingsPatch({
-          providers: { claudeAgent: { codexRouting: { requestTimeoutSeconds } } },
-        }),
-      ).toThrow();
-    }
-  });
-  it("defaults global GPT fast mode to false", () => {
-    expect(decodeServerSettings({}).claudeCodexFastModeEnabled).toBe(false);
-    expect(DEFAULT_SERVER_SETTINGS.claudeCodexFastModeEnabled).toBe(false);
-  });
-
-  it("accepts global GPT fast mode patches in both directions", () => {
-    for (const enabled of [true, false]) {
-      expect(decodeServerSettingsPatch({ claudeCodexFastModeEnabled: enabled })).toEqual({
-        claudeCodexFastModeEnabled: enabled,
-      });
-      expect(
-        decodeServerSettings({ claudeCodexFastModeEnabled: enabled }).claudeCodexFastModeEnabled,
-      ).toBe(enabled);
-    }
-    expect(decodeServerSettingsPatch({})).not.toHaveProperty("claudeCodexFastModeEnabled");
-    expect(() => decodeServerSettingsPatch({ claudeCodexFastModeEnabled: "true" })).toThrow();
-  });
-
-  it("is absent and inactive for legacy Claude settings", () => {
-    expect(decodeServerSettings({}).providers.claudeAgent.codexRouting).toBeUndefined();
-  });
-
-  it("hydrates safe defaults when the per-instance routing block is enabled", () => {
-    const routing = decodeServerSettings({
-      providers: { claudeAgent: { codexRouting: { enabled: true } } },
-    }).providers.claudeAgent.codexRouting;
-    expect(routing).toEqual({
-      enabled: true,
-      model: "",
-      modelPreferences: {
-        claudeSubagentModel: "opus",
-        claudeSubagentModels: {},
-        exploration: "codex",
-        implementation: "codex",
-        verification: "adaptive",
-        planning: "claude",
-        design: "claude",
-        review: "claude",
-        secondOpinion: "plans-and-reviews",
-      },
-      promptMode: "managed",
-      customPrompt: "",
-      additionalInstructions: "",
-    });
-  });
-
-  it("hydrates partial model preferences without losing the balanced defaults", () => {
-    const routing = decodeServerSettings({
-      providers: {
-        claudeAgent: {
-          codexRouting: {
-            enabled: true,
-            modelPreferences: {
-              claudeSubagentModel: "fable",
-              claudeSubagentModels: { implementation: "sonnet" },
-              implementation: "claude",
-              secondOpinion: "reviews",
-            },
-          },
+describe("native Claude task preferences", () => {
+  it("preserves saved task preferences while discarding obsolete bridge transport settings", () => {
+    const settings = decodeClaudeSettings({
+      codexRouting: {
+        enabled: true,
+        model: "gpt-6-astra",
+        requestTimeoutSeconds: 1800,
+        modelPreferences: {
+          claudeSubagentModel: "fable",
+          claudeSubagentModels: { implementation: "sonnet" },
+          exploration: "claude",
+          secondOpinion: "reviews",
         },
       },
-    }).providers.claudeAgent.codexRouting;
-    expect(routing?.modelPreferences).toEqual({
+    });
+    expect(settings.codexRouting?.enabled).toBe(true);
+    expect(settings.codexRouting?.model).toBe("gpt-6-astra");
+    expect(settings.codexRouting?.modelPreferences).toMatchObject({
       claudeSubagentModel: "fable",
       claudeSubagentModels: { implementation: "sonnet" },
+      exploration: "claude",
+      implementation: "codex",
+      secondOpinion: "reviews",
+    });
+    expect(settings.codexRouting).not.toHaveProperty("requestTimeoutSeconds");
+    expect(decodeServerSettings({ claudeCodexFastModeEnabled: true })).not.toHaveProperty(
+      "claudeCodexFastModeEnabled",
+    );
+  });
+
+  it("keeps preferences absent for an unconfigured Claude instance", () => {
+    expect(decodeClaudeSettings({}).codexRouting).toBeUndefined();
+  });
+
+  it("hydrates partial saved preferences and validates model aliases", () => {
+    const routing = decodeClaudeSettings({ codexRouting: { enabled: true } }).codexRouting;
+    expect(routing?.modelPreferences).toMatchObject({
+      claudeSubagentModel: "opus",
+      claudeSubagentModels: {},
       exploration: "codex",
-      implementation: "claude",
+      implementation: "codex",
       verification: "adaptive",
       planning: "claude",
       design: "claude",
       review: "claude",
-      secondOpinion: "reviews",
+      secondOpinion: "plans-and-reviews",
     });
-  });
-
-  it("rejects unknown managed prompt preferences in persisted settings and patches", () => {
+    expect(routing?.promptMode).toBe("managed");
+    expect(() => decodeClaudeSettings({ codexRouting: { promptMode: "automatic" } })).toThrow();
     expect(() =>
-      decodeServerSettings({
-        providers: { claudeAgent: { codexRouting: { promptMode: "automatic" } } },
-      }),
-    ).toThrow();
-    expect(() =>
-      decodeServerSettingsPatch({
-        providers: { claudeAgent: { codexRouting: { promptMode: "automatic" } } },
-      }),
-    ).toThrow();
-    expect(() =>
-      decodeServerSettings({
-        providers: {
-          claudeAgent: {
-            codexRouting: { modelPreferences: { claudeSubagentModel: "haiku" } },
-          },
-        },
-      }),
-    ).toThrow();
-    expect(() =>
-      decodeServerSettings({
-        providers: {
-          claudeAgent: {
-            codexRouting: { modelPreferences: { claudeSubagentModels: { planning: "haiku" } } },
-          },
-        },
+      decodeClaudeSettings({
+        codexRouting: { modelPreferences: { claudeSubagentModel: "unknown" } },
       }),
     ).toThrow();
   });
 });
 
 describe("provider enabled defaults", () => {
-  it("enables only Claude and Codex by default", () => {
-    const decoded = decodeServerSettings({});
-    expect(decoded.providers.codex.enabled).toBe(true);
-    expect(decoded.providers.claudeAgent.enabled).toBe(true);
-    expect(decoded.providers.cursor.enabled).toBe(false);
-    expect(decoded.providers.grok.enabled).toBe(false);
-    expect(decoded.providers.opencode.enabled).toBe(false);
+  it("keeps Muse disabled until a configured instance opts in", () => {
+    const muse = ProviderDriverKind.make("muse");
+    expect(resolveProviderInstanceEnabled({ driver: muse, config: {} })).toBe(false);
+    expect(resolveProviderInstanceEnabled({ driver: muse, enabled: true, config: {} })).toBe(true);
+    expect(
+      resolveProviderInstanceEnabled({ driver: muse, enabled: true, config: { enabled: false } }),
+    ).toBe(false);
   });
 
-  it("keeps Cursor enabled when an existing user explicitly opted in", () => {
-    const cursor = ProviderDriverKind.make("cursor");
-    const cursorId = ProviderInstanceId.make("cursor");
-    const decoded = decodeServerSettings({
-      providers: { cursor: { enabled: true } },
-      providerInstances: {
-        [cursorId]: { driver: cursor, enabled: true, config: {} },
-      },
-    });
-
-    expect(decoded.providers.cursor.enabled).toBe(true);
-    expect(resolveProviderInstanceEnabled(decoded.providerInstances[cursorId]!)).toBe(true);
+  it("enables only the stable bindings by default", () => {
+    const enabledByDefault = (driver: string) =>
+      resolveProviderInstanceEnabled({ driver: ProviderDriverKind.make(driver), config: {} });
+    expect(enabledByDefault("codex")).toBe(true);
+    expect(enabledByDefault("claudeAgent")).toBe(true);
+    for (const driver of ["cursor", "grok", "muse", "pi", "opencode", "antigravity"]) {
+      expect(enabledByDefault(driver)).toBe(false);
+    }
   });
 
   it("resolves instance enabled state with explicit false winning", () => {
@@ -1024,42 +920,6 @@ describe("ServerSettings worktree defaults", () => {
     );
     expect(decodeServerSettings({ worktreeSubmodules: "shallow" }).worktreeSubmodules).toBeNull();
     expect(decodeServerSettingsPatch({ worktreeSubmodules: null }).worktreeSubmodules).toBeNull();
-  });
-});
-
-describe("ServerSettings Cursor legacy settings", () => {
-  it("preserves V1 Cursor CLI settings when reading and writing shared settings", () => {
-    const decoded = decodeServerSettings({
-      providers: {
-        cursor: {
-          enabled: true,
-          binaryPath: "cursor-agent",
-          apiEndpoint: "http://127.0.0.1:3774",
-        },
-      },
-    });
-
-    expect(decoded.providers.cursor.enabled).toBe(true);
-    expect(encodeServerSettings(decoded).providers?.cursor).toMatchObject({
-      binaryPath: "cursor-agent",
-      apiEndpoint: "http://127.0.0.1:3774",
-    });
-  });
-
-  it("ignores obsolete Cursor CLI settings in patches", () => {
-    const patch = decodeServerSettingsPatch({
-      providers: {
-        cursor: {
-          enabled: true,
-          binaryPath: "cursor-agent",
-          apiEndpoint: "http://127.0.0.1:3774",
-        },
-      },
-    });
-
-    expect(patch.providers?.cursor?.enabled).toBe(true);
-    expect(patch.providers?.cursor).not.toHaveProperty("binaryPath");
-    expect(patch.providers?.cursor).not.toHaveProperty("apiEndpoint");
   });
 });
 
@@ -1135,13 +995,6 @@ describe("ServerSettingsPatch string normalization", () => {
       observability: {
         otlpTracesUrl: "  http://localhost:4318/v1/traces  ",
       },
-      providers: {
-        codex: {
-          binaryPath: "  /opt/homebrew/bin/codex  ",
-          homePath: "  ~/.codex  ",
-          launchArgs: "  --strict-config --enable foo  ",
-        },
-      },
       providerInstances: {
         codex_personal: {
           driver: "  codex  ",
@@ -1154,9 +1007,6 @@ describe("ServerSettingsPatch string normalization", () => {
     expect(patch.addProjectBaseDirectory).toBe("~/Development");
     expect(patch.textGenerationModelSelection?.model).toBe("gpt-5.4-mini");
     expect(patch.observability?.otlpTracesUrl).toBe("http://localhost:4318/v1/traces");
-    expect(patch.providers?.codex?.binaryPath).toBe("/opt/homebrew/bin/codex");
-    expect(patch.providers?.codex?.homePath).toBe("~/.codex");
-    expect(patch.providers?.codex?.launchArgs).toBe("--strict-config --enable foo");
     expect(patch.providerInstances?.[ProviderInstanceId.make("codex_personal")]?.driver).toBe(
       "codex",
     );
@@ -1173,19 +1023,9 @@ describe("ServerSettingsPatch string normalization", () => {
     const encoded = encodeServerSettings({
       ...defaultSettings,
       addProjectBaseDirectory: "  ~/Development  ",
-      providers: {
-        ...defaultSettings.providers,
-        codex: {
-          ...defaultSettings.providers.codex,
-          binaryPath: "  /opt/homebrew/bin/codex  ",
-          launchArgs: "  --strict-config  ",
-        },
-      },
     });
 
     expect(encoded.addProjectBaseDirectory).toBe("~/Development");
-    expect(encoded.providers?.codex?.binaryPath).toBe("/opt/homebrew/bin/codex");
-    expect(encoded.providers?.codex?.launchArgs).toBe("--strict-config");
   });
 });
 

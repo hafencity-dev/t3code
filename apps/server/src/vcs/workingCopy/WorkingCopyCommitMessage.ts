@@ -31,8 +31,11 @@ import {
   customTextGenerationPolicy,
   repositoryConventionsTextGenerationPolicy,
 } from "../../textGeneration/TextGenerationPresets.ts";
-import type { TextGenerationPolicy } from "../../textGeneration/TextGenerationPolicy.ts";
-import { limitSection, sanitizeCommitSubject } from "../../textGeneration/TextGenerationUtils.ts";
+import type { TextGenerationPolicy } from "@t3tools/provider-core/server/textGenerationPolicy";
+import {
+  limitSection,
+  sanitizeCommitSubject,
+} from "@t3tools/provider-core/server/textGenerationUtils";
 import * as commands from "./commands.ts";
 import type { WorkingCopyGit } from "./WorkingCopyGit.ts";
 

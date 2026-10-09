@@ -67,23 +67,6 @@ describe("RPC authorization scopes", () => {
     expect(requiredScopeForRpcMethod(WS_METHODS.cloudInstallRelayClient)).toBe(AuthRelayWriteScope);
   });
 
-  // fork: f5 — these actions configure and operate the Claude/Codex provider
-  // bridge. They require provider management,
-  // while observing the bridge status remains available to read-only clients.
-  it("authorizes Claude/Codex bridge actions as provider operations", () => {
-    expect(requiredScopeForRpcMethod(WS_METHODS.claudeCodexBridgeGetStatus)).toBe(
-      AuthOrchestrationReadScope,
-    );
-    for (const method of [
-      WS_METHODS.claudeCodexBridgeInstall,
-      WS_METHODS.claudeCodexBridgeStartSignIn,
-      WS_METHODS.claudeCodexBridgeSignOut,
-      WS_METHODS.claudeCodexBridgeGetModels,
-    ]) {
-      expect(requiredScopeForRpcMethod(method)).toBe(AuthProvidersManageScope);
-    }
-  });
-
   it("requires permission to operate on a thread before uploading feedback", () => {
     expect(requiredScopeForRpcMethod(WS_METHODS.providerUploadFeedback)).toBe(
       AuthOrchestrationOperateScope,
@@ -217,6 +200,7 @@ describe("RPC authorization scopes", () => {
       WS_METHODS.previewReportStatus,
       WS_METHODS.previewAdjust,
       WS_METHODS.previewClearProfile,
+      WS_METHODS.previewReportProfiles,
     ]) {
       expect(requiredScopeForRpcMethod(method)).toBe(AuthPreviewOperateScope);
     }

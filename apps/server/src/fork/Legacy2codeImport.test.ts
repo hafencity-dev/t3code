@@ -147,7 +147,7 @@ describe("Legacy2codeImport V2", () => {
         });
         assert.equal(claude.runtimeMode, "approval-required");
         const settings = yield* (yield* ServerSettings.ServerSettingsService).getSettings;
-        assert.equal(settings.providers.claudeAgent.codexRouting?.model, "gpt-5.6-sol");
+        assert.deepEqual(settings.providerInstances, {});
         assert.equal((yield* h.run).status, "already-imported");
         assert.lengthOf(h.commands, 2);
         const fs = yield* FileSystem.FileSystem;

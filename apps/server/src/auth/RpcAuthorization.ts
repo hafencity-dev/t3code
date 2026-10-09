@@ -46,9 +46,6 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.providerAccountsList]: AuthDiagnosticsReadScope, // fork: provider accounts
   [WS_METHODS.providerAccountsStartLogin]: AuthProvidersManageScope, // fork: provider accounts
   [WS_METHODS.providerAccountsActivity]: AuthDiagnosticsReadScope, // fork: provider accounts
-  [WS_METHODS.claudeCodexBridgeGetStatus]: AuthOrchestrationReadScope,
-  [WS_METHODS.claudeCodexBridgeStartSignIn]: AuthProvidersManageScope,
-  [WS_METHODS.claudeCodexBridgeGetModels]: AuthProvidersManageScope,
   [WS_METHODS.workingCopyStatus]: AuthFilesystemReadScope,
   [WS_METHODS.workingCopyDiff]: AuthFilesystemReadScope,
   [WS_METHODS.workingCopyFileAtRef]: AuthFilesystemReadScope,
@@ -65,6 +62,8 @@ export const RPC_REQUIRED_SCOPES = {
   [ORCHESTRATION_V2_WS_METHODS.getTurnDiff]: AuthOrchestrationReadScope,
   [ORCHESTRATION_V2_WS_METHODS.getFullThreadDiff]: AuthOrchestrationReadScope,
   [ORCHESTRATION_V2_WS_METHODS.searchThreads]: AuthOrchestrationReadScope,
+  [ORCHESTRATION_V2_WS_METHODS.searchThread]: AuthOrchestrationReadScope,
+  [ORCHESTRATION_V2_WS_METHODS.searchThreadStream]: AuthOrchestrationReadScope,
   [ORCHESTRATION_V2_WS_METHODS.getArchivedShellSnapshot]: AuthOrchestrationReadScope,
   [ORCHESTRATION_V2_WS_METHODS.getThreadProjection]: AuthOrchestrationReadScope,
   [ORCHESTRATION_V2_WS_METHODS.getTurnItem]: AuthOrchestrationReadScope,
@@ -205,6 +204,7 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.previewClose]: AuthPreviewOperateScope,
   [WS_METHODS.previewList]: AuthOrchestrationReadScope,
   [WS_METHODS.previewClearProfile]: AuthPreviewOperateScope,
+  [WS_METHODS.previewReportProfiles]: AuthPreviewOperateScope,
   [WS_METHODS.previewReportStatus]: AuthPreviewOperateScope,
   [WS_METHODS.subscribePreviewEvents]: AuthOrchestrationReadScope,
   [WS_METHODS.subscribeDiscoveredLocalServers]: AuthOrchestrationReadScope,

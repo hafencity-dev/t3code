@@ -628,27 +628,8 @@ export const SETTINGS_SEARCH_ITEMS = [
   // fork: f5 Claude Code → Codex routing
   {
     id: "model-routing",
-    title: "Claude Code → Codex",
+    title: "Task routing preferences",
     to: "/settings/model-routing",
-  },
-  {
-    id: "model-routing-account",
-    title: "Codex bridge account",
-    to: "/settings/model-routing",
-    targetId: "model-routing",
-  },
-  {
-    id: "model-routing-timeout",
-    title: "Routing request timeout",
-    to: "/settings/model-routing",
-    searchTerms: ["gpt codex bridge timeout tokens limits compact duration"],
-  },
-  // fork: f5 GPT fast
-  {
-    id: "model-routing-gpt-fast",
-    title: "GPT Fast",
-    to: "/settings/model-routing",
-    searchTerms: ["gpt fast priority codex bridge server-wide main agent subagents"],
   },
   {
     id: "model-routing-preferences",

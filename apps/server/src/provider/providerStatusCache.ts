@@ -1,5 +1,4 @@
 import {
-  CLAUDE_CODEX_ROUTED_SUB_PROVIDER,
   type ProviderInstanceId,
   type ServerProvider,
   ServerProvider as ServerProviderSchema,
@@ -10,7 +9,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
-import { writeFileStringAtomically } from "../atomicWrite.ts";
+import { writeFileStringAtomically } from "@t3tools/shared/atomicWrite";
 
 const decodeProviderStatusCache = Schema.decodeUnknownEffect(
   Schema.fromJsonString(ServerProviderSchema),
@@ -30,7 +29,8 @@ const mergeProviderModels = (
       (model) =>
         !model.isCustom &&
         !fallbackSlugs.has(model.slug) &&
-        model.subProvider !== CLAUDE_CODEX_ROUTED_SUB_PROVIDER,
+        // Obsolete bridge rows must not return after upgrading 2code.
+        model.subProvider !== "via Codex",
     ),
   ];
 };

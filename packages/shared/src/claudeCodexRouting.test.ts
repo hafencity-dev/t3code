@@ -1,5 +1,8 @@
 import { describe, expect, it } from "@effect/vitest";
-import { DEFAULT_CLAUDE_CODEX_MODEL_PREFERENCES } from "@t3tools/contracts";
+import {
+  DEFAULT_CLAUDE_CODEX_MODEL_PREFERENCES,
+  DEFAULT_CLAUDE_CODEX_ROUTING_SETTINGS,
+} from "@t3tools/contracts";
 
 import {
   buildClaudeCodexModelPreferencesPrompt,
@@ -8,59 +11,51 @@ import {
   resolveClaudeCodexRoutingPrompt,
 } from "./claudeCodexRouting.ts";
 
-describe("Claude Codex routing prompt", () => {
-  it("renders the effective model into the managed Haiku-slot instructions", () => {
-    const prompt = buildManagedClaudeCodexRoutingPrompt("gpt-5.5");
-    expect(prompt).toContain("haiku");
-    expect(prompt).toContain("gpt-5.5");
-    expect(prompt).toContain("do not run Anthropic Haiku");
+describe("native task preference prompt", () => {
+  it("discovers available native targets before requesting the configured model", () => {
+    const prompt = buildManagedClaudeCodexRoutingPrompt("gpt-6-astra");
+    expect(prompt).toContain("orchestrator_capabilities");
+    expect(prompt).toContain('driverKind: "codex"');
+    expect(prompt).toContain("canRunChildTask: true");
+    expect(prompt).toContain("delegate_task.target");
+    expect(prompt).toContain("only when that instance advertises its exact ID");
+    expect(prompt).toContain("never invent an instance ID or model");
+    expect(prompt).toContain("report that limitation");
+    expect(prompt).toContain('mode: "async"');
+    expect(prompt).toContain("completion notifies the parent automatically");
+    expect(prompt).toContain("Haiku alias always means Claude Haiku");
+    expect(prompt).not.toContain('Agent(model: "haiku")');
     expect(prompt).toContain("Exploration and research → Codex subagent");
     expect(prompt).toContain("Planning and architecture → Claude subagent");
-    expect(prompt).toContain('Agent(model: "opus")');
-    expect(prompt).toContain("acts as a thin orchestrator");
-    expect(prompt).toContain("Do not keep planning, design, implementation, review");
   });
 
-  it("uses the verified default for blank model selections", () => {
+  it("preserves existing default-model upgrades and explicit custom model choices", () => {
     expect(effectiveClaudeCodexModel("  ")).toBe("gpt-6-astra");
-  });
-
-  it("upgrades saved Sol routing across the bridge and task preferences", () => {
     expect(effectiveClaudeCodexModel(" gpt-5.6-sol ")).toBe("gpt-6-astra");
-    const prompt = buildManagedClaudeCodexRoutingPrompt("gpt-5.6-sol");
-    expect(prompt).toContain("gpt-6-astra");
-    expect(prompt).not.toContain("gpt-5.6-sol");
-    expect(effectiveClaudeCodexModel("gpt-5.5")).toBe("gpt-5.5");
+    expect(effectiveClaudeCodexModel(" gpt-custom ")).toBe("gpt-custom");
   });
 
-  it("renders each structured task preference and the selected second-opinion policy", () => {
-    const prompt = buildClaudeCodexModelPreferencesPrompt("gpt-5.5", {
+  it("honors each task route, its Claude model and the second-opinion scope", () => {
+    const prompt = buildClaudeCodexModelPreferencesPrompt("gpt-6-astra", {
       ...DEFAULT_CLAUDE_CODEX_MODEL_PREFERENCES,
       claudeSubagentModel: "fable",
-      claudeSubagentModels: {
-        exploration: "sonnet",
-        implementation: "opus",
-        review: "sonnet",
-      },
+      claudeSubagentModels: { exploration: "sonnet", implementation: "opus", review: "sonnet" },
       exploration: "claude",
       implementation: "adaptive",
       secondOpinion: "reviews",
     });
     expect(prompt).toContain("Exploration and research → Claude subagent");
-    expect(prompt).toContain(
-      "Exploration and research → Claude subagent: Delegate codebase mapping",
-    );
     expect(prompt).toContain('Agent(model: "sonnet")');
     expect(prompt).toContain("Implementation and refactors → best-fit subagent");
     expect(prompt).toContain('use `Agent(model: "opus")` for interactive');
     expect(prompt).toContain("consequential reviews of real changes");
     expect(prompt).not.toContain("consequential plans and architecture decisions");
+    expect(prompt).toContain("native Codex subagent through `delegate_task`");
     expect(prompt).toContain("run both blind opinions in parallel");
-    expect(prompt).toContain('run the Claude opinion through `Agent(model: "sonnet")`');
   });
 
   it("uses the matching category model for plan and review second opinions", () => {
-    const prompt = buildClaudeCodexModelPreferencesPrompt("gpt-5.5", {
+    const prompt = buildClaudeCodexModelPreferencesPrompt("gpt-6-astra", {
       ...DEFAULT_CLAUDE_CODEX_MODEL_PREFERENCES,
       claudeSubagentModels: { planning: "opus", review: "sonnet" },
     });
@@ -70,65 +65,35 @@ describe("Claude Codex routing prompt", () => {
     expect(prompt).toContain('reviews of real changes, use `Agent(model: "sonnet")`');
   });
 
-  it("keeps the non-editable bridge fact ahead of a custom policy and user additions", () => {
+  it("retains custom instructions after accurate native delegation guidance", () => {
     const prompt = resolveClaudeCodexRoutingPrompt({
+      ...DEFAULT_CLAUDE_CODEX_ROUTING_SETTINGS,
       enabled: true,
-      model: "gpt-5.5",
-      modelPreferences: DEFAULT_CLAUDE_CODEX_MODEL_PREFERENCES,
       promptMode: "custom",
       customPrompt: "Custom routing.",
       additionalInstructions: "Team conventions.",
     });
-    expect(prompt).toContain("The Claude `haiku` subagent slot is remapped");
     expect(prompt).toContain("Custom routing.\n\nTeam conventions.");
-    expect(prompt?.indexOf("Claude Code → Codex bridge")).toBeLessThan(
+    expect(prompt?.indexOf("orchestrator_capabilities")).toBeLessThan(
       prompt?.indexOf("Custom routing.") ?? -1,
     );
-  });
-
-  it("can omit preference guidance without hiding the bridge mechanics", () => {
-    const prompt = resolveClaudeCodexRoutingPrompt({
-      enabled: true,
-      model: "gpt-5.5",
-      modelPreferences: DEFAULT_CLAUDE_CODEX_MODEL_PREFERENCES,
-      promptMode: "none",
-      customPrompt: "",
-      additionalInstructions: "",
-    });
-    expect(prompt).toContain("Claude Code → Codex bridge");
     expect(prompt).not.toContain("Model preferences");
   });
 
-  it("uses a truthful all-Codex prompt when the routed model is selected as the main model", () => {
-    const prompt = resolveClaudeCodexRoutingPrompt(
-      {
-        enabled: true,
-        model: "gpt-5.5",
-        modelPreferences: DEFAULT_CLAUDE_CODEX_MODEL_PREFERENCES,
-        promptMode: "managed",
-        customPrompt: "",
-        additionalInstructions: "Team conventions.",
-      },
-      "gpt-5.5",
-      "gpt-5.5",
-    );
-    expect(prompt).toContain("Codex main session through Claude Code");
-    expect(prompt).toContain("It is not running an Anthropic model");
-    expect(prompt).not.toContain("Subagent routing");
-    expect(prompt).toContain("implementation, planning, design, review, verification");
+  it("omits managed task preferences when disabled independently of extra instructions", () => {
+    const prompt = resolveClaudeCodexRoutingPrompt({
+      ...DEFAULT_CLAUDE_CODEX_ROUTING_SETTINGS,
+      enabled: true,
+      promptMode: "none",
+      additionalInstructions: "Team conventions.",
+    });
+    expect(prompt).toContain("Native task delegation");
     expect(prompt).toContain("Team conventions.");
+    expect(prompt).not.toContain("Model preferences");
   });
 
-  it("sends no routing prompt when the slot is disabled", () => {
-    expect(
-      resolveClaudeCodexRoutingPrompt({
-        enabled: false,
-        model: "",
-        modelPreferences: DEFAULT_CLAUDE_CODEX_MODEL_PREFERENCES,
-        promptMode: "managed",
-        customPrompt: "",
-        additionalInstructions: "",
-      }),
-    ).toBeUndefined();
+  it("sends no preference prompt when the feature is disabled or absent", () => {
+    expect(resolveClaudeCodexRoutingPrompt(DEFAULT_CLAUDE_CODEX_ROUTING_SETTINGS)).toBeUndefined();
+    expect(resolveClaudeCodexRoutingPrompt(undefined)).toBeUndefined();
   });
 });

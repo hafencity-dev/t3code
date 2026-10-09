@@ -3,7 +3,6 @@ import * as NodeCrypto from "node:crypto";
 
 import {
   CommandId,
-  DEFAULT_CLAUDE_CODEX_ROUTING_SETTINGS,
   DEFAULT_MODEL_BY_PROVIDER,
   DEFAULT_PROVIDER_INTERACTION_MODE,
   IsoDateTime,
@@ -26,9 +25,8 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
-import { writeFileStringAtomically } from "../atomicWrite.ts";
+import { writeFileStringAtomically } from "@t3tools/shared/atomicWrite";
 import * as ServerConfig from "../config.ts";
-import * as ServerSettings from "../serverSettings.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 
@@ -157,7 +155,6 @@ export const importLegacy2CodeManifest = Effect.gen(function* () {
   const serverConfig = yield* ServerConfig.ServerConfig;
   const orchestrationEngine = yield* Orchestrator.OrchestratorV2;
   const projects = yield* ProjectService.ProjectService;
-  const serverSettings = yield* ServerSettings.ServerSettingsService;
   const paths = resolveLegacy2CodeImportPaths(serverConfig.stateDir, path);
 
   const manifestExists = yield* fileSystem.exists(paths.manifestPath);
@@ -260,20 +257,6 @@ export const importLegacy2CodeManifest = Effect.gen(function* () {
     } else {
       threadsReused += 1;
     }
-  }
-
-  if (manifest.claudeCodexRouting) {
-    yield* serverSettings.updateSettings({
-      providers: {
-        claudeAgent: {
-          codexRouting: {
-            ...DEFAULT_CLAUDE_CODEX_ROUTING_SETTINGS,
-            enabled: true,
-            model: manifest.claudeCodexRouting.model ?? "",
-          },
-        },
-      },
-    });
   }
 
   const importedAt = DateTime.formatIso(yield* DateTime.now);

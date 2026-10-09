@@ -1,11 +1,6 @@
 /** Settings → Model Routing (fork feature f5). */
 import { useAtomValue } from "@effect/atom-react";
 import {
-  isAtomCommandInterrupted,
-  squashAtomCommandFailure,
-} from "@t3tools/client-runtime/state/runtime";
-import {
-  CLAUDE_CODEX_BRIDGE_VERSION,
   DEFAULT_CLAUDE_CODEX_MODEL_PREFERENCES,
   DEFAULT_CLAUDE_CODEX_ROUTING_SETTINGS,
   type ClaudeCodexClaudeSubagentModel,
@@ -14,61 +9,28 @@ import {
   type ClaudeCodexRoutingSettings,
   type ClaudeCodexSecondOpinionMode,
   type ClaudeCodexTaskRoute,
-  type EnvironmentId,
   type ProviderInstanceId,
   type ServerProviderModel,
 } from "@t3tools/contracts";
 import {
-  DEFAULT_CLAUDE_CODEX_MODEL,
   effectiveClaudeCodexModel,
   resolveClaudeCodexRoutingPrompt,
 } from "@t3tools/shared/claudeCodexRouting";
-import {
-  CheckIcon,
-  CopyIcon,
-  ExternalLinkIcon,
-  InfoIcon,
-  RefreshCwIcon,
-  RouteIcon,
-  ShieldCheckIcon,
-  UnplugIcon,
-} from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { CheckIcon, CopyIcon, RouteIcon } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { usePrimarySettings, useUpdatePrimarySettings } from "../../hooks/useSettings";
-import { ensureLocalApi } from "../../localApi";
-import { usePrimaryEnvironment } from "../../state/environments";
-import { claudeCodexRoutingEnvironment } from "../../state/claudeCodexRouting";
-import { useEnvironmentQuery } from "../../state/query";
-import {
-  primaryServerConfigAtom,
-  primaryServerProvidersAtom,
-  serverEnvironment,
-} from "../../state/server";
-import { useAtomCommand } from "../../state/use-atom-command";
-import { Alert, AlertDescription, AlertTitle } from "../ui/alert";
-import { Badge } from "../ui/badge";
+import { primaryServerProvidersAtom } from "../../state/server";
 import { Button } from "../ui/button";
-import {
-  Dialog,
-  DialogDescription,
-  DialogHeader,
-  DialogPanel,
-  DialogPopup,
-  DialogTitle,
-} from "../ui/dialog";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
-import { Spinner } from "../ui/spinner";
 import { Switch } from "../ui/switch";
 import { Textarea } from "../ui/textarea";
-import { stackedThreadToast, toastManager } from "../ui/toast";
 import {
   buildClaudeCodexRoutingPatch,
   claudeRoutingProviders,
   readClaudeCodexRouting,
 } from "./ModelRoutingSettings.logic";
-import { RedactedSensitiveText } from "./RedactedSensitiveText";
 import {
   SettingResetButton,
   SettingsPageContainer,
@@ -76,9 +38,6 @@ import {
   SettingsSection,
 } from "./settingsLayout";
 import { searchableSetting } from "./settingsSearch";
-// fork: f5 GPT fast
-import { CLAUDE_CODEX_FAST_MODE_DESCRIPTION } from "../chat/ClaudeCodexFastModeControl.logic";
-import { ClaudeCodexFastModeEnvironmentSettings } from "./ClaudeCodexFastModeEnvironmentSettings"; // fork: f5 GPT fast
 
 const PROMPT_MODES: ReadonlyArray<{
   readonly value: ClaudeCodexRoutingPromptMode;
@@ -86,7 +45,7 @@ const PROMPT_MODES: ReadonlyArray<{
 }> = [
   { value: "managed", label: "T3 preferences" },
   { value: "custom", label: "Custom policy" },
-  { value: "none", label: "Bridge facts only" },
+  { value: "none", label: "No task policy" },
 ];
 
 const TASK_ROUTE_OPTIONS: ReadonlyArray<{
@@ -174,12 +133,6 @@ const SECOND_OPINION_OPTIONS: ReadonlyArray<{
   { value: "plans-and-reviews", label: "Plans & reviews" },
 ];
 
-function commandError(result: { readonly cause: unknown }, fallback: string): string {
-  const error = squashAtomCommandFailure(result as never);
-  if (error instanceof Error && error.message.trim()) return error.message;
-  return typeof error === "string" && error.trim() ? error : fallback;
-}
-
 function CopyAction({ value, label }: { readonly value: string; readonly label: string }) {
   const { copyToClipboard, isCopied } = useCopyToClipboard();
   return (
@@ -191,119 +144,6 @@ function CopyAction({ value, label }: { readonly value: string; readonly label: 
     >
       {isCopied ? <CheckIcon className="size-3.5" /> : <CopyIcon className="size-3.5" />}
     </Button>
-  );
-}
-
-function CodexBridgeSignInDialog({
-  open,
-  initialAttempt,
-  environmentId,
-  onOpenChange,
-  onCompleted,
-}: {
-  readonly open: boolean;
-  readonly initialAttempt: number;
-  readonly environmentId: EnvironmentId | null;
-  readonly onOpenChange: (open: boolean) => void;
-  readonly onCompleted: () => void;
-}) {
-  const [attempt, setAttempt] = useState(initialAttempt);
-  const eventAtom =
-    open && environmentId
-      ? claudeCodexRoutingEnvironment.signInEvents({
-          environmentId,
-          input: { attempt },
-        })
-      : null;
-  const events = useEnvironmentQuery(eventAtom);
-  const event = events.data ?? undefined;
-  const openedUrlRef = useRef<string | null>(null);
-  const completedRef = useRef(false);
-  const onCompletedRef = useRef(onCompleted);
-  onCompletedRef.current = onCompleted;
-
-  useEffect(() => {
-    if (event?._tag !== "deviceCode" || openedUrlRef.current === event.verificationUrl) return;
-    openedUrlRef.current = event.verificationUrl;
-    void ensureLocalApi()
-      .shell.openExternal(event.verificationUrl)
-      .catch(() => undefined);
-  }, [event]);
-
-  useEffect(() => {
-    if (event?._tag !== "completed" || completedRef.current) return;
-    completedRef.current = true;
-    onCompletedRef.current();
-    const timer = setTimeout(() => onOpenChange(false), 1_200);
-    return () => clearTimeout(timer);
-  }, [event, onOpenChange]);
-
-  const retry = () => {
-    completedRef.current = false;
-    openedUrlRef.current = null;
-    setAttempt((value) => value + 1);
-  };
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      {open ? (
-        <DialogPopup>
-          <DialogHeader>
-            <DialogTitle>
-              {event?._tag === "completed" ? "Codex connected" : "Connect Codex"}
-            </DialogTitle>
-            <DialogDescription>
-              Authorize the isolated account used only by Claude Code model routing.
-            </DialogDescription>
-          </DialogHeader>
-          <DialogPanel>
-            {event === undefined || event._tag === "started" ? (
-              <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                <Spinner className="size-4" />
-                <span>Installing the verified bridge and requesting a device code…</span>
-              </div>
-            ) : null}
-            {event?._tag === "deviceCode" ? (
-              <div className="grid gap-3">
-                <div className="flex items-center justify-between rounded-lg border border-border/70 bg-muted/40 p-3">
-                  <code className="font-mono text-2xl tracking-[0.18em]">{event.userCode}</code>
-                  <CopyAction value={event.userCode} label="Copy device code" />
-                </div>
-                <p className="text-sm text-muted-foreground">
-                  Enter the code at{" "}
-                  <a
-                    className="inline-flex items-center gap-1 text-primary underline underline-offset-2"
-                    href={event.verificationUrl}
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    OpenAI device login <ExternalLinkIcon className="size-3" />
-                  </a>
-                </p>
-                <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                  <Spinner className="size-3.5" /> Waiting for confirmation…
-                </div>
-              </div>
-            ) : null}
-            {event?._tag === "completed" ? (
-              <div className="flex items-center gap-2 text-sm">
-                <CheckIcon className="size-4 text-success" /> Ready for Claude Code routing.
-              </div>
-            ) : null}
-            {event?._tag === "failed" || events.error ? (
-              <div className="grid gap-3">
-                <p className="whitespace-pre-wrap text-sm text-destructive">
-                  {events.error ?? (event?._tag === "failed" ? event.message : "Sign-in failed.")}
-                </p>
-                <Button className="w-fit" size="sm" onClick={retry}>
-                  Try again
-                </Button>
-              </div>
-            ) : null}
-          </DialogPanel>
-        </DialogPopup>
-      ) : null}
-    </Dialog>
   );
 }
 
@@ -355,10 +195,7 @@ function PromptEditor({
 export function ModelRoutingSettingsPanel() {
   const settings = usePrimarySettings();
   const updateSettings = useUpdatePrimarySettings();
-  const primary = usePrimaryEnvironment();
-  const serverConfig = useAtomValue(primaryServerConfigAtom);
   const providers = useAtomValue(primaryServerProvidersAtom);
-  const supported = serverConfig?.environment.capabilities.claudeCodexRouting === true;
   const claudeProviders = useMemo(() => claudeRoutingProviders(providers), [providers]);
   const [selectedId, setSelectedId] = useState<ProviderInstanceId | null>(null);
   const selected =
@@ -366,39 +203,6 @@ export function ModelRoutingSettingsPanel() {
   const routing = selected
     ? readClaudeCodexRouting(settings, selected.instanceId)
     : DEFAULT_CLAUDE_CODEX_ROUTING_SETTINGS;
-  const environmentId = primary?.environmentId ?? null;
-  const target = environmentId && supported ? { environmentId, input: {} } : null;
-  const [forceModelsRefresh, setForceModelsRefresh] = useState(false);
-  const statusQuery = useEnvironmentQuery(
-    target ? serverEnvironment.claudeCodexBridgeStatus(target) : null,
-  );
-  const modelsQuery = useEnvironmentQuery(
-    environmentId && supported
-      ? serverEnvironment.claudeCodexBridgeModels({
-          environmentId,
-          input: { refresh: forceModelsRefresh },
-        })
-      : null,
-  );
-  const install = useAtomCommand(serverEnvironment.installClaudeCodexBridge);
-  const signOut = useAtomCommand(serverEnvironment.signOutClaudeCodexBridge);
-  const [installing, setInstalling] = useState(false);
-  const [signingOut, setSigningOut] = useState(false);
-  const [signInOpen, setSignInOpen] = useState(false);
-  const [signInAttempt, setSignInAttempt] = useState(0);
-  const [signOutArmed, setSignOutArmed] = useState(false);
-
-  const openSignIn = () => {
-    setSignInAttempt((value) => value + 1);
-    setSignInOpen(true);
-  };
-
-  useEffect(() => {
-    if (!signOutArmed) return;
-    const timer = setTimeout(() => setSignOutArmed(false), 5_000);
-    return () => clearTimeout(timer);
-  }, [signOutArmed]);
-
   const saveRouting = useCallback(
     (next: ClaudeCodexRoutingSettings) => {
       if (!selected) return;
@@ -407,93 +211,15 @@ export function ModelRoutingSettingsPanel() {
     [selected, settings, updateSettings],
   );
 
-  const handleInstall = async () => {
-    if (!environmentId || installing) return;
-    setInstalling(true);
-    const result = await install({ environmentId, input: {} });
-    setInstalling(false);
-    if (result._tag === "Success") {
-      statusQuery.refresh();
-      return;
-    }
-    if (!isAtomCommandInterrupted(result)) {
-      toastManager.add(
-        stackedThreadToast({
-          type: "error",
-          title: "Could not install the Codex bridge",
-          description: commandError(result, "The bridge installation failed."),
-        }),
-      );
-    }
-  };
-
-  const handleSignOut = async () => {
-    if (!environmentId || signingOut) return;
-    if (!signOutArmed) {
-      setSignOutArmed(true);
-      return;
-    }
-    setSignOutArmed(false);
-    setSigningOut(true);
-    const result = await signOut({ environmentId, input: {} });
-    setSigningOut(false);
-    if (result._tag === "Success") {
-      statusQuery.refresh();
-      modelsQuery.refresh();
-      return;
-    }
-    if (!isAtomCommandInterrupted(result)) {
-      toastManager.add({
-        type: "error",
-        title: "Could not disconnect Codex",
-        description: commandError(result, "Sign-out failed."),
-      });
-    }
-  };
-
-  // fork: f5 GPT fast
-  const fastModeSupported = serverConfig?.environment.capabilities.claudeCodexFastMode === true;
-  const gptFastSetting = primary ? (
-    <SettingsRow
-      {...searchableSetting("model-routing-gpt-fast")}
-      title="GPT Fast"
-      description={CLAUDE_CODEX_FAST_MODE_DESCRIPTION}
-      serverScoped
-      aria-disabled={!fastModeSupported || undefined}
-      status={!fastModeSupported ? "Update the environment to enable GPT Fast." : undefined}
-      control={
-        <Switch
-          checked={settings.claudeCodexFastModeEnabled === true}
-          disabled={!fastModeSupported}
-          aria-label="GPT Fast"
-          onCheckedChange={(next) => updateSettings({ claudeCodexFastModeEnabled: next })}
-        />
-      }
-    />
-  ) : (
-    <ClaudeCodexFastModeEnvironmentSettings />
-  );
-
-  if (!supported) {
-    return (
-      <SettingsPageContainer>
-        <SettingsSection {...searchableSetting("model-routing")} title="Model routing">
-          <SettingsRow
-            title="Not available on this server"
-            description="Update the environment to configure Claude Code → Codex routing."
-          />
-          {/* fork: f5 GPT fast — hosted targets remain reachable without primary routing. */}
-          {gptFastSetting}
-        </SettingsSection>
-      </SettingsPageContainer>
-    );
-  }
-
-  const status = statusQuery.data;
   const effectiveModel = effectiveClaudeCodexModel(routing.model);
-  const modelOptions = (modelsQuery.data?.models ?? [{ id: DEFAULT_CLAUDE_CODEX_MODEL }]).filter(
-    (model) => model.id !== "gpt-5.6-sol",
-  );
+  const modelOptions = [
+    ...new Map(
+      providers
+        .filter((provider) => provider.driver === "codex" && provider.enabled)
+        .flatMap((provider) => provider.models)
+        .map((model) => [model.slug, model]),
+    ).values(),
+  ];
   const exactPrompt = resolveClaudeCodexRoutingPrompt(routing, effectiveModel);
   const managedPreferencesActive = routing.promptMode === "managed";
   const claudeSubagentModels = selected ? claudeSubagentModelOptions(selected.models) : [];
@@ -514,108 +240,9 @@ export function ModelRoutingSettingsPanel() {
     <SettingsPageContainer>
       <SettingsSection
         {...searchableSetting("model-routing")}
-        title="Claude Code → Codex"
+        title="Task routing preferences"
         icon={<RouteIcon className="size-4 text-muted-foreground" />}
       >
-        <SettingsRow
-          {...searchableSetting("model-routing-account")}
-          title="Codex bridge account"
-          description="A separate, environment-local Codex login for the Claude Code Haiku slot. Credentials never pass through the T3 client."
-          status={
-            status?.supported === false ? (
-              "This operating system or architecture is not supported."
-            ) : status?.authenticated ? (
-              status.account?.email ? (
-                <RedactedSensitiveText
-                  value={status.account.email}
-                  ariaLabel="Reveal Codex bridge account email"
-                  revealTooltip="Reveal account"
-                  hideTooltip="Hide account"
-                />
-              ) : (
-                (status.account?.plan ?? "Connected")
-              )
-            ) : statusQuery.isPending ? (
-              "Checking connection…"
-            ) : (
-              "Not connected"
-            )
-          }
-          control={
-            <div className="flex flex-wrap items-center gap-2">
-              <Badge variant={status?.authenticated ? "success" : "secondary"}>
-                {status?.authenticated ? "Connected" : "Offline"}
-              </Badge>
-              {!status?.authenticated ? (
-                <Button
-                  size="sm"
-                  onClick={openSignIn}
-                  disabled={!environmentId || status?.supported === false}
-                >
-                  Connect Codex
-                </Button>
-              ) : (
-                <>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    disabled={status.supported === false}
-                    onClick={openSignIn}
-                  >
-                    Switch account
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant={signOutArmed ? "destructive-outline" : "ghost-muted"}
-                    disabled={signingOut}
-                    onClick={() => void handleSignOut()}
-                  >
-                    {signingOut ? "Disconnecting…" : signOutArmed ? "Confirm" : "Disconnect"}
-                  </Button>
-                </>
-              )}
-            </div>
-          }
-        >
-          <div className="mt-3 flex max-w-3xl flex-wrap items-center gap-x-4 gap-y-2 pb-3 text-xs text-muted-foreground">
-            <span>Runtime v{status?.version ?? CLAUDE_CODEX_BRIDGE_VERSION}</span>
-            <span>
-              {status?.installed ? "Verified runtime installed" : "Runtime not installed"}
-            </span>
-            {status?.running || modelsQuery.data?.source === "live" ? (
-              <span>Bridge active</span>
-            ) : (
-              <span>Starts on demand</span>
-            )}
-            {!status?.installed ? (
-              <Button
-                size="xs"
-                variant="ghost"
-                disabled={installing || status?.supported === false}
-                onClick={() => void handleInstall()}
-              >
-                {installing ? <Spinner className="size-3" /> : null}
-                {installing ? "Installing…" : "Install only"}
-              </Button>
-            ) : null}
-          </div>
-          {status?.supported === false || status?.error || statusQuery.error ? (
-            <Alert variant="warning" className="mb-3 max-w-3xl">
-              <InfoIcon />
-              <AlertTitle>Bridge needs attention</AlertTitle>
-              <AlertDescription>
-                {statusQuery.error ??
-                  status?.error ??
-                  "No verified bridge runtime is available for this platform."}
-              </AlertDescription>
-            </Alert>
-          ) : null}
-        </SettingsRow>
-        {/* fork: f5 GPT fast */}
-        {gptFastSetting}
-      </SettingsSection>
-
-      <SettingsSection title="Haiku slot">
         {selected ? (
           <>
             <SettingsRow
@@ -640,14 +267,13 @@ export function ModelRoutingSettingsPanel() {
               }
             />
             <SettingsRow
-              title="Route Haiku to Codex"
-              description="Maps Claude Code's short haiku alias to the selected GPT/Codex model. Explicit Anthropic Haiku model IDs continue to use Anthropic."
+              title="Use task routing preferences"
+              description="Guide Claude when delegating tasks through the connected Claude and Codex providers."
               status="Takes effect when a new Claude Code session starts."
               control={
                 <Switch
                   checked={routing.enabled}
-                  disabled={!status?.authenticated}
-                  aria-label="Route Haiku to Codex"
+                  aria-label="Use task routing preferences"
                   onCheckedChange={(checked) =>
                     saveRouting({ ...routing, enabled: Boolean(checked) })
                   }
@@ -656,15 +282,16 @@ export function ModelRoutingSettingsPanel() {
             />
             <SettingsRow
               title="Codex model"
-              description="The model Claude Code reaches whenever an agent or workflow uses model: haiku."
+              description="Preferred model for tasks delegated to the native Codex provider."
               status={
-                modelsQuery.data?.error ?? `Catalog: ${modelsQuery.data?.source ?? "fallback"}`
+                modelOptions.length === 0
+                  ? "Enable Codex in Providers to see available models."
+                  : undefined
               }
               control={
                 <div className="flex items-center gap-2">
                   <Select
                     value={effectiveModel}
-                    disabled={!status?.authenticated}
                     onValueChange={(value) => saveRouting({ ...routing, model: String(value) })}
                   >
                     <SelectTrigger className="w-full sm:w-56" aria-label="Codex routing model">
@@ -672,64 +299,20 @@ export function ModelRoutingSettingsPanel() {
                     </SelectTrigger>
                     <SelectPopup align="end" alignItemWithTrigger={false}>
                       {modelOptions.map((model) => (
-                        <SelectItem key={model.id} value={model.id}>
-                          {model.id}
+                        <SelectItem key={model.slug} value={model.slug}>
+                          {model.name ?? model.slug}
                         </SelectItem>
                       ))}
                     </SelectPopup>
                   </Select>
-                  <Button
-                    size="icon-sm"
-                    variant="ghost"
-                    aria-label="Refresh Codex models"
-                    disabled={!status?.authenticated || modelsQuery.isPending}
-                    onClick={() => {
-                      if (forceModelsRefresh) modelsQuery.refresh();
-                      else setForceModelsRefresh(true);
-                    }}
-                  >
-                    <RefreshCwIcon className="size-3.5" />
-                  </Button>
                 </div>
               }
-            />
-            <SettingsRow
-              {...searchableSetting("model-routing-timeout")}
-              title="Request timeout"
-              description="Optional maximum duration of one model request. No time limit lets active requests continue for hours. Applies to new sessions."
-              control={
-                <Select
-                  value={String(routing.requestTimeoutSeconds ?? 0)}
-                  onValueChange={(value) =>
-                    saveRouting({ ...routing, requestTimeoutSeconds: Number(value) })
-                  }
-                >
-                  <SelectTrigger className="w-40" aria-label="Routing request timeout">
-                    <SelectValue>
-                      {routing.requestTimeoutSeconds
-                        ? `${routing.requestTimeoutSeconds / 60} minutes`
-                        : "No time limit"}
-                    </SelectValue>
-                  </SelectTrigger>
-                  <SelectPopup>
-                    {[0, 300, 900, 1800, 3600, 7200].map((seconds) => (
-                      <SelectItem key={seconds} value={String(seconds)}>
-                        {seconds === 0 ? "No time limit" : `${seconds / 60} minutes`}
-                      </SelectItem>
-                    ))}
-                  </SelectPopup>
-                </Select>
-              }
-            />
-            <SettingsRow
-              title="Token limits"
-              description="GPT output limits are managed by Codex and cannot be changed here. Configure Auto-compact after in the Claude provider settings to control when conversation history is compacted."
             />
           </>
         ) : (
           <SettingsRow
             title="No Claude Code instance"
-            description="Enable Claude Code in Providers before configuring its Haiku slot."
+            description="Enable Claude Code in Providers before configuring task routing."
           />
         )}
       </SettingsSection>
@@ -746,7 +329,7 @@ export function ModelRoutingSettingsPanel() {
               status={
                 managedPreferencesActive
                   ? "The main session stays thin: it delegates, coordinates, and owns the final synthesis."
-                  : "Inactive while a custom policy or bridge-facts-only mode is selected below."
+                  : "Inactive while a custom policy or no task policy is selected below."
               }
               resetAction={
                 modelPreferencesCustomized ? (
@@ -911,7 +494,7 @@ export function ModelRoutingSettingsPanel() {
       <SettingsSection {...searchableSetting("model-routing-prompt")} title="Prompt instructions">
         <SettingsRow
           title="Preference instructions"
-          description="Bridge mechanics are always injected. Use the structured T3 preferences above, replace only the preference policy, or inject the bridge facts alone."
+          description="Use structured task preferences, supply a custom policy, or add only your additional instructions."
           control={
             <Select
               value={routing.promptMode}
@@ -941,15 +524,15 @@ export function ModelRoutingSettingsPanel() {
         {routing.promptMode === "custom" ? (
           <PromptEditor
             label="Custom preference policy"
-            description="Replaces the structured model preferences for this Claude instance. The fixed bridge mechanics remain intact."
+            description="Replaces the structured model preferences for this Claude instance. Tasks use the connected native providers."
             value={routing.customPrompt}
-            placeholder="Explain how and when Claude should delegate work through the haiku slot…"
+            placeholder="Explain how and when Claude should delegate work to Claude and Codex…"
             onSave={(customPrompt) => saveRouting({ ...routing, customPrompt })}
           />
         ) : null}
         <PromptEditor
           label="Additional instructions"
-          description="Appended after the bridge facts and managed or custom preference policy. Use this for project- or team-specific routing rules."
+          description="Appended after the managed or custom preference policy. Use this for project- or team-specific routing rules."
           value={routing.additionalInstructions}
           placeholder="Prefer Codex for independent implementation and review tasks…"
           disabled={!selected}
@@ -957,44 +540,18 @@ export function ModelRoutingSettingsPanel() {
         />
         <SettingsRow
           title="Exact prompt preview"
-          description="The exact bridge facts, preference policy, and additions prepended to the normal T3 system-prompt rules for a new session."
+          description="The preference policy and additions included with the normal instructions for a new Claude session."
           control={
             exactPrompt ? <CopyAction value={exactPrompt} label="Copy routing prompt" /> : undefined
           }
         >
           <div className="mt-3 max-w-3xl pb-3.5">
-            <pre className="max-h-96 overflow-auto whitespace-pre-wrap rounded-lg bg-muted/40 px-3 py-3 font-mono text-[12px] leading-[1.55] text-foreground/90">
+            <pre className="max-h-96 overflow-auto whitespace-pre-wrap rounded-lg bg-muted/40 px-3 py-3 font-mono text-xs leading-relaxed text-foreground/90">
               {exactPrompt ?? "No routing prompt is injected."}
             </pre>
-            <p className="mt-2 flex items-start gap-1.5 text-xs text-muted-foreground">
-              <ShieldCheckIcon className="mt-0.5 size-3.5 shrink-0" />
-              Claude&apos;s built-in system prompt remains intact. T3 appends this text through the
-              official Claude Code preset API.
-            </p>
           </div>
         </SettingsRow>
       </SettingsSection>
-
-      <Alert variant="info">
-        <UnplugIcon />
-        <AlertTitle>Session-safe by design</AlertTitle>
-        <AlertDescription>
-          The bridge binds to loopback, uses a random local key, verifies its pinned download, and
-          routes only recognized Codex model IDs away from Anthropic.
-        </AlertDescription>
-      </Alert>
-
-      <CodexBridgeSignInDialog
-        key={signInAttempt}
-        open={signInOpen}
-        initialAttempt={signInAttempt}
-        environmentId={environmentId}
-        onOpenChange={setSignInOpen}
-        onCompleted={() => {
-          statusQuery.refresh();
-          modelsQuery.refresh();
-        }}
-      />
     </SettingsPageContainer>
   );
 }

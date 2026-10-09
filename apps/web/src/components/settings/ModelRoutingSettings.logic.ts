@@ -27,7 +27,7 @@ export function claudeRoutingProviders(
 }
 
 export function readClaudeCodexRouting(
-  settings: Pick<ServerSettings, "providers" | "providerInstances">,
+  settings: Pick<ServerSettings, "providerInstances">,
   instanceId: ProviderInstanceId,
 ): ClaudeCodexRoutingSettings {
   const explicit = settings.providerInstances[instanceId];
@@ -39,11 +39,11 @@ export function readClaudeCodexRouting(
       return DEFAULT_CLAUDE_CODEX_ROUTING_SETTINGS;
     }
   }
-  return settings.providers.claudeAgent.codexRouting ?? DEFAULT_CLAUDE_CODEX_ROUTING_SETTINGS;
+  return DEFAULT_CLAUDE_CODEX_ROUTING_SETTINGS;
 }
 
 export function buildClaudeCodexRoutingPatch(
-  settings: Pick<ServerSettings, "providers" | "providerInstances">,
+  settings: Pick<ServerSettings, "providerInstances">,
   instanceId: ProviderInstanceId,
   routing: ClaudeCodexRoutingSettings,
 ): ServerSettingsPatch {
@@ -64,8 +64,16 @@ export function buildClaudeCodexRoutingPatch(
   }
 
   const defaultId = defaultInstanceIdForDriver(ProviderDriverKind.make("claudeAgent"));
-  if (instanceId !== defaultId) {
+  if (explicit || instanceId !== defaultId) {
     return {};
   }
-  return { providers: { claudeAgent: { codexRouting: routing } } };
+  return {
+    providerInstances: {
+      ...settings.providerInstances,
+      [instanceId]: {
+        driver: ProviderDriverKind.make("claudeAgent"),
+        config: { codexRouting: routing },
+      },
+    },
+  };
 }

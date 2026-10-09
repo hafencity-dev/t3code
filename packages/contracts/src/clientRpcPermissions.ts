@@ -20,8 +20,6 @@ export const CLIENT_GUARDED_RPC_SCOPES = {
   [WS_METHODS.providerAccountsRename]: AuthProvidersManageScope, // fork: provider accounts
   [WS_METHODS.providerAccountsRemove]: AuthProvidersManageScope, // fork: provider accounts
   [WS_METHODS.providerAccountsSetAutoSwitchExcluded]: AuthProvidersManageScope, // fork: provider accounts
-  [WS_METHODS.claudeCodexBridgeInstall]: AuthProvidersManageScope,
-  [WS_METHODS.claudeCodexBridgeSignOut]: AuthProvidersManageScope,
   [WS_METHODS.workingCopyStagePaths]: AuthSourceControlWriteScope,
   [WS_METHODS.workingCopyUnstagePaths]: AuthSourceControlWriteScope,
   [WS_METHODS.workingCopyApplyPatch]: AuthSourceControlWriteScope,
