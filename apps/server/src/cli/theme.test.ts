@@ -11,11 +11,11 @@ import { Command } from "effect/cli";
 
 import { themeCommand } from "./theme.ts";
 import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
-import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 
 // These force a failure with chmod, which Windows ignores for directories and
 // cannot use to make a file unreadable, so the failure never happens there.
-const windowsHost = HostProcessPlatform.defaultValue() === "win32";
+const windowsHost = HostProcess.Platform.defaultValue() === "win32";
 
 // Exercise the theme command without constructing unrelated server runtime layers.
 const cli = Command.make("t3").pipe(Command.withSubcommands([themeCommand]));

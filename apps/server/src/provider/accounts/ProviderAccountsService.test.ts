@@ -15,6 +15,7 @@ import {
   type ProviderAccountsSnapshot,
 } from "@t3tools/contracts";
 import { Deferred, Effect, Fiber, Layer, PubSub, Queue, Schema, Scope, Stream } from "effect";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import { TestClock } from "effect/testing";
 import { afterEach, beforeEach, vi } from "vite-plus/test";
 import { describe, expect, it } from "@effect/vitest";
@@ -46,27 +47,79 @@ import { makeProviderAccountsRpcHandlers } from "./providerAccountsRpcHandlers.t
 import type { AccountUsage, probeAccountUsage } from "./ProviderAccountUsage.ts";
 import type { ClaudeWindowPrimeLaunch, runClaudeWindowPrime } from "./ClaudeWindowPrime.ts";
 
+// Fail closed before any account fixture can mutate a path outside its temporary root.
+const fixture = vi.hoisted(() => ({ root: "" }));
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  const path = await import("node:path");
+  const guard = (value: unknown) => {
+    if (typeof value !== "string" || !fixture.root)
+      throw new Error("Account fixture has no safe path");
+    const relative = path.relative(fixture.root, path.resolve(value));
+    if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+      throw new Error("Account fixture tried to write outside its temporary root");
+    }
+  };
+  const guarded =
+    <A extends unknown[], R>(operation: (...args: A) => R, indexes = [0]) =>
+    (...args: A): R => {
+      for (const index of indexes) guard(args[index]);
+      return operation(...args);
+    };
+  return {
+    ...actual,
+    writeFile: guarded(actual.writeFile),
+    appendFile: guarded(actual.appendFile),
+    mkdir: guarded(actual.mkdir),
+    rename: guarded(actual.rename, [0, 1]),
+    copyFile: guarded(actual.copyFile, [1]),
+    rm: guarded(actual.rm),
+    rmdir: guarded(actual.rmdir),
+    unlink: guarded(actual.unlink),
+    chmod: guarded(actual.chmod),
+    utimes: guarded(actual.utimes),
+    open: guarded(actual.open),
+  };
+});
+
 // The service fixture seeds credential files; never use the host's macOS Keychain.
 vi.mock("./ClaudeCredentialSwitch.ts", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./ClaudeCredentialSwitch.ts")>();
+  const guard = (input: { activeHome: string; activeConfigPath: string }) => {
+    for (const value of [input.activeHome, input.activeConfigPath]) {
+      const relative = NodePath.relative(fixture.root, value);
+      if (
+        !fixture.root ||
+        relative === ".." ||
+        relative.startsWith(`..${NodePath.sep}`) ||
+        NodePath.isAbsolute(relative)
+      ) {
+        throw new Error("Account fixture credential path escaped its temporary root");
+      }
+    }
+  };
   return {
     ...actual,
     switchClaudeCredentials: (
       input: Parameters<typeof actual.switchClaudeCredentials>[0],
       deps: Parameters<typeof actual.switchClaudeCredentials>[1] = {},
-    ) =>
-      actual.switchClaudeCredentials(input, {
+    ) => {
+      guard(input);
+      return actual.switchClaudeCredentials(input, {
         credentials: actual.claudeFileCredentialAdapter,
         ...deps,
-      }),
+      });
+    },
     recoverClaudeCredentialSwitch: (
       input: Parameters<typeof actual.recoverClaudeCredentialSwitch>[0],
       deps: Parameters<typeof actual.recoverClaudeCredentialSwitch>[1] = {},
-    ) =>
-      actual.recoverClaudeCredentialSwitch(input, {
+    ) => {
+      guard(input);
+      return actual.recoverClaudeCredentialSwitch(input, {
         credentials: actual.claudeFileCredentialAdapter,
         ...deps,
-      }),
+      });
+    },
   };
 });
 
@@ -104,10 +157,19 @@ describe("ProviderAccountsService", () => {
   let seeded: { id: ProviderAccountId; homePath: string } | undefined;
   beforeEach(async () => {
     seeded = undefined;
-    root = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "provider-account-service-"));
+    root = await NodeFSP.realpath(
+      await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "provider-account-service-")),
+    );
+    fixture.root = root;
   });
   afterEach(async () => {
     await NodeFSP.rm(root, { recursive: true, force: true });
+  });
+
+  it("rejects fixture writes outside the temporary root before opening a file", () => {
+    expect(() =>
+      NodeFSP.writeFile(NodePath.join(root, "..", "account-fixture-escape"), "fixture"),
+    ).toThrow("outside its temporary root");
   });
 
   function run<A, E>(
@@ -265,6 +327,8 @@ describe("ProviderAccountsService", () => {
       Effect.provide(instanceLayer.pipe(Layer.provideMerge(dependencies))),
       Effect.scoped,
       Effect.provide(NodeServices.layer),
+      Effect.provideService(HostProcess.HomeDirectory, NodePath.join(root, "host-home")),
+      Effect.provideService(HostProcess.Environment, { HOME: NodePath.join(root, "host-home") }),
     );
   }
 
@@ -1049,7 +1113,7 @@ describe("ProviderAccountsService", () => {
           callbacks.prepare({ driver: "codex", accountId: seeded!.id }),
         );
         expect(prepared.environment?.CODEX_HOME).toBe(
-          NodePath.join(NodeOS.homedir(), "probe-home"),
+          NodePath.join(root, "host-home", "probe-home"),
         );
         expect(prepared.environment?.LITERAL).toBe("~/literal");
       }),

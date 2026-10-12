@@ -98,6 +98,37 @@ describe("2code macOS release verification", () => {
     );
   });
 
+  it("allows standard browser links while retaining only the 2code custom protocol", () => {
+    const plist = {
+      CFBundleIdentifier: config.appId,
+      CFBundleName: "2code",
+      CFBundleExecutable: "2code",
+      CFBundleIconFile: "icon.icns",
+      CFBundleShortVersionString: config.version,
+      CFBundleURLTypes: [
+        { CFBundleURLSchemes: [...config.protocolSchemes] },
+        { CFBundleURLSchemes: ["http", "https"] },
+      ],
+    };
+    verifyBundlePlist(config, plist);
+    assert.throws(
+      () =>
+        verifyBundlePlist(config, {
+          ...plist,
+          CFBundleURLTypes: [{ CFBundleURLSchemes: ["http", "https"] }],
+        }),
+      /must be exactly/,
+    );
+    assert.throws(
+      () =>
+        verifyBundlePlist(config, {
+          ...plist,
+          CFBundleURLTypes: [...plist.CFBundleURLTypes, { CFBundleURLSchemes: ["t3code"] }],
+        }),
+      /must be exactly/,
+    );
+  });
+
   it("rejects Finder and Dock icons that differ from the legacy 2code artwork", () => {
     const expected = makePng(1, 1, 10);
     verifyPngPixelsMatch(expected, expected, "Dock icon");

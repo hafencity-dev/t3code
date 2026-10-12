@@ -3,7 +3,7 @@
 // fork: provider accounts
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
-import * as NodeOS from "node:os";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import {
   defaultInstanceIdForDriver,
   ProviderAccountError,
@@ -113,11 +113,14 @@ const claudeBarrierWarning = (reason: string) =>
   `A previous Claude account switch didn't finish: ${reason} Accounts are locked until it's resolved.`;
 
 export { inactiveClaudeProbeEnvironment };
-function claudeCredentialLocation(state: {
-  currentHome: string;
-  settings: { homePath: string };
-  environment: NodeJS.ProcessEnv;
-}) {
+function claudeCredentialLocation(
+  state: {
+    currentHome: string;
+    settings: { homePath: string };
+    environment: NodeJS.ProcessEnv;
+  },
+  homeDirectory: string,
+) {
   const configDir = state.settings.homePath.trim()
     ? state.currentHome
     : state.environment.CLAUDE_CONFIG_DIR || undefined;
@@ -125,13 +128,13 @@ function claudeCredentialLocation(state: {
   const activeHome =
     secureDir === undefined
       ? state.currentHome
-      : NodePath.resolve(secureDir || NodePath.join(NodeOS.homedir(), ".claude"));
+      : NodePath.resolve(secureDir || NodePath.join(homeDirectory, ".claude"));
   const activeConfigDir = secureDir === undefined ? configDir : secureDir || undefined;
   return {
     activeHome,
     activeConfigPath: configDir
       ? NodePath.join(state.currentHome, ".claude.json")
-      : NodePath.join(NodeOS.homedir(), ".claude.json"),
+      : NodePath.join(homeDirectory, ".claude.json"),
     ...(activeConfigDir === undefined ? {} : { activeConfigDir }),
   };
 }
@@ -174,10 +177,15 @@ const interruptibleIo = <A>(operation: () => Promise<A>) =>
  */
 const io = <A>(operation: () => Promise<A>) => Effect.uninterruptible(interruptibleIo(operation));
 
-function effectiveEnvironment(settings: ServerSettings, driver: ProviderAccountDriver) {
+function effectiveEnvironment(
+  settings: ServerSettings,
+  driver: ProviderAccountDriver,
+  environment: NodeJS.ProcessEnv,
+) {
   return mergeProviderInstanceEnvironment(
     settings.providerInstances[defaultInstanceIdForDriver(ProviderDriverKind.make(driver))]
       ?.environment,
+    environment,
   );
 }
 
@@ -322,6 +330,8 @@ const make = (
 ) =>
   Effect.gen(function* () {
     const config = yield* ServerConfig;
+    const homeDirectory = yield* HostProcess.HomeDirectory;
+    const hostEnvironment = yield* HostProcess.Environment;
     const settings = yield* ServerSettingsService;
     const providers = yield* ProviderRegistry;
     const instances = yield* ProviderInstanceRegistry;
@@ -464,7 +474,7 @@ const make = (
             recoverClaudeCredentialSwitch({
               stateDir: config.stateDir,
               managedRoot: claudeManagedRoot,
-              ...claudeCredentialLocation(claude),
+              ...claudeCredentialLocation(claude, homeDirectory),
               commit: (result) => commitClaudeSwitch(registry, result),
             }),
           catch: (cause) => new AccountStorageFailure({ cause }),
@@ -549,7 +559,7 @@ const make = (
           () => new ProviderAccountError({ message: "Could not read provider settings." }),
         ),
       );
-      const environment = effectiveEnvironment(current, driver);
+      const environment = yield* effectiveEnvironment(current, driver, hostEnvironment);
       if (driver === "claudeAgent") {
         const providerSettings = yield* resolveProviderAccountConfig(current, driver);
         const home = yield* resolveClaudeHomePath(providerSettings, environment).pipe(
@@ -592,7 +602,7 @@ const make = (
         driver === "claudeAgent" &&
         original?.originalHomePath === "" &&
         !resolved.environment.CLAUDE_CONFIG_DIR?.trim()
-          ? NodePath.join(NodeOS.homedir(), ".claude.json")
+          ? NodePath.join(homeDirectory, ".claude.json")
           : NodePath.join(group.sharedHomePath, ".claude.json");
       const relativeHome = NodePath.relative(claudeManagedRoot, resolved.currentHome);
       const managedClaudeHome =
@@ -627,7 +637,7 @@ const make = (
       | undefined;
     const liveClaudeIdentity = (state: Parameters<typeof claudeCredentialLocation>[0]) =>
       Effect.promise(async () => {
-        const path = claudeCredentialLocation(state).activeConfigPath;
+        const path = claudeCredentialLocation(state, homeDirectory).activeConfigPath;
         const stat = await NodeFSP.stat(path).catch(() => undefined);
         if (!stat) return {};
         if (
@@ -1204,7 +1214,8 @@ const make = (
                 account.driver !== "claudeAgent"
                   ? undefined
                   : account.claudeActive
-                    ? claudeCredentialLocation(yield* configuration("claudeAgent")).activeConfigPath
+                    ? claudeCredentialLocation(yield* configuration("claudeAgent"), homeDirectory)
+                        .activeConfigPath
                     : NodePath.join(account.homePath, ".claude.json");
               const written: ClaudeCredentialIdentity = writtenPath
                 ? yield* Effect.promise(() => readClaudeConfigIdentity(writtenPath))
@@ -1434,7 +1445,7 @@ const make = (
           switchClaudeCredentials({
             stateDir: config.stateDir,
             managedRoot: claudeManagedRoot,
-            ...claudeCredentialLocation(state),
+            ...claudeCredentialLocation(state, homeDirectory),
             sourceStore: source.storePath!,
             sourceAccountId: source.id,
             targetStore: target.storePath!,

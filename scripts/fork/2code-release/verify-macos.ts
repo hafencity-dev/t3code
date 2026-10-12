@@ -87,7 +87,11 @@ export function verifyBundlePlist(config: TwoCodeReleaseConfig, plist: MacBundle
       ? rawSchemes.filter((scheme): scheme is string => typeof scheme === "string")
       : [];
   });
-  const actualSchemes = [...new Set(schemes)].toSorted();
+  // Upstream's optional default-browser support also declares standard web URLs.
+  // Custom app links must still stay isolated from a parallel T3 installation.
+  const actualSchemes = [
+    ...new Set(schemes.filter((scheme) => scheme !== "http" && scheme !== "https")),
+  ].toSorted();
   const expectedSchemes = [...config.protocolSchemes].toSorted();
   if (JSON.stringify(actualSchemes) !== JSON.stringify(expectedSchemes)) {
     throw new Error(

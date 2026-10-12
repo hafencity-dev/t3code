@@ -23,7 +23,12 @@
  *
  * fork: f4 source-control panel
  */
-import type { EnvironmentId, WorkingCopyFile, WorkingCopyLogEntry } from "@t3tools/contracts";
+import type {
+  EnvironmentId,
+  ProjectId,
+  WorkingCopyFile,
+  WorkingCopyLogEntry,
+} from "@t3tools/contracts";
 import type { HistoryFilter } from "@t3tools/client-runtime/state/working-copy-logic";
 import { historyAuthorFacets } from "@t3tools/client-runtime/state/working-copy-logic";
 import { useAtomValue } from "@effect/atom-react";
@@ -118,6 +123,7 @@ const CHANGES_FILTER_LABEL: Record<ChangesStatusFilter, string> = {
 export interface SourceControlPanelProps {
   readonly mode: DiffPanelMode;
   readonly environmentId: EnvironmentId;
+  readonly projectId: ProjectId | null;
   readonly cwd: string | null;
   /** Environment + repository cwd — the persistence scope for view preferences. */
   readonly scopeKey: string;
@@ -226,8 +232,8 @@ export function SourceControlPanel(props: SourceControlPanelProps) {
   // primary server's: a remote environment runs generation on its own host with
   // its own settings and its own providers.
   const textGenerationConfigured = useMemo(
-    () => isTextGenerationConfigured(serverConfig),
-    [serverConfig],
+    () => isTextGenerationConfigured(serverConfig, props.projectId),
+    [serverConfig, props.projectId],
   );
 
   const history = useWorkingCopyHistory(scope, historyFilter, {

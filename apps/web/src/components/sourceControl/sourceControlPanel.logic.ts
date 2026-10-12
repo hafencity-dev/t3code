@@ -6,6 +6,7 @@
  */
 import {
   isProviderAvailable,
+  type ProjectId,
   type ServerProvider,
   type ServerSettings,
   type WorkingCopyFile,
@@ -505,11 +506,16 @@ export function isTextGenerationConfigured(
     readonly settings: ServerSettings;
     readonly providers: ReadonlyArray<ServerProvider>;
   } | null,
+  projectId: ProjectId | null,
 ): boolean | null {
   if (config === null) {
     return null;
   }
-  const selection = resolveSourceControlWriterModelSelection(config.settings, config.providers);
+  const selection = resolveSourceControlWriterModelSelection(
+    config.settings,
+    config.providers,
+    projectId,
+  );
   const provider = config.providers.find(
     (candidate) => candidate.instanceId === selection.instanceId,
   );

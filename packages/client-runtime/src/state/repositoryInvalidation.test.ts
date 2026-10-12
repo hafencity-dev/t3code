@@ -3,6 +3,7 @@ import { RpcPermissionGuard } from "../rpc/client.ts";
 // one simulated server, wired through the real atom families.
 import {
   EnvironmentId,
+  SourceControlProviderKind,
   WS_METHODS,
   type VcsInvalidationDomain,
   type VcsStatusLocalResult,
@@ -59,7 +60,11 @@ const CONNECTED: SupervisorConnectionState = {
 };
 const LOCAL: VcsStatusLocalResult = {
   isRepo: true,
-  sourceControlProvider: { kind: "github", name: "GitHub", baseUrl: "https://github.com" },
+  sourceControlProvider: {
+    kind: SourceControlProviderKind.make("github"),
+    name: "GitHub",
+    baseUrl: "https://github.com",
+  },
   hasPrimaryRemote: true,
   isDefaultRef: false,
   refName: "feature/invalidation",

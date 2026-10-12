@@ -4,14 +4,14 @@
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodeChildProcess from "node:child_process";
 import * as NodePath from "node:path";
+import * as NodeOS from "node:os";
 import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
 import { inactiveClaudeProbeEnvironment } from "./ClaudeAccountHome.ts";
 
 /**
  * Claude's 5-hour session window starts with the first request an account sends, whatever the
- * model, so a minimal Haiku request is enough. Always an explicit Anthropic model id: this fork
- * can remap the `haiku` alias to Codex through the Claude → Codex bridge, which would never
- * start a Claude window.
+ * model, so a minimal Haiku request is enough. Use an explicit Anthropic model id
+ * so account priming remains predictable.
  */
 export const CLAUDE_WINDOW_PRIME_MODEL = "claude-haiku-4-5-20251001";
 export const CLAUDE_WINDOW_PRIME_PROMPT = "hi";
@@ -71,7 +71,7 @@ export function claudeWindowPrimeLaunch(input: {
       : { ...input.environment }
     : { ...inactiveClaudeProbeEnvironment(input.environment), CLAUDE_CONFIG_DIR: input.homePath };
   return {
-    command: expandHomePath(input.binaryPath.trim() || "claude"),
+    command: expandHomePath(input.binaryPath.trim() || "claude", NodeOS.homedir()),
     args: claudeWindowPrimeArgs(),
     env,
     cwd: claudeWindowPrimeCwd(input.stateDir),

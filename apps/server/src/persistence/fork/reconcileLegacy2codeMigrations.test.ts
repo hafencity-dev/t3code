@@ -88,12 +88,13 @@ layer("reconcileLegacy2codeMigrationLedger", (it) => {
           "58_WebhookRelayDeliveries",
           "59_McpAppModelContext",
           "60_ThreadSnapshotWindowIndexes",
+          "61_PullRequestReviewGuides",
         ],
       );
       const repaired = yield* readLedger;
       assert.deepStrictEqual(repaired.slice(0, upstreamLedger.length), upstreamLedger);
-      assert.strictEqual(repaired.length, upstreamLedger.length + 9);
-      assert.strictEqual(repaired.at(-1)?.name, "ThreadSnapshotWindowIndexes");
+      assert.strictEqual(repaired.length, upstreamLedger.length + 10);
+      assert.strictEqual(repaired.at(-1)?.name, "PullRequestReviewGuides");
 
       // Running again changes nothing.
       assert.strictEqual(yield* reconcileLegacy2codeMigrationLedger(), false);

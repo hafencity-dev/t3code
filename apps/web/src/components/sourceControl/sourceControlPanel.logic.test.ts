@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vite-plus/test";
 import type { ServerProvider, ServerSettings } from "@t3tools/contracts";
-import { DEFAULT_SERVER_SETTINGS, ProviderInstanceId } from "@t3tools/contracts";
+import {
+  DEFAULT_SERVER_SETTINGS,
+  ProjectId,
+  ProviderDriverKind,
+  ProviderInstanceId,
+} from "@t3tools/contracts";
 
 import { HISTORY_COMMIT_ROW_HEIGHT, historyCommitRowHeight } from "~/lib/sourceControl/historyRows";
 import { LANE_COLOR_COUNT, LANE_COLOR_INDEX_NONE } from "~/lib/sourceControl/laneGraph";
@@ -399,59 +404,93 @@ describe("isTextGenerationConfigured", () => {
   it("answers null while the server config has not arrived", () => {
     // Answering `false` here would disable the button for the first second of
     // every session; the server is the authority, so let it try.
-    expect(isTextGenerationConfigured(null)).toBe(null);
+    expect(isTextGenerationConfigured(null, null)).toBe(null);
   });
 
   it("is true when the global text generation instance is present and available", () => {
     const settings = settingsWith({});
     expect(
-      isTextGenerationConfigured({
-        settings,
-        providers: [provider({ instanceId: settings.textGenerationModelSelection.instanceId })],
-      }),
+      isTextGenerationConfigured(
+        {
+          settings,
+          providers: [provider({ instanceId: settings.textGenerationModelSelection.instanceId })],
+        },
+        null,
+      ),
     ).toBe(true);
+  });
+
+  it("falls back when the active project disables the writer instance", () => {
+    const projectId = ProjectId.make("project");
+    const instanceId = ProviderInstanceId.make("writer");
+    const settings = settingsWith({
+      providerInstances: {
+        [instanceId]: { driver: ProviderDriverKind.make("codex"), enabled: true },
+      },
+      sourceControlWriterModelSelection: {
+        ...DEFAULT_SERVER_SETTINGS.textGenerationModelSelection,
+        instanceId,
+      },
+      projectSettingsOverrides: {
+        [projectId]: { providerInstances: { [instanceId]: { enabled: false } } },
+      },
+    });
+    const config = { settings, providers: [provider({ instanceId })] };
+    expect(isTextGenerationConfigured(config, null)).toBe(true);
+    expect(isTextGenerationConfigured(config, projectId)).toBe(false);
   });
 
   it("is false when the configured instance is not in the provider list", () => {
     expect(
-      isTextGenerationConfigured({
-        settings: settingsWith({}),
-        providers: [provider({ instanceId: ProviderInstanceId.make("something-else") })],
-      }),
+      isTextGenerationConfigured(
+        {
+          settings: settingsWith({}),
+          providers: [provider({ instanceId: ProviderInstanceId.make("something-else") })],
+        },
+        null,
+      ),
     ).toBe(false);
   });
 
   it("is false when the config carries no providers at all", () => {
-    expect(isTextGenerationConfigured({ settings: settingsWith({}), providers: [] })).toBe(false);
+    expect(isTextGenerationConfigured({ settings: settingsWith({}), providers: [] }, null)).toBe(
+      false,
+    );
   });
 
   it("is false when the instance exists but is disabled", () => {
     const settings = settingsWith({});
     expect(
-      isTextGenerationConfigured({
-        settings,
-        providers: [
-          provider({
-            instanceId: settings.textGenerationModelSelection.instanceId,
-            enabled: false,
-          }),
-        ],
-      }),
+      isTextGenerationConfigured(
+        {
+          settings,
+          providers: [
+            provider({
+              instanceId: settings.textGenerationModelSelection.instanceId,
+              enabled: false,
+            }),
+          ],
+        },
+        null,
+      ),
     ).toBe(false);
   });
 
   it("is false when the instance exists but its driver is unavailable", () => {
     const settings = settingsWith({});
     expect(
-      isTextGenerationConfigured({
-        settings,
-        providers: [
-          provider({
-            instanceId: settings.textGenerationModelSelection.instanceId,
-            availability: "unavailable",
-          }),
-        ],
-      }),
+      isTextGenerationConfigured(
+        {
+          settings,
+          providers: [
+            provider({
+              instanceId: settings.textGenerationModelSelection.instanceId,
+              availability: "unavailable",
+            }),
+          ],
+        },
+        null,
+      ),
     ).toBe(false);
   });
 });

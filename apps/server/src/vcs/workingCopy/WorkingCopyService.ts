@@ -1,3 +1,8 @@
+import {
+  hasProjectSettingsOverrides,
+  resolveProjectSettings,
+} from "@t3tools/shared/projectSettings";
+import * as Option from "effect/Option";
 import * as Crypto from "effect/Crypto";
 /**
  * fork: f4 — the source-control panel's server facade.
@@ -328,14 +333,22 @@ export const make = Effect.gen(function* () {
    */
   const resolveTextGenerationSettings = Effect.fn(
     "WorkingCopyService.resolveTextGenerationSettings",
-  )(function* () {
-    const settings = yield* serverSettingsService.getSettings;
+  )(function* (cwd: string) {
+    const environmentSettings = yield* serverSettingsService.getSettings;
+    const projectId = hasProjectSettingsOverrides(environmentSettings)
+      ? yield* projects.findActiveByWorkspaceRoot(cwd).pipe(
+          Effect.map((project) => Option.getOrNull(project)?.projectId ?? null),
+          Effect.orElseSucceed(() => null),
+        )
+      : null;
+    const settings = resolveProjectSettings(environmentSettings, projectId).settings;
     const modelSelection =
       settings.sourceControlWriterModelSelection === null
         ? settings.textGenerationModelSelection
         : ServerSettings.resolveSourceControlWriterModelSelection(
             settings,
             yield* providerRegistry.getProviders,
+            projectId,
           );
     return { modelSelection, style: settings.sourceControlWritingStyle };
   }, Effect.mapError(CommitMessage.settingsFailure));
@@ -356,7 +369,7 @@ export const make = Effect.gen(function* () {
     input: WorkingCopyGenerateCommitMessageInput,
   ): Effect.fn.Return<WorkingCopyGeneratedCommitMessage, WorkingCopyCommitMessageError> {
     const amend = input.amend === true;
-    const settings = yield* resolveTextGenerationSettings();
+    const settings = yield* resolveTextGenerationSettings(input.cwd);
     const context = yield* runMutating(CommitMessage.OPERATION, input.cwd, (git) =>
       CommitMessage.readCommitMessageContext(git, {
         amend,

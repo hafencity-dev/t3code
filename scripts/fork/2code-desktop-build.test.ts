@@ -80,6 +80,7 @@ it.effect("builds a legacy-compatible 2code updater configuration", () =>
         name: "2code",
         schemes: ["twentyfirst-agents"],
       },
+      { name: "Web site URL", schemes: ["http", "https"], role: "Viewer" },
     ]);
     assert.equal(mac.entitlements, "/tmp/entitlements.2code.mac.plist");
     assert.equal(mac.entitlementsInherit, "/tmp/entitlements.2code.mac.plist");

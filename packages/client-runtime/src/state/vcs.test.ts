@@ -1,6 +1,7 @@
 import { vi } from "vite-plus/test";
 import {
   EnvironmentId,
+  SourceControlProviderKind,
   AuthSourceControlWriteScope,
   WS_METHODS,
   type VcsListRefsInput,
@@ -90,7 +91,7 @@ const LIVE_REFS: VcsListRefsResult = {
 const LOCAL_STATUS = {
   isRepo: true,
   sourceControlProvider: {
-    kind: "github",
+    kind: SourceControlProviderKind.make("github"),
     name: "GitHub",
     baseUrl: "https://github.com",
   },
