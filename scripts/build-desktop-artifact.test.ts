@@ -21,6 +21,7 @@ import {
   parseWslRuntimeArchiveMembers,
   DesktopDmgBackgroundSourceMissingError,
   createStageWorkspaceConfig,
+  readWorkspaceConfig,
   createStagePatchedDependencies,
   createBuildConfig,
   DESKTOP_ELECTRON_LANGUAGES,
@@ -266,6 +267,17 @@ const makeWindowsPayloadFixture = Effect.fn("test.makeWindowsPayloadFixture")(fu
 });
 
 it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+  it.effect("loads the repository build approvals for desktop staging", () =>
+    Effect.gen(function* () {
+      const workspace = yield* readWorkspaceConfig();
+      const staged = createStageWorkspaceConfig({
+        platform: "linux",
+        arch: "arm64",
+        allowBuilds: workspace.allowBuilds ?? {},
+      });
+      assert.strictEqual(staged.allowBuilds?.electron, true);
+    }),
+  );
   it("resolves the dedicated nightly updater channel from nightly versions", () => {
     assert.equal(resolveDesktopUpdateChannel("0.0.17-nightly.20260413.42"), "nightly");
     assert.equal(resolveDesktopUpdateChannel("0.0.17"), "latest");
