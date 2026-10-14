@@ -156,7 +156,7 @@ export const discardPaths = Effect.fn("workingCopy.discardPaths")(function* (
 
   // The marker finds this exact backup even when an agent or another client
   // pushes a stash before the list is read back. `stash@{0}` is not evidence.
-  const marker = `[t3-operation:${yield* (yield* Crypto.Crypto).randomUUIDv4.pipe(Effect.orDie)}]`;
+  const marker = `[t3-operation:${yield* (yield* Crypto.Crypto).randomUUIDv4().pipe(Effect.orDie)}]`;
   const stashed = yield* git.run({
     operation: OPERATION,
     args: commands.stashPushArgs({

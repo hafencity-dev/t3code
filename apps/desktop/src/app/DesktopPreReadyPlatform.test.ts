@@ -15,6 +15,7 @@ const {
   writeFileSyncMock,
   readFileSyncMock,
   copyFileSyncMock,
+  execFileSyncMock,
 } = vi.hoisted(() => ({
   appendSwitchMock: vi.fn(),
   getSwitchValueMock: vi.fn(),
@@ -23,8 +24,9 @@ const {
   setDesktopNameMock: vi.fn(),
   mkdirSyncMock: vi.fn(),
   writeFileSyncMock: vi.fn(),
-  readFileSyncMock: vi.fn(() => "{}"),
+  readFileSyncMock: vi.fn((..._args: unknown[]) => "{}"),
   copyFileSyncMock: vi.fn(),
+  execFileSyncMock: vi.fn(),
 }));
 
 vi.mock("electron", () => ({
@@ -51,6 +53,10 @@ vi.mock("node:fs", () => ({
   copyFileSync: copyFileSyncMock,
 }));
 
+vi.mock("node:child_process", () => ({
+  execFileSync: execFileSyncMock,
+}));
+
 import * as DesktopPreReadyPlatform from "./DesktopPreReadyPlatform.ts";
 
 describe("DesktopPreReadyPlatform", () => {
@@ -64,6 +70,7 @@ describe("DesktopPreReadyPlatform", () => {
     writeFileSyncMock.mockReset();
     readFileSyncMock.mockReset().mockReturnValue("{}");
     copyFileSyncMock.mockReset();
+    execFileSyncMock.mockReset();
   });
 
   it.effect("preserves an explicit Linux password-store switch", () => {
@@ -81,6 +88,57 @@ describe("DesktopPreReadyPlatform", () => {
           Layer.provide(Layer.succeed(HostProcess.Platform, "linux")),
         ),
       ),
+    );
+  });
+
+  it.effect.each([
+    {
+      label: "merges the color-manager fallback into disabled features on Hyprland 0.48.1",
+      switches: { "ozone-platform": "wayland", "disable-features": "Vulkan" },
+      hyprlandVersion: "0.48.1",
+      hyprlandCommit: "29e2e59fdbab8ed2cc23a20e3c6043d5decb5cdc",
+      expected: [["disable-features", "Vulkan,WaylandWpColorManagerV1"]],
+    },
+    {
+      label: "preserves color management on Hyprland 0.51.0",
+      switches: { "ozone-platform": "wayland", "disable-features": "Vulkan" },
+      hyprlandVersion: "0.51.0",
+      hyprlandCommit: "0123456789abcdef0123456789abcdef01234567",
+      expected: [],
+    },
+    {
+      label: "preserves color management when Electron resolved X11",
+      switches: { "ozone-platform": "x11", "disable-features": "Vulkan" },
+      hyprlandVersion: "0.48.1",
+      hyprlandCommit: "29e2e59fdbab8ed2cc23a20e3c6043d5decb5cdc",
+      expected: [],
+    },
+  ])("$label", ({ switches, hyprlandVersion, hyprlandCommit, expected }) => {
+    vi.stubEnv("XDG_CURRENT_DESKTOP", "Hyprland");
+    vi.stubEnv("XDG_SESSION_TYPE", "wayland");
+    const commandLine = new Map<string, string>(Object.entries(switches));
+    hasSwitchMock.mockImplementation((switchName: string) => commandLine.has(switchName));
+    getSwitchValueMock.mockImplementation(
+      (switchName: string) => commandLine.get(switchName) ?? "",
+    );
+    execFileSyncMock.mockReturnValue(
+      JSON.stringify({
+        commit: hyprlandCommit,
+        version: hyprlandVersion,
+        dirty: false,
+        tag: `v${hyprlandVersion}`,
+      }),
+    );
+
+    return DesktopPreReadyPlatform.make.pipe(
+      Effect.provideService(HostProcess.Platform, "linux"),
+      Effect.map(() => {
+        const featureSwitches = appendSwitchMock.mock.calls.filter(([name]) =>
+          ["disable-features", "enable-features", "ozone-platform"].includes(name),
+        );
+        assert.deepEqual(featureSwitches, expected);
+      }),
+      Effect.ensuring(Effect.sync(() => vi.unstubAllEnvs())),
     );
   });
 
@@ -145,6 +203,36 @@ describe("DesktopPreReadyPlatform", () => {
         ),
       );
     }).pipe(Effect.provideService(HostProcess.Platform, "linux"));
+  });
+
+  it.effect("reads packaged 2code password-store settings from its isolated home", () => {
+    vi.stubEnv("T3CODE_HOME", "/other/t3");
+    vi.stubEnv("VITE_DEV_SERVER_URL", "");
+    readFileSyncMock.mockImplementation((...args: unknown[]) => {
+      if (args[0] === "/tmp/.mount_T3/resources/app.asar/package.json") {
+        return '{"t3codeDistribution":"2code-production"}';
+      }
+      if (args[0] === "/home/test/.2code-t3/userdata/desktop-settings.json") {
+        return '{"linuxPasswordStore":"kwallet6"}';
+      }
+      throw new Error("unexpected settings path");
+    });
+    return DesktopPreReadyPlatform.make.pipe(
+      Effect.provideService(HostProcess.Platform, "linux"),
+      Effect.provideService(HostProcess.HomeDirectory, "/home/test"),
+      Effect.map((options) => {
+        assert.equal(options.linux?.passwordStore, "kwallet6");
+        assert.isFalse(
+          readFileSyncMock.mock.calls.some(([path]) => String(path).startsWith("/other/t3")),
+        );
+        assert.isTrue(
+          appendSwitchMock.mock.calls.some(
+            ([name, value]) => name === "password-store" && value === "kwallet6",
+          ),
+        );
+      }),
+      Effect.ensuring(Effect.sync(() => vi.unstubAllEnvs())),
+    );
   });
 
   it.effect("keeps startup available when the early desktop entry cannot be written", () => {

@@ -63,6 +63,17 @@ layer("reconcileLegacy2codeMigrationLedger", (it) => {
     }),
   );
 
+  it.effect("repairs shifted V2 entries before upstream validates skipped migration ids", () =>
+    Effect.gen(function* () {
+      yield* runMigrations({ toMigrationInclusive: 61 });
+      const before = yield* readLedger;
+      yield* forkifyLedger;
+
+      assert.deepStrictEqual(yield* runMigrations(), [[62, "ThreadFailureLookupIndex"]]);
+      assert.deepStrictEqual((yield* readLedger).slice(0, before.length), before);
+    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+  );
+
   it.effect("renumbers a released 2code ledger so newer upstream migrations still run", () =>
     Effect.gen(function* () {
       // A 2code 1.0.128 database: upstream 41..51 applied, recorded as 42..52.
@@ -89,12 +100,13 @@ layer("reconcileLegacy2codeMigrationLedger", (it) => {
           "59_McpAppModelContext",
           "60_ThreadSnapshotWindowIndexes",
           "61_PullRequestReviewGuides",
+          "62_ThreadFailureLookupIndex",
         ],
       );
       const repaired = yield* readLedger;
       assert.deepStrictEqual(repaired.slice(0, upstreamLedger.length), upstreamLedger);
-      assert.strictEqual(repaired.length, upstreamLedger.length + 10);
-      assert.strictEqual(repaired.at(-1)?.name, "PullRequestReviewGuides");
+      assert.strictEqual(repaired.length, upstreamLedger.length + 11);
+      assert.strictEqual(repaired.at(-1)?.name, "ThreadFailureLookupIndex");
 
       // Running again changes nothing.
       assert.strictEqual(yield* reconcileLegacy2codeMigrationLedger(), false);

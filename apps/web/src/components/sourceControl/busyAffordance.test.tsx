@@ -45,7 +45,7 @@ function stash(index: number, ref: string): WorkingCopyStashEntry {
 
 /** Counts `disabled` attributes, which is what SSR emits for `disabled`. */
 function disabledCount(markup: string): number {
-  return markup.split("disabled=").length - 1;
+  return markup.match(/\sdisabled="/g)?.length ?? 0;
 }
 
 function renderStashes(over: Partial<Parameters<typeof StashesPanel>[0]> = {}) {

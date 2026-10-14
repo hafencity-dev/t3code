@@ -1,4 +1,5 @@
-// @effect-diagnostics nodeBuiltinImport:off - pre-ready Electron setup reads settings and prepares the Linux desktop entry synchronously before app services are available.
+// @effect-diagnostics nodeBuiltinImport:off - pre-ready Electron setup reads settings, prepares the Linux desktop entry, and asks Hyprland for its version synchronously before app services are available.
+import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 import * as Context from "effect/Context";
@@ -48,13 +49,19 @@ function readCommandLineSwitchValue(
 
 export const resolveEarlyLinuxElectronOptionsFromProcess = (
   homeDirectory: string,
-): DesktopEarlyElectronStartup.EarlyLinuxElectronOptions =>
-  DesktopEarlyElectronStartup.resolveEarlyLinuxElectronOptions({
-    env: process.env,
+): DesktopEarlyElectronStartup.EarlyLinuxElectronOptions => {
+  // fork: choose the same isolated settings directory before and after readiness.
+  const env =
+    readEarlyDesktopDistributionId() === "2code-production"
+      ? { ...process.env, T3CODE_HOME: NodePath.posix.join(homeDirectory, ".2code-t3") }
+      : process.env;
+  return DesktopEarlyElectronStartup.resolveEarlyLinuxElectronOptions({
+    env,
     homeDirectory,
     joinPath: NodePath.posix.join,
     readFileString: (path) => NodeFS.readFileSync(path, "utf8"),
   });
+};
 
 export class DesktopPreReadyElectronOptions extends Context.Service<
   DesktopPreReadyElectronOptions,
@@ -132,6 +139,24 @@ export const make = Effect.gen(function* () {
       Electron.app.commandLine.appendSwitch("class", linux.linuxWmClass);
       if (linux.passwordStore !== null && linuxPasswordStoreCommandLine === null) {
         Electron.app.commandLine.appendSwitch("password-store", linux.passwordStore);
+      }
+      // Chromium keeps only the last --disable-features value, so pass the merged list.
+      const disableFeatures = DesktopEarlyElectronStartup.resolveLinuxDisableFeaturesSwitch({
+        env: process.env,
+        ozonePlatform: readCommandLineSwitchValue(Electron.app.commandLine, "ozone-platform"),
+        enableFeatures: readCommandLineSwitchValue(Electron.app.commandLine, "enable-features"),
+        disableFeatures: readCommandLineSwitchValue(Electron.app.commandLine, "disable-features"),
+        // Runs only on Hyprland Wayland sessions without an explicit feature override.
+        readHyprctlVersionJson: () =>
+          NodeChildProcess.execFileSync("hyprctl", ["version", "-j"], {
+            encoding: "utf8",
+            stdio: ["ignore", "pipe", "ignore"],
+            timeout: 1000,
+            maxBuffer: 64 * 1024,
+          }),
+      });
+      if (disableFeatures !== null) {
+        Electron.app.commandLine.appendSwitch("disable-features", disableFeatures);
       }
     }
 

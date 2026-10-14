@@ -262,7 +262,7 @@ export const make = Effect.gen(function* () {
   );
   const cacheRef = yield* Ref.make(new Map<string, CachedVcsStatus>());
   // fork: revisions are independent of the aggregate status fingerprint.
-  const epoch = yield* (yield* Crypto.Crypto).randomUUIDv4.pipe(Effect.orDie);
+  const epoch = yield* (yield* Crypto.Crypto).randomUUIDv4().pipe(Effect.orDie);
   const counters = new Map<string, number>();
   const revision = (cwd: string) => ({ epoch, counter: counters.get(cwd) ?? 0 });
   const advanceRevision = (cwd: string) => {
