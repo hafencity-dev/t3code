@@ -11,7 +11,7 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Predicate from "effect/Predicate";
 import { query as claudeQuery, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
-import { makeClaudeEnvironment } from "../Drivers/ClaudeHome.ts";
+import { hasClaudeManagedMcpConfig, makeClaudeEnvironment } from "../Drivers/ClaudeHome.ts";
 import { resolveClaudeSdkExecutablePath } from "../Drivers/ClaudeExecutable.ts";
 import * as Semaphore from "effect/Semaphore";
 import { claudeAuthMetadata, buildClaudeCapabilitiesProbeQueryOptions } from "../ClaudeProvider.ts";
@@ -58,6 +58,7 @@ export const probeAccountUsage = Effect.fn("providerAccounts.probeUsage")(functi
       input.settings.binaryPath,
       environment,
     );
+    const managedMcpConfig = yield* hasClaudeManagedMcpConfig();
     const abort = new AbortController();
     const result = yield* Effect.tryPromise(async () => {
       const q = claudeQuery({
@@ -73,6 +74,7 @@ export const probeAccountUsage = Effect.fn("providerAccounts.probeUsage")(functi
           abortController: abort,
           environment,
           cwd: input.cwd,
+          managedMcpConfig,
         }),
       });
       const init = await q.initializationResult();

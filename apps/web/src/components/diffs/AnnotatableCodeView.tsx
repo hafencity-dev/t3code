@@ -115,11 +115,9 @@ interface AnnotatableCodeViewProps {
     fileKey: string,
     collapsed: boolean,
   ) => ReactNode;
-  // fork: f4 hunk staging — both absent for every upstream caller, which keeps
-  // the rendered item list byte-identical to today.
+  // fork: source-control hunk actions share the existing diff viewer.
   hunkActionAnchors?: ReadonlyArray<HunkActionAnchor>;
   renderHunkActions?: (fileKey: string, hunkIndex: number) => ReactNode;
-  /** Unfold a collapsed file that holds the find match being navigated to. */
   onRevealSearchMatch: (fileKey: string) => void;
 }
 

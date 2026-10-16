@@ -1,12 +1,12 @@
 import Constants from "expo-constants";
 import { View } from "react-native";
 
-import { AppText as Text } from "./AppText";
+import { AppText as Text } from "./ui/AppText";
 import { Brand2codeMark } from "./Brand2codeMark";
 
 const appVariant = Constants.expoConfig?.extra?.appVariant;
 const DEFAULT_STAGE_LABEL =
-  appVariant === "development" ? "Dev" : appVariant === "preview" ? "Preview" : "Alpha";
+  appVariant === "development" ? "Dev" : appVariant === "preview" ? "Preview" : "Beta";
 
 export function BrandMark(props: { readonly compact?: boolean; readonly stageLabel?: string }) {
   const compact = props.compact ?? false;

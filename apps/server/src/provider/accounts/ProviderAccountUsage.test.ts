@@ -10,6 +10,8 @@ import * as Clock from "effect/Clock";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import * as FileSystem from "effect/FileSystem";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
 import { CodexAppServerRequestError } from "effect-codex-app-server/errors";
@@ -213,7 +215,7 @@ describe("provider account usage admission", () => {
     }),
   );
 
-  for (const [label, error] of [
+  it.effect.each([
     [
       "SDK wrapped 429",
       { _tag: "UnknownError", cause: new Error("Failed to fetch usage: 429 Too Many Requests") },
@@ -227,66 +229,62 @@ describe("provider account usage admission", () => {
         "1",
       ),
     ],
-  ] as const) {
-    it.effect(`${label}: 15m then 30m backoff, retained good data, reset on success`, () =>
-      Effect.gen(function* () {
-        let calls = 0;
-        const cache = makeAccountUsageCache({
-          probe: () => Effect.suspend(() => (++calls < 3 ? Effect.fail(error) : measuredNow)),
-        });
-        const first = yield* cache.refresh({ ...refresh, previous: good });
-        expect(first).toMatchObject({
-          checkedAt: good.checkedAt,
-          lastAttemptAt: 0,
-          consecutiveFailures: 1,
-          nextAllowedAt: 15 * minute,
-          lastFailureKind: "rateLimited",
-        });
-        expect(first?.usage?.checkedAt).toBe(good.checkedAt);
-        expect(JSON.stringify(first)).not.toContain("Too Many Requests");
-        expect(cache.canProbe(id, 14 * minute, first)).toBe(false);
-        expect(cache.nextAllowedAt(id, 14 * minute, first)).toBe(15 * minute);
-        yield* TestClock.adjust(15 * minute - 1);
-        yield* cache.refresh(refresh);
-        expect(calls).toBe(1);
-        yield* TestClock.adjust(1);
-        const second = yield* cache.refresh(refresh);
-        expect(second).toMatchObject({ consecutiveFailures: 2, nextAllowedAt: 45 * minute });
-        yield* TestClock.adjust(30 * minute);
-        const success = yield* cache.refresh(refresh);
-        expect(success).toMatchObject({ consecutiveFailures: 0, nextAllowedAt: 46 * minute });
-        expect(success?.lastFailureKind).toBeUndefined();
-        expect(success?.usage?.unavailable).toBeUndefined();
-        expect(calls).toBe(3);
-      }),
-    );
-  }
+  ] as const)("%s: 15m then 30m backoff, retained good data, reset on success", ([_label, error]) =>
+    Effect.gen(function* () {
+      let calls = 0;
+      const cache = makeAccountUsageCache({
+        probe: () => Effect.suspend(() => (++calls < 3 ? Effect.fail(error) : measuredNow)),
+      });
+      const first = yield* cache.refresh({ ...refresh, previous: good });
+      expect(first).toMatchObject({
+        checkedAt: good.checkedAt,
+        lastAttemptAt: 0,
+        consecutiveFailures: 1,
+        nextAllowedAt: 15 * minute,
+        lastFailureKind: "rateLimited",
+      });
+      expect(first?.usage?.checkedAt).toBe(good.checkedAt);
+      expect(JSON.stringify(first)).not.toContain("Too Many Requests");
+      expect(cache.canProbe(id, 14 * minute, first)).toBe(false);
+      expect(cache.nextAllowedAt(id, 14 * minute, first)).toBe(15 * minute);
+      yield* TestClock.adjust(15 * minute - 1);
+      yield* cache.refresh(refresh);
+      expect(calls).toBe(1);
+      yield* TestClock.adjust(1);
+      const second = yield* cache.refresh(refresh);
+      expect(second).toMatchObject({ consecutiveFailures: 2, nextAllowedAt: 45 * minute });
+      yield* TestClock.adjust(30 * minute);
+      const success = yield* cache.refresh(refresh);
+      expect(success).toMatchObject({ consecutiveFailures: 0, nextAllowedAt: 46 * minute });
+      expect(success?.lastFailureKind).toBeUndefined();
+      expect(success?.usage?.unavailable).toBeUndefined();
+      expect(calls).toBe(3);
+    }),
+  );
 
-  for (const rateLimited of [false, true]) {
-    it.effect(`caps ${rateLimited ? "rate limit" : "ordinary failure"} exponential backoff`, () =>
-      Effect.gen(function* () {
-        const cache = makeAccountUsageCache({
-          probe: () => Effect.fail(new Error(rateLimited ? "429" : "failed")),
+  it.effect.each([false, true])("caps exponential backoff with rate-limited=%s", (rateLimited) =>
+    Effect.gen(function* () {
+      const cache = makeAccountUsageCache({
+        probe: () => Effect.fail(new Error(rateLimited ? "429" : "failed")),
+      });
+      let at = 0;
+      for (let n = 1; n <= 6; n++) {
+        const value = yield* cache.refresh(refresh);
+        const delay =
+          Math.min(rateLimited ? 120 : 60, (rateLimited ? 15 : 5) * 2 ** (n - 1)) * minute;
+        expect(value).toMatchObject({
+          lastAttemptAt: at,
+          consecutiveFailures: n,
+          nextAllowedAt: at + delay,
+          lastFailureKind: rateLimited ? "rateLimited" : "failed",
         });
-        let at = 0;
-        for (let n = 1; n <= 6; n++) {
-          const value = yield* cache.refresh(refresh);
-          const delay =
-            Math.min(rateLimited ? 120 : 60, (rateLimited ? 15 : 5) * 2 ** (n - 1)) * minute;
-          expect(value).toMatchObject({
-            lastAttemptAt: at,
-            consecutiveFailures: n,
-            nextAllowedAt: at + delay,
-            lastFailureKind: rateLimited ? "rateLimited" : "failed",
-          });
-          yield* TestClock.adjust(delay);
-          at += delay;
-        }
-      }),
-    );
-  }
+        yield* TestClock.adjust(delay);
+        at += delay;
+      }
+    }),
+  );
 
-  for (const [label, error, delay] of [
+  it.effect.each([
     [
       "header seconds",
       { status: 429, headers: new Headers({ "retry-after": "1800" }) },
@@ -308,14 +306,12 @@ describe("provider account usage admission", () => {
     ],
     ["SDK message", new Error("429 Usage fetch failed. Retry-After: 1800 seconds"), 30 * minute],
     ["retry cap", { status: 429, retryAfterSeconds: 10_000 }, 120 * minute],
-  ] as const) {
-    it.effect(`honors ${label}`, () =>
-      Effect.gen(function* () {
-        const cache = makeAccountUsageCache({ probe: () => Effect.fail(error) });
-        expect((yield* cache.refresh(refresh))?.nextAllowedAt).toBe(delay);
-      }),
-    );
-  }
+  ] as const)("honors %s", ([_label, error, delay]) =>
+    Effect.gen(function* () {
+      const cache = makeAccountUsageCache({ probe: () => Effect.fail(error) });
+      expect((yield* cache.refresh(refresh))?.nextAllowedAt).toBe(delay);
+    }),
+  );
 
   it.effect(
     "skips excess requests without queueing and releases the rolling budget at exact expiry",
@@ -430,47 +426,45 @@ describe("provider account usage admission", () => {
       }),
   );
 
-  for (const newerSource of ["cache", "registry"] as const) {
-    it.effect(
-      `keeps newer ${newerSource} measurements without dropping the last failed attempt`,
-      () =>
-        Effect.gen(function* () {
-          const newer = {
-            ...good,
-            checkedAt: new Date(minute).toISOString(),
-            email: "newer@example.test",
-            usage: { checkedAt: new Date(minute).toISOString(), windows: [] },
-          };
-          let calls = 0;
-          const cache = makeAccountUsageCache({
-            probe: () =>
-              Effect.suspend(() =>
-                ++calls === 1
-                  ? Effect.succeed(newerSource === "cache" ? newer : good)
-                  : Effect.fail(new Error("failed")),
-              ),
-          });
-          yield* TestClock.adjust(minute);
-          yield* cache.refresh(refresh);
-          const previous = newerSource === "registry" ? newer : good;
-          expect(yield* cache.refresh({ id, active: false, previous })).toMatchObject({
-            checkedAt: newer.checkedAt,
-            email: newer.email,
-          });
-          yield* TestClock.adjust(30 * minute);
-          const failed = yield* cache.refresh({ id, active: false, previous });
-          expect(failed).toMatchObject({
-            checkedAt: newer.checkedAt,
-            email: newer.email,
-            lastAttemptAt: 31 * minute,
-            nextAllowedAt: 36 * minute,
-          });
-          expect(yield* cache.refresh({ ...refresh, previous: newer })).toEqual(failed);
-          expect(cache.canProbe(id, 31 * minute, newer)).toBe(false);
-          expect(calls).toBe(2);
-        }),
-    );
-  }
+  it.effect.each(["cache", "registry"] as const)(
+    "keeps newer %s measurements without dropping the last failed attempt",
+    (newerSource) =>
+      Effect.gen(function* () {
+        const newer = {
+          ...good,
+          checkedAt: new Date(minute).toISOString(),
+          email: "newer@example.test",
+          usage: { checkedAt: new Date(minute).toISOString(), windows: [] },
+        };
+        let calls = 0;
+        const cache = makeAccountUsageCache({
+          probe: () =>
+            Effect.suspend(() =>
+              ++calls === 1
+                ? Effect.succeed(newerSource === "cache" ? newer : good)
+                : Effect.fail(new Error("failed")),
+            ),
+        });
+        yield* TestClock.adjust(minute);
+        yield* cache.refresh(refresh);
+        const previous = newerSource === "registry" ? newer : good;
+        expect(yield* cache.refresh({ id, active: false, previous })).toMatchObject({
+          checkedAt: newer.checkedAt,
+          email: newer.email,
+        });
+        yield* TestClock.adjust(30 * minute);
+        const failed = yield* cache.refresh({ id, active: false, previous });
+        expect(failed).toMatchObject({
+          checkedAt: newer.checkedAt,
+          email: newer.email,
+          lastAttemptAt: 31 * minute,
+          nextAllowedAt: 36 * minute,
+        });
+        expect(yield* cache.refresh({ ...refresh, previous: newer })).toEqual(failed);
+        expect(cache.canProbe(id, 31 * minute, newer)).toBe(false);
+        expect(calls).toBe(2);
+      }),
+  );
 
   it.effect(
     "shares concurrent probes, preserves good values, and does not leak private errors",
@@ -580,39 +574,51 @@ describe("provider account usage admission", () => {
       }),
   );
 
-  it.effect("observes the real SDK usage rejection after successful initialization", () =>
-    Effect.gen(function* () {
-      const abort = vi.fn();
-      const query = vi.mocked(ClaudeSdk.query);
-      query.mockImplementationOnce((input) => {
-        input.options?.abortController?.signal.addEventListener("abort", abort);
-        return {
-          initializationResult: async () => ({
-            account: { email: good.email, tokenSource: "oauth", subscriptionType: "pro" },
-          }),
-          usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET: async () => {
-            throw new Error("Failed to fetch usage: 429 Too Many Requests; Retry-After: 1800");
-          },
-        } as unknown as ReturnType<typeof ClaudeSdk.query>;
-      });
-      const cache = makeAccountUsageCache({
-        probe: () =>
-          probeAccountUsage({
-            driver: "claudeAgent",
-            settings: decodeClaudeSettings({}),
-            homePath: "",
-            environment: {},
-            cwd: "/tmp",
-          }),
-      });
-      const result = yield* cache.refresh({ ...refresh, previous: good });
-      expect(result).toMatchObject({
-        consecutiveFailures: 1,
-        lastFailureKind: "rateLimited",
-        nextAllowedAt: 30 * minute,
-        checkedAt: good.checkedAt,
-      });
-      expect(abort).toHaveBeenCalledOnce();
-    }).pipe(Effect.provide(NodeServices.layer)),
+  it.effect.each([false, true])(
+    "observes SDK usage rejection with managed MCP config %s",
+    (managedMcpConfig) =>
+      Effect.gen(function* () {
+        const abort = vi.fn();
+        const query = vi.mocked(ClaudeSdk.query);
+        query.mockImplementationOnce((input) => {
+          expect(input.options?.strictMcpConfig).toBe(managedMcpConfig ? undefined : true);
+          input.options?.abortController?.signal.addEventListener("abort", abort);
+          return {
+            initializationResult: async () => ({
+              account: { email: good.email, tokenSource: "oauth", subscriptionType: "pro" },
+            }),
+            usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET: async () => {
+              throw new Error("Failed to fetch usage: 429 Too Many Requests; Retry-After: 1800");
+            },
+          } as unknown as ReturnType<typeof ClaudeSdk.query>;
+        });
+        const cache = makeAccountUsageCache({
+          probe: () =>
+            probeAccountUsage({
+              driver: "claudeAgent",
+              settings: decodeClaudeSettings({}),
+              homePath: "",
+              environment: {},
+              cwd: "/tmp",
+            }),
+        });
+        const result = yield* cache.refresh({ ...refresh, previous: good });
+        expect(result).toMatchObject({
+          consecutiveFailures: 1,
+          lastFailureKind: "rateLimited",
+          nextAllowedAt: 30 * minute,
+          checkedAt: good.checkedAt,
+        });
+        expect(abort).toHaveBeenCalledOnce();
+      }).pipe(
+        Effect.provideService(
+          FileSystem.FileSystem,
+          FileSystem.makeNoop({ exists: () => Effect.succeed(managedMcpConfig) }),
+        ),
+        Effect.provideService(HostProcess.HomeDirectory, "/tmp/2code-account-usage-fixture"),
+        Effect.provideService(HostProcess.Environment, {}),
+        Effect.provideService(HostProcess.Platform, "linux"),
+        Effect.provide(NodeServices.layer),
+      ),
   );
 });
