@@ -154,7 +154,7 @@ export function StashesPanel(props: StashesPanelProps) {
         ))}
         {props.backups.length > 0 ? (
           <>
-            <p className="px-3 pt-3 pb-1 font-medium text-[11px] text-muted-foreground/70 uppercase tracking-[0.08em]">
+            <p className="px-3 pt-3 pb-1 font-medium text-2xs text-muted-foreground/70 uppercase tracking-wider">
               Recent backups
             </p>
             {props.backups.map((backup) => (

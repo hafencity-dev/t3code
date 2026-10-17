@@ -64,7 +64,7 @@ export function SwitchAccountAction({
     pending.current = true;
     setSwitching(true);
     onStart?.(accountId);
-    try {
+    await (async () => {
       const result = await switchAccount({
         environmentId,
         input: accountSwitchInput(accountId, switchMode, interruptRunning),
@@ -90,11 +90,11 @@ export function SwitchAccountAction({
           });
         }
       }
-    } finally {
+    })().finally(() => {
       pending.current = false;
       setSwitching(false);
       onEnd?.(accountId);
-    }
+    });
   };
   const showSwitching = (switching && running === null) || busy;
   const disabled = switching || busy || Boolean(disabledReason);

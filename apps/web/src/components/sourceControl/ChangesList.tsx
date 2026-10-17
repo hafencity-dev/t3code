@@ -17,7 +17,7 @@
  */
 import { LegendList, type LegendListRef } from "@legendapp/list/react";
 import { ChevronDown, ChevronRight, Folder, Loader2, Minus, Plus, Undo2 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useRef, useState } from "react";
 
 import {
   CHANGES_GROUP_TITLE,
@@ -78,8 +78,7 @@ export const CHANGES_LIST_OWNED_KEYS: ReadonlySet<string> = new Set([
 ]);
 
 /** fork: f4 redesign — the house eyebrow (`DiagnosticsSettings.tsx:98`). */
-const EYEBROW_CLASS =
-  "font-medium text-[11px] text-muted-foreground/70 uppercase tracking-[0.08em]";
+const EYEBROW_CLASS = "font-medium text-2xs text-muted-foreground/70 uppercase tracking-wider";
 
 export interface ChangesListProps {
   readonly files: ReadonlyArray<WorkingCopyFile>;
@@ -128,41 +127,32 @@ export function ChangesList(props: ChangesListProps) {
   const [selection, setSelection] = useState<ChangesSelection>(EMPTY_CHANGES_SELECTION);
   const [scrollTop, setScrollTop] = useState(0);
 
-  const collapsedGroups = useMemo(() => new Set(props.collapsedGroups), [props.collapsedGroups]);
-  const collapsedFolders = useMemo(() => new Set(props.collapsedFolders), [props.collapsedFolders]);
+  const collapsedGroups = new Set(props.collapsedGroups);
+  const collapsedFolders = new Set(props.collapsedFolders);
 
-  const rows = useMemo(
-    () =>
-      buildChangesRows({
-        files: props.files,
-        viewMode: props.viewMode,
-        collapsedGroups,
-        collapsedFolders,
-        filter: props.filter,
-        query: props.query,
-      }),
-    [collapsedFolders, collapsedGroups, props.files, props.filter, props.query, props.viewMode],
-  );
-  const matchingFileCount = useMemo(
-    () => changesMatchingFileCount(props.files, props.filter, props.query),
-    [props.files, props.filter, props.query],
-  );
+  const rows = buildChangesRows({
+    files: props.files,
+    viewMode: props.viewMode,
+    collapsedGroups,
+    collapsedFolders,
+    filter: props.filter,
+    query: props.query,
+  });
+  const matchingFileCount = changesMatchingFileCount(props.files, props.filter, props.query);
 
   // Computed once per status, not per row.
-  const partialPaths = useMemo(() => partiallyStagedPaths(props.files), [props.files]);
+  const partialPaths = partiallyStagedPaths(props.files);
 
   // fork: f4 — the scope every group-header bulk action is cut from. Built from
   // the full file list (not `rows`), so a collapsed folder cannot shrink what
   // "Stage all" means, and scoped to one group, so "Discard all" on a group
   // header cannot reach past that group. See F-08.
-  const groupScope = useMemo<ChangesGroupScope>(
-    () => ({ files: props.files, filter: props.filter, query: props.query }),
-    [props.files, props.filter, props.query],
-  );
-  const groupPathsOf = useCallback(
-    (group: ChangesGroup) => changesGroupPaths(groupScope, group),
-    [groupScope],
-  );
+  const groupScope: ChangesGroupScope = {
+    files: props.files,
+    filter: props.filter,
+    query: props.query,
+  };
+  const groupPathsOf = (group: ChangesGroup) => changesGroupPaths(groupScope, group);
 
   /**
    * fork: f4 F-14 — collapse/expand every folder in THIS group, in one press.
@@ -171,36 +161,26 @@ export function ChangesList(props: ChangesListProps) {
    * exactly one more level per press, and its "expand" branch cleared the
    * collapse list for every group at once from a single group's header.
    */
-  const toggleGroupFolders = useCallback(
-    (group: ChangesGroup) => {
-      const groupKeys = changesAllFolderKeys(groupScope, group);
-      const current = new Set(props.collapsedFolders);
-      const allCollapsed = groupKeys.length > 0 && groupKeys.every((key) => current.has(key));
-      if (allCollapsed) {
-        for (const key of groupKeys) current.delete(key);
-      } else {
-        for (const key of groupKeys) current.add(key);
-      }
-      props.onSetCollapsedFolders([...current]);
-    },
-    [groupScope, props],
-  );
+  const toggleGroupFolders = (group: ChangesGroup) => {
+    const groupKeys = changesAllFolderKeys(groupScope, group);
+    const current = new Set(props.collapsedFolders);
+    const allCollapsed = groupKeys.length > 0 && groupKeys.every((key) => current.has(key));
+    if (allCollapsed) {
+      for (const key of groupKeys) current.delete(key);
+    } else {
+      for (const key of groupKeys) current.add(key);
+    }
+    props.onSetCollapsedFolders([...current]);
+  };
 
   // Drop keys whose rows are gone; identity is preserved when nothing moved so
   // an idle refresh does not re-render the list.
-  useEffect(() => {
-    setSelection((current) => reconcileSelection(current, rows));
-  }, [rows]);
+  const reconciledSelection = reconcileSelection(selection, rows);
+  if (selection !== reconciledSelection) setSelection(reconciledSelection);
 
-  const heightOptions = useMemo(
-    () => ({ hasConflictActions: true, confirmingDiscardKey: null }) as const,
-    [],
-  );
+  const heightOptions = { hasConflictActions: true, confirmingDiscardKey: null } as const;
 
-  const pinnedGroup = useMemo(
-    () => stickyChangesGroup(rows, heightOptions, scrollTop),
-    [heightOptions, rows, scrollTop],
-  );
+  const pinnedGroup = stickyChangesGroup(rows, heightOptions, scrollTop);
 
   /**
    * fork: f4 M13 — the pinned overlay reuses the group's REAL header row, so
@@ -208,13 +188,10 @@ export function ChangesList(props: ChangesListProps) {
    * scrolled off. The overlay used to be handed `total === visible`, so the
    * label silently changed from "3 of 12" to "3" as you scrolled.
    */
-  const pinnedRow = useMemo(
-    () =>
-      pinnedGroup === null
-        ? null
-        : (rows.find((row) => row.kind === "header" && row.group === pinnedGroup) ?? null),
-    [pinnedGroup, rows],
-  );
+  const pinnedRow =
+    pinnedGroup === null
+      ? null
+      : (rows.find((row) => row.kind === "header" && row.group === pinnedGroup) ?? null);
 
   /**
    * fork: f4 focus model — DOM focus must actually be inside the listbox, or
@@ -223,228 +200,202 @@ export function ChangesList(props: ChangesListProps) {
    * a real `focus()` on the container, and the container carries
    * `aria-activedescendant` so the focused row is announced.
    */
-  const takeFocus = useCallback(() => {
+  const takeFocus = () => {
     const container = containerRef.current;
     if (container === null) return;
     if (container.contains(container.ownerDocument.activeElement)) return;
     container.focus({ preventScroll: true });
-  }, []);
+  };
 
-  const focusRow = useCallback(
-    (key: string | null) => {
-      if (key === null) return;
-      setSelection(selectSingleRow(key));
-      takeFocus();
-      const index = rows.findIndex((row) => row.key === key);
-      if (index >= 0) {
-        listRef.current?.scrollToIndex({ index, viewPosition: 0.5 });
-      }
-    },
-    [rows, takeFocus],
-  );
+  const focusRow = (key: string | null) => {
+    if (key === null) return;
+    setSelection(selectSingleRow(key));
+    takeFocus();
+    const index = rows.findIndex((row) => row.key === key);
+    if (index >= 0) {
+      listRef.current?.scrollToIndex({ index, viewPosition: 0.5 });
+    }
+  };
 
   /**
    * Focusing the listbox with nothing selected seeds the first file row, so the
    * documented `s` / `u` / `x` keys act on something rather than returning
    * early with no feedback (F-15).
    */
-  const handleContainerFocus = useCallback(
-    (event: React.FocusEvent<HTMLDivElement>) => {
-      if (event.target !== event.currentTarget) return;
-      if (selection.focusedKey !== null) return;
-      const first = moveChangesFocus(rows, null, "first");
-      if (first !== null) setSelection(selectSingleRow(first));
-    },
-    [rows, selection.focusedKey],
-  );
+  const handleContainerFocus = (event: React.FocusEvent<HTMLDivElement>) => {
+    if (event.target !== event.currentTarget) return;
+    if (selection.focusedKey !== null) return;
+    const first = moveChangesFocus(rows, null, "first");
+    if (first !== null) setSelection(selectSingleRow(first));
+  };
 
-  const runOnTargets = useCallback(
-    (
-      kind: "stage" | "unstage" | "discard",
-      action: (paths: ReadonlyArray<string>) => void,
-      predicate: (row: ChangesRow) => boolean,
-    ) => {
-      if (props.actionsDisabled) return;
-      const targets = actionTargetRows(rows, selection).filter(predicate);
-      if (targets.length === 0) {
-        // A keypress that resolves to nothing used to be indistinguishable from
-        // a broken panel. Say so instead.
-        props.onEmptyKeyboardTarget?.(kind);
-        return;
-      }
-      // ONE call for a multi-file action, so a single undo toast covers it all.
-      action(targetPaths(targets));
-    },
-    [props, rows, selection],
-  );
+  const runOnTargets = (
+    kind: "stage" | "unstage" | "discard",
+    action: (paths: ReadonlyArray<string>) => void,
+    predicate: (row: ChangesRow) => boolean,
+  ) => {
+    if (props.actionsDisabled) return;
+    const targets = actionTargetRows(rows, selection).filter(predicate);
+    if (targets.length === 0) {
+      // A keypress that resolves to nothing used to be indistinguishable from
+      // a broken panel. Say so instead.
+      props.onEmptyKeyboardTarget?.(kind);
+      return;
+    }
+    // ONE call for a multi-file action, so a single undo toast covers it all.
+    action(targetPaths(targets));
+  };
 
-  const handleKeyDown = useCallback(
-    (event: React.KeyboardEvent<HTMLDivElement>) => {
-      const target = event.target as HTMLElement | null;
-      // Bare keys are ignored while typing — `s` in the filter box must not stage.
-      if (
-        target?.closest("input, textarea, [contenteditable='true']") ||
-        event.metaKey ||
-        event.ctrlKey ||
-        event.altKey
-      ) {
+  const handleKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    const target = event.target as HTMLElement | null;
+    // Bare keys are ignored while typing — `s` in the filter box must not stage.
+    if (
+      target?.closest("input, textarea, [contenteditable='true']") ||
+      event.metaKey ||
+      event.ctrlKey ||
+      event.altKey
+    ) {
+      return;
+    }
+    // fork: f4 focus model — a key this list owns stops here. Without it a
+    // bare `s`/`x` keeps bubbling to the surfaces above the panel.
+    if (CHANGES_LIST_OWNED_KEYS.has(event.key)) {
+      event.stopPropagation();
+    }
+    switch (event.key) {
+      case "j":
+      case "ArrowDown":
+        event.preventDefault();
+        focusRow(moveChangesFocus(rows, selection.focusedKey, "next"));
         return;
-      }
-      // fork: f4 focus model — a key this list owns stops here. Without it a
-      // bare `s`/`x` keeps bubbling to the surfaces above the panel.
-      if (CHANGES_LIST_OWNED_KEYS.has(event.key)) {
-        event.stopPropagation();
-      }
-      switch (event.key) {
-        case "j":
-        case "ArrowDown":
+      case "k":
+      case "ArrowUp":
+        event.preventDefault();
+        focusRow(moveChangesFocus(rows, selection.focusedKey, "previous"));
+        return;
+      case "Home":
+        event.preventDefault();
+        focusRow(moveChangesFocus(rows, selection.focusedKey, "first"));
+        return;
+      case "End":
+        event.preventDefault();
+        focusRow(moveChangesFocus(rows, selection.focusedKey, "last"));
+        return;
+      case "Enter": {
+        const row = rows.find((entry) => entry.key === selection.focusedKey);
+        if (row?.file) {
           event.preventDefault();
-          focusRow(moveChangesFocus(rows, selection.focusedKey, "next"));
-          return;
-        case "k":
-        case "ArrowUp":
-          event.preventDefault();
-          focusRow(moveChangesFocus(rows, selection.focusedKey, "previous"));
-          return;
-        case "Home":
-          event.preventDefault();
-          focusRow(moveChangesFocus(rows, selection.focusedKey, "first"));
-          return;
-        case "End":
-          event.preventDefault();
-          focusRow(moveChangesFocus(rows, selection.focusedKey, "last"));
-          return;
-        case "Enter": {
-          const row = rows.find((entry) => entry.key === selection.focusedKey);
-          if (row?.file) {
-            event.preventDefault();
-            props.onOpenDiff(row.file);
-          }
-          return;
+          props.onOpenDiff(row.file);
         }
-        case "s":
-          event.preventDefault();
-          runOnTargets("stage", props.onStage, (row) => row.group !== "staged");
-          return;
-        case "u":
-          event.preventDefault();
-          runOnTargets("unstage", props.onUnstage, (row) => row.group === "staged");
-          return;
-        case "x":
-        case "Backspace":
-        case "Delete":
-          event.preventDefault();
-          runOnTargets("discard", props.onDiscard, (row) => row.group === "unstaged");
-          return;
-        case "Escape":
-          event.preventDefault();
-          setSelection(EMPTY_CHANGES_SELECTION);
-          return;
-        default:
-          return;
-      }
-    },
-    [focusRow, props, rows, runOnTargets, selection.focusedKey],
-  );
-
-  const handleSelect = useCallback(
-    (row: ChangesRow, event: React.MouseEvent) => {
-      // Every click path moves real focus into the list. Clicking a plain div
-      // leaves `document.activeElement` where it was, which is how the panel's
-      // keys ended up typing into the chat composer.
-      takeFocus();
-      if (event.shiftKey) {
-        setSelection((current) => selectRowRange(rows, current, row.key));
         return;
       }
-      if (event.metaKey || event.ctrlKey) {
-        setSelection((current) => toggleRowSelection(current, row.key));
+      case "s":
+        event.preventDefault();
+        runOnTargets("stage", props.onStage, (row) => row.group !== "staged");
         return;
-      }
-      setSelection(selectSingleRow(row.key));
-      if (row.file) props.onOpenDiff(row.file);
-    },
-    [props, rows, takeFocus],
-  );
+      case "u":
+        event.preventDefault();
+        runOnTargets("unstage", props.onUnstage, (row) => row.group === "staged");
+        return;
+      case "x":
+      case "Backspace":
+      case "Delete":
+        event.preventDefault();
+        runOnTargets("discard", props.onDiscard, (row) => row.group === "unstaged");
+        return;
+      case "Escape":
+        event.preventDefault();
+        setSelection(EMPTY_CHANGES_SELECTION);
+        return;
+      default:
+        return;
+    }
+  };
 
-  const renderRow = useCallback(
-    (row: ChangesRow) => {
-      if (row.kind === "header") {
-        const paths = groupPathsOf(row.group);
-        return (
-          <GroupHeader
-            row={row}
-            collapsed={collapsedGroups.has(row.group)}
-            busy={anyPathBusy(props.busyPaths, paths)}
-            actionsDisabled={props.actionsDisabled}
-            onToggle={() => props.onToggleGroup(row.group)}
-            // fork: f4 F-08 — the group's OWN paths. `[]` used to travel up to
-            // the panel and be re-expanded into the whole working copy.
-            onStageAll={() => props.onStage(paths)}
-            onUnstageAll={() => props.onUnstage(paths)}
-            onDiscardAll={() => props.onDiscard(paths)}
-            onCollapseAllFolders={() => toggleGroupFolders(row.group)}
-            showFolderToggle={props.viewMode === "tree"}
-          />
-        );
-      }
-      if (row.kind === "folder") {
-        const folderFiles = row.folderFiles ?? [];
-        return (
-          <FolderRow
-            row={row}
-            indentPx={changesRowIndent(row.depth)}
-            busy={anyPathBusy(props.busyPaths, folderFiles)}
-            actionsDisabled={props.actionsDisabled}
-            onToggle={() => props.onToggleFolder(`${row.group}:${row.path ?? ""}`)}
-            onStage={() => props.onStage(folderFiles)}
-            onUnstage={() => props.onUnstage(folderFiles)}
-            staged={row.group === "staged"}
-          />
-        );
-      }
-      if (row.kind === "empty") {
-        return (
-          <div
-            style={{ height: CHANGES_ROW_HEIGHT.empty, paddingLeft: changesRowIndent(1) }}
-            className="flex items-center pr-3 text-muted-foreground/70 text-xs"
-          >
-            {row.detail ?? "No files match in this group."}
-          </div>
-        );
-      }
-      const file = row.file;
-      if (!file) return null;
+  const handleSelect = (row: ChangesRow, event: React.MouseEvent) => {
+    // Every click path moves real focus into the list. Clicking a plain div
+    // leaves `document.activeElement` where it was, which is how the panel's
+    // keys ended up typing into the chat composer.
+    takeFocus();
+    if (event.shiftKey) {
+      setSelection((current) => selectRowRange(rows, current, row.key));
+      return;
+    }
+    if (event.metaKey || event.ctrlKey) {
+      setSelection((current) => toggleRowSelection(current, row.key));
+      return;
+    }
+    setSelection(selectSingleRow(row.key));
+    if (row.file) props.onOpenDiff(row.file);
+  };
+
+  const renderRow = (row: ChangesRow) => {
+    if (row.kind === "header") {
+      const paths = groupPathsOf(row.group);
       return (
-        <ChangeRow
+        <GroupHeader
           row={row}
-          domId={changesRowDomId(row.key)}
-          selected={selection.selectedKeys.has(row.key)}
-          focused={selection.focusedKey === row.key}
-          partial={partialPaths.has(file.path)}
-          busy={props.busyPaths.has(file.path)}
+          collapsed={collapsedGroups.has(row.group)}
+          busy={anyPathBusy(props.busyPaths, paths)}
           actionsDisabled={props.actionsDisabled}
-          showDirectory={props.viewMode === "flat"}
-          indentPx={changesRowIndent(row.depth)}
-          onSelect={handleSelect}
-          onOpen={(target) => target.file && props.onOpenDiff(target.file)}
-          onStage={(target) => target.file && props.onStage([target.file.path])}
-          onUnstage={(target) => target.file && props.onUnstage([target.file.path])}
-          onDiscard={(target) => target.file && props.onDiscard([target.file.path])}
-          onResolve={(target, side) => target.file && props.onResolve(target.file.path, side)}
+          onToggle={() => props.onToggleGroup(row.group)}
+          // fork: f4 F-08 — the group's OWN paths. `[]` used to travel up to
+          // the panel and be re-expanded into the whole working copy.
+          onStageAll={() => props.onStage(paths)}
+          onUnstageAll={() => props.onUnstage(paths)}
+          onDiscardAll={() => props.onDiscard(paths)}
+          onCollapseAllFolders={() => toggleGroupFolders(row.group)}
+          showFolderToggle={props.viewMode === "tree"}
         />
       );
-    },
-    [
-      collapsedGroups,
-      groupPathsOf,
-      handleSelect,
-      partialPaths,
-      props,
-      selection,
-      toggleGroupFolders,
-    ],
-  );
+    }
+    if (row.kind === "folder") {
+      const folderFiles = row.folderFiles ?? [];
+      return (
+        <FolderRow
+          row={row}
+          indentPx={changesRowIndent(row.depth)}
+          busy={anyPathBusy(props.busyPaths, folderFiles)}
+          actionsDisabled={props.actionsDisabled}
+          onToggle={() => props.onToggleFolder(`${row.group}:${row.path ?? ""}`)}
+          onStage={() => props.onStage(folderFiles)}
+          onUnstage={() => props.onUnstage(folderFiles)}
+          staged={row.group === "staged"}
+        />
+      );
+    }
+    if (row.kind === "empty") {
+      return (
+        <div
+          style={{ height: CHANGES_ROW_HEIGHT.empty, paddingLeft: changesRowIndent(1) }}
+          className="flex items-center pr-3 text-muted-foreground/70 text-xs"
+        >
+          {row.detail ?? "No files match in this group."}
+        </div>
+      );
+    }
+    const file = row.file;
+    if (!file) return null;
+    return (
+      <ChangeRow
+        row={row}
+        domId={changesRowDomId(row.key)}
+        selected={selection.selectedKeys.has(row.key)}
+        focused={selection.focusedKey === row.key}
+        partial={partialPaths.has(file.path)}
+        busy={props.busyPaths.has(file.path)}
+        actionsDisabled={props.actionsDisabled}
+        showDirectory={props.viewMode === "flat"}
+        indentPx={changesRowIndent(row.depth)}
+        onSelect={handleSelect}
+        onOpen={(target) => target.file && props.onOpenDiff(target.file)}
+        onStage={(target) => target.file && props.onStage([target.file.path])}
+        onUnstage={(target) => target.file && props.onUnstage([target.file.path])}
+        onDiscard={(target) => target.file && props.onDiscard([target.file.path])}
+        onResolve={(target, side) => target.file && props.onResolve(target.file.path, side)}
+      />
+    );
+  };
 
   const activeDescendantId =
     selection.focusedKey === null ? undefined : changesRowDomId(selection.focusedKey);
@@ -553,7 +504,7 @@ function GroupHeader(props: {
       <button
         type="button"
         className={cn(
-          "flex min-w-0 flex-1 items-center gap-1 rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-ring",
+          "flex min-w-0 flex-1 items-center gap-1 rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
           EYEBROW_CLASS,
           collapsible && "hover:text-foreground/80",
         )}
@@ -571,12 +522,12 @@ function GroupHeader(props: {
           <span className="size-3" />
         )}
         <span className="truncate">{CHANGES_GROUP_TITLE[row.group]}</span>
-        <span className="shrink-0 text-[11px] font-normal tracking-normal text-muted-foreground tabular-nums">
+        <span className="shrink-0 text-2xs font-normal tracking-normal text-muted-foreground tabular-nums">
           {groupHeaderCountLabel(row.total ?? 0, row.visible ?? row.total ?? 0)}
         </span>
         {row.insertions !== undefined || row.deletions !== undefined ? (
           <span
-            className="flex shrink-0 items-center gap-1.5 text-[11px] font-normal tracking-normal tabular-nums"
+            className="flex shrink-0 items-center gap-1.5 text-2xs font-normal tracking-normal tabular-nums"
             aria-label={`${row.insertions ?? 0} additions, ${row.deletions ?? 0} deletions`}
           >
             <span className="text-success-foreground">+{row.insertions ?? 0}</span>
@@ -687,7 +638,7 @@ function FolderRow(props: {
     >
       <button
         type="button"
-        className="flex min-w-0 flex-1 items-center gap-1.5 rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        className="flex min-w-0 flex-1 items-center gap-1.5 rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
         onClick={props.onToggle}
         tabIndex={-1}
       >

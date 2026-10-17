@@ -20,7 +20,6 @@
  * fork: f4 source-control panel
  */
 import { FileIcon, Loader2, Minus, Plus, Undo2 } from "lucide-react";
-import { memo } from "react";
 
 import { CHANGES_ROW_HEIGHT, CONFLICT_ACTIONS_HEIGHT } from "~/lib/sourceControl/changesRows";
 import type { ChangesRow } from "~/lib/sourceControl/changesRows";
@@ -119,7 +118,7 @@ function ChangeRowImpl(props: ChangeRowProps) {
           <Tooltip>
             <TooltipTrigger
               render={
-                <span className="shrink-0 text-[10px] font-medium text-warning-foreground">
+                <span className="shrink-0 text-3xs font-medium text-warning-foreground">
                   partial
                 </span>
               }
@@ -292,4 +291,4 @@ function ConflictAction(props: {
   );
 }
 
-export const ChangeRow = memo(ChangeRowImpl);
+export const ChangeRow = ChangeRowImpl;

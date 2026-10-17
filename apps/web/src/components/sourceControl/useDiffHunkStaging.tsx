@@ -21,7 +21,7 @@
  * fork: f4 hunk staging
  */
 import type { EnvironmentId } from "@t3tools/contracts";
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import { isNewFileDiff } from "~/lib/sourceControl/diffPatch";
 import { confirmDiscardHunk } from "~/lib/sourceControl/safetyLadder";
@@ -106,19 +106,14 @@ export function useDiffHunkStaging(target: {
   readonly onSideExhausted?: (nextSide: HunkSide) => void;
 }): DiffHunkStagingView {
   const { cwd, environmentId, selection } = target;
-  const resolved = useMemo(
-    () =>
-      environmentId !== null && cwd !== null && selection !== null
-        ? { environmentId, cwd, selection }
-        : null,
-    [cwd, environmentId, selection],
-  );
+  const resolved =
+    environmentId !== null && cwd !== null && selection !== null
+      ? { environmentId, cwd, selection }
+      : null;
   const active = resolved !== null;
 
-  const scope = useMemo(
-    () => (resolved === null ? null : { environmentId: resolved.environmentId, cwd: resolved.cwd }),
-    [resolved],
-  );
+  const scope =
+    resolved === null ? null : { environmentId: resolved.environmentId, cwd: resolved.cwd };
   const confirm = useSourceControlConfirm();
   // Hunk staging only ever sends `applyPatch`; stash identity is irrelevant here.
   const actions = useWorkingCopyActions(scope, confirm.confirm, false);
@@ -170,7 +165,7 @@ export function useDiffHunkStaging(target: {
   const side: HunkSide =
     resolvedSelection?.kind === "working-copy" ? resolvedSelection.side : "unstaged";
   const filePath = resolvedSelection?.filePath ?? "";
-  const clusters = useMemo(() => {
+  const clusters = (() => {
     if (!stageable || !patch || !filePath || truncated) return NO_CLUSTERS;
     // An untracked file has no index entry, so `git apply --cached` for one of
     // its hunks can only fail. Whole-file Stage in the changes list is the
@@ -178,9 +173,9 @@ export function useDiffHunkStaging(target: {
     // buttons that always error.
     if (side === "unstaged" && isNewFileDiff(patch)) return NO_CLUSTERS;
     return deriveHunkClusters(patch, filePath);
-  }, [filePath, patch, side, stageable, truncated]);
+  })();
 
-  const availableActions = useMemo(() => hunkActionsForSide(side), [side]);
+  const availableActions = hunkActionsForSide(side);
 
   // Side-flip reconciliation. `acted` is what keeps this from firing for a side
   // that was empty on arrival, and `flipped` is what keeps it from firing twice.
@@ -189,7 +184,7 @@ export function useDiffHunkStaging(target: {
   const onSideExhausted = target.onSideExhausted;
   const selectionKey = `${stageable ? side : "commit"}:${filePath}`;
   useEffect(() => {
-    actedRef.current = false;
+    if (selectionKey !== null) actedRef.current = false;
   }, [selectionKey]);
   useEffect(() => {
     if (!stageable) return;
@@ -201,58 +196,52 @@ export function useDiffHunkStaging(target: {
     onSideExhausted?.(side === "staged" ? "unstaged" : "staged");
   }, [diffQuery.isPending, onSideExhausted, patch, selectionKey, side, stageable]);
 
-  const runAction = useCallback(
-    (action: HunkAction, cluster: HunkCluster) => {
-      if (pending !== null) return;
-      // fork: f4 F-20 — claim the cluster BEFORE the confirm. `setPending` used
-      // to happen after the await, so every button stayed live for the whole
-      // dialog and a second Discard press opened a second confirm that
-      // cancelled the first — the first action then returned silently.
-      setPending({ index: cluster.index, action, confirming: action === "discard" });
-      void (async () => {
-        try {
-          // Discard is the only hunk rung below file granularity, so it cannot
-          // be backed by the pathspec stash and is the only one that still asks.
-          if (action === "discard") {
-            const outcome = await confirm.confirm(confirmDiscardHunk(filePath));
-            if (outcome !== "confirmed") return;
-            setPending({ index: cluster.index, action, confirming: false });
-          }
-          // `applyPatch` settles with a repository revision bump on success
-          // and failure alike, which re-reads this diff atom.
-          const applied = await actions.applyPatch(cluster.patch, hunkApplyFlags(action));
-          if (applied) actedRef.current = true;
-        } finally {
-          setPending(null);
+  const runAction = (action: HunkAction, cluster: HunkCluster) => {
+    if (pending !== null) return;
+    // fork: f4 F-20 — claim the cluster BEFORE the confirm. `setPending` used
+    // to happen after the await, so every button stayed live for the whole
+    // dialog and a second Discard press opened a second confirm that
+    // cancelled the first — the first action then returned silently.
+    setPending({ index: cluster.index, action, confirming: action === "discard" });
+    void (async () => {
+      return await (async () => {
+        // Discard is the only hunk rung below file granularity, so it cannot
+        // be backed by the pathspec stash and is the only one that still asks.
+        if (action === "discard") {
+          const outcome = await confirm.confirm(confirmDiscardHunk(filePath));
+          if (outcome !== "confirmed") return;
+          setPending({ index: cluster.index, action, confirming: false });
         }
-      })();
-    },
-    [actions, confirm, filePath, pending],
-  );
+        // `applyPatch` settles with a repository revision bump on success
+        // and failure alike, which re-reads this diff atom.
+        const applied = await actions.applyPatch(cluster.patch, hunkApplyFlags(action));
+        if (applied) actedRef.current = true;
+      })().finally(() => {
+        setPending(null);
+      });
+    })();
+  };
 
-  const clustersByIndex = useMemo(() => {
+  const clustersByIndex = (() => {
     const byIndex = new Map<number, HunkCluster>();
     for (const cluster of clusters) byIndex.set(cluster.index, cluster);
     return byIndex;
-  }, [clusters]);
+  })();
 
-  const renderCluster = useCallback(
-    (_fileKey: string, hunkIndex: number): ReactNode => {
-      const cluster = clustersByIndex.get(hunkIndex);
-      if (!cluster) return null;
-      return (
-        <HunkActionCluster
-          cluster={cluster}
-          side={side}
-          actions={availableActions}
-          pendingAction={pending?.index === hunkIndex ? pending.action : null}
-          disabled={pending !== null}
-          onAction={runAction}
-        />
-      );
-    },
-    [availableActions, clustersByIndex, pending, runAction, side],
-  );
+  const renderCluster = (_fileKey: string, hunkIndex: number): ReactNode => {
+    const cluster = clustersByIndex.get(hunkIndex);
+    if (!cluster) return null;
+    return (
+      <HunkActionCluster
+        cluster={cluster}
+        side={side}
+        actions={availableActions}
+        pendingAction={pending?.index === hunkIndex ? pending.action : null}
+        disabled={pending !== null}
+        onAction={runAction}
+      />
+    );
+  };
 
   const confirmDialog = (
     <SourceControlConfirmDialog pending={confirm.pending} onResolve={confirm.resolve} />

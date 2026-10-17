@@ -12,7 +12,7 @@
  *
  * fork: f4 source-control panel
  */
-import { useEffect, useState } from "react";
+import { useState } from "react";
 
 import {
   AlertDialog,
@@ -38,13 +38,15 @@ export function SourceControlConfirmDialog(props: {
   const [entered, setEntered] = useState("");
 
   // Reset per request id, so a second confirm never inherits the first's typing.
-  useEffect(() => {
+  const [previousPending, setPreviousPending] = useState(pending);
+  if (previousPending !== pending) {
+    setPreviousPending(pending);
     setTyped("");
     setRepeated(false);
     setEntered(pending?.kind === "prompt" ? (pending.options.initialValue ?? "") : "");
     // `pending` is a fresh object exactly once per request, so this is the same
     // "reset per request id" rule stated in a way the dependency check accepts.
-  }, [pending]);
+  }
 
   if (!pending) return null;
 

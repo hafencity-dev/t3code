@@ -1,7 +1,7 @@
 import { GitBranchIcon, PanelBottomIcon, PanelRightIcon, SquareMenuIcon } from "lucide-react";
 import { Maximize2, Minimize2 } from "lucide";
 import { MorphIcon } from "~/components/MorphIcon";
-import { memo, type ReactElement } from "react";
+import { type ReactElement } from "react";
 
 import type { ThreadPanelPresentation } from "../../rightPanelLayout";
 import { PopoverCreateHandle, PopoverTrigger } from "../ui/popover";
@@ -33,7 +33,7 @@ export interface PanelLayoutControlsProps {
   onToggleRightPanel: () => void;
 }
 
-export const PanelLayoutControls = memo(function PanelLayoutControls({
+export const PanelLayoutControls = function PanelLayoutControls({
   showThreadPanelControl = true,
   showTerminalControl = true,
   showRightPanelControl = true,
@@ -163,9 +163,9 @@ export const PanelLayoutControls = memo(function PanelLayoutControls({
       ) : null}
     </div>
   );
-});
+};
 
-export const RightPanelMaximizeControl = memo(function RightPanelMaximizeControl({
+export const RightPanelMaximizeControl = function RightPanelMaximizeControl({
   maximized,
   onToggle,
 }: {
@@ -192,4 +192,4 @@ export const RightPanelMaximizeControl = memo(function RightPanelMaximizeControl
       <TooltipPopup side="bottom">{label}</TooltipPopup>
     </Tooltip>
   );
-});
+};

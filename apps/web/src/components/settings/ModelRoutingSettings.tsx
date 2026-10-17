@@ -17,7 +17,7 @@ import {
   resolveClaudeCodexRoutingPrompt,
 } from "@t3tools/shared/claudeCodexRouting";
 import { CheckIcon, CopyIcon, RouteIcon } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useState } from "react";
 
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { usePrimarySettings, useUpdatePrimarySettings } from "../../hooks/useSettings";
@@ -163,7 +163,11 @@ function PromptEditor({
   readonly onSave: (value: string) => void;
 }) {
   const [draft, setDraft] = useState(value);
-  useEffect(() => setDraft(value), [value]);
+  const [previousValue, setPreviousValue] = useState(value);
+  if (value !== previousValue) {
+    setPreviousValue(value);
+    setDraft(value);
+  }
   const dirty = draft !== value;
   return (
     <SettingsRow title={label} description={description}>
@@ -196,20 +200,17 @@ export function ModelRoutingSettingsPanel() {
   const settings = usePrimarySettings();
   const updateSettings = useUpdatePrimarySettings();
   const providers = useAtomValue(primaryServerProvidersAtom);
-  const claudeProviders = useMemo(() => claudeRoutingProviders(providers), [providers]);
+  const claudeProviders = claudeRoutingProviders(providers);
   const [selectedId, setSelectedId] = useState<ProviderInstanceId | null>(null);
   const selected =
     claudeProviders.find((provider) => provider.instanceId === selectedId) ?? claudeProviders[0];
   const routing = selected
     ? readClaudeCodexRouting(settings, selected.instanceId)
     : DEFAULT_CLAUDE_CODEX_ROUTING_SETTINGS;
-  const saveRouting = useCallback(
-    (next: ClaudeCodexRoutingSettings) => {
-      if (!selected) return;
-      updateSettings(buildClaudeCodexRoutingPatch(settings, selected.instanceId, next));
-    },
-    [selected, settings, updateSettings],
-  );
+  const saveRouting = (next: ClaudeCodexRoutingSettings) => {
+    if (!selected) return;
+    updateSettings(buildClaudeCodexRoutingPatch(settings, selected.instanceId, next));
+  };
 
   const effectiveModel = effectiveClaudeCodexModel(routing.model);
   const modelOptions = [

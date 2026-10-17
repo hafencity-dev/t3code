@@ -44,6 +44,10 @@ import { SwitchAccountAction } from "./SwitchAccountAction";
 
 let loginAttempt = 0;
 
+function nextLoginAttempt() {
+  return ++loginAttempt;
+}
+
 type LoginEventsAtom = ReturnType<typeof providerAccountsEnvironment.loginEvents>;
 
 const BROWSER_HINT = {
@@ -159,7 +163,7 @@ export function AddAccountWizard({
         ...(account ? { accountId: account.id } : {}),
         ...(account?.email ? { email: account.email } : {}),
         ...(label ? { label } : {}),
-        attempt: ++loginAttempt,
+        attempt: nextLoginAttempt(),
       },
     });
   // Re-login starts immediately: the user already chose the action.

@@ -1,3 +1,4 @@
+import { observeResize } from "~/lib/observeResize";
 /**
  * The History tab: lane graph, virtualized rows, drawer, load-more.
  *
@@ -26,7 +27,7 @@ import { LegendList, type LegendListRef } from "@legendapp/list/react";
 import type { HistoryFilter } from "@t3tools/client-runtime/state/working-copy-logic";
 import type { WorkingCopyCommitDetail, WorkingCopyLogEntry } from "@t3tools/contracts";
 import { AlertCircle, GitCommitHorizontal, SearchX, X } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import {
   HISTORY_DAY_ROW_HEIGHT,
@@ -125,14 +126,11 @@ export function HistoryList(props: HistoryListProps) {
   useEffect(() => {
     const element = rootRef.current;
     if (!element || typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver((observed) => {
+    const disconnect = observeResize(element, (observed) => {
       const entry = observed[0];
       if (entry) setWidthPx(entry.contentRect.width);
     });
-    observer.observe(element);
-    return () => {
-      observer.disconnect();
-    };
+    return disconnect;
   }, []);
 
   const width = historyWidthBucket(widthPx);
@@ -145,247 +143,205 @@ export function HistoryList(props: HistoryListProps) {
   });
 
   // The fold runs over the FULL page array, not the rendered/filtered one.
-  const laneNodes = useMemo(
-    () => (suppression === null ? buildLaneGraph(history.page.entries) : []),
-    [history.page.entries, suppression],
-  );
-  const nodeByHash = useMemo(() => {
+  const laneNodes = suppression === null ? buildLaneGraph(history.page.entries) : [];
+  const nodeByHash = (() => {
     const map = new Map<string, LaneNode>();
     for (const node of laneNodes) map.set(node.hash, node);
     return map;
-  }, [laneNodes]);
+  })();
   // fork: f4 M14 — the gutter is capped; the fold above keeps its true columns.
-  const graphWidth = useMemo(() => cappedLaneGraphWidth(laneGraphWidth(laneNodes)), [laneNodes]);
+  const graphWidth = cappedLaneGraphWidth(laneGraphWidth(laneNodes));
 
-  const entries = useMemo(() => {
+  const entries = (() => {
     const list = history.entries;
     return props.sort === "oldest" ? list.toReversed() : list;
-  }, [history.entries, props.sort]);
+  })();
 
-  const rows = useMemo(
-    () =>
-      buildHistoryRows({
-        entries,
-        grouped: props.grouped,
-        expandedHash: props.expandedHash,
-        canLoadMore: history.canLoadMore,
-      }),
-    [entries, history.canLoadMore, props.expandedHash, props.grouped],
-  );
+  const rows = buildHistoryRows({
+    entries,
+    grouped: props.grouped,
+    expandedHash: props.expandedHash,
+    canLoadMore: history.canLoadMore,
+  });
 
-  const commitHashes = useMemo(
-    () => rows.filter((row) => row.kind === "commit").map((row) => row.hash ?? ""),
-    [rows],
-  );
+  const commitHashes = rows.filter((row) => row.kind === "commit").map((row) => row.hash ?? "");
 
   // Drop a focus whose commit is gone (a filter change, a new page).
-  useEffect(() => {
-    setFocusedHash((current) =>
-      current !== null && commitHashes.includes(current) ? current : null,
-    );
-  }, [commitHashes]);
+  if (focusedHash !== null && !commitHashes.includes(focusedHash)) setFocusedHash(null);
 
   const drawerHeight =
     drawer !== null && drawer.hash === props.expandedHash
       ? clampHistoryDrawerHeight(drawer.height)
       : HISTORY_DEFAULT_DRAWER_HEIGHT;
 
-  const handleMeasureDrawer = useCallback(
-    (height: number) => {
-      const hash = props.expandedHash;
-      if (hash === null) return;
-      setDrawer((current) =>
-        current !== null && current.hash === hash && Math.abs(current.height - height) < 2
-          ? current
-          : { hash, height },
-      );
-    },
-    [props.expandedHash],
-  );
+  const handleMeasureDrawer = (height: number) => {
+    const hash = props.expandedHash;
+    if (hash === null) return;
+    setDrawer((current) =>
+      current !== null && current.hash === hash && Math.abs(current.height - height) < 2
+        ? current
+        : { hash, height },
+    );
+  };
 
-  const focusCommit = useCallback(
-    (hash: string | null) => {
-      if (hash === null) return;
-      setFocusedHash(hash);
-      rootRef.current?.focus({ preventScroll: true });
-      const index = rows.findIndex((row) => row.kind === "commit" && row.hash === hash);
-      if (index >= 0) listRef.current?.scrollToIndex({ index, viewPosition: 0.5 });
-    },
-    [rows],
-  );
+  const focusCommit = (hash: string | null) => {
+    if (hash === null) return;
+    setFocusedHash(hash);
+    rootRef.current?.focus({ preventScroll: true });
+    const index = rows.findIndex((row) => row.kind === "commit" && row.hash === hash);
+    if (index >= 0) listRef.current?.scrollToIndex({ index, viewPosition: 0.5 });
+  };
 
-  const moveFocus = useCallback(
-    (move: "next" | "previous" | "first" | "last"): string | null => {
-      if (commitHashes.length === 0) return null;
-      if (move === "first") return commitHashes[0] ?? null;
-      if (move === "last") return commitHashes[commitHashes.length - 1] ?? null;
-      const index = focusedHash === null ? -1 : commitHashes.indexOf(focusedHash);
-      if (index === -1) {
-        return move === "next"
-          ? (commitHashes[0] ?? null)
-          : (commitHashes[commitHashes.length - 1] ?? null);
-      }
-      const nextIndex = move === "next" ? index + 1 : index - 1;
-      if (nextIndex < 0 || nextIndex >= commitHashes.length) return focusedHash;
-      return commitHashes[nextIndex] ?? null;
-    },
-    [commitHashes, focusedHash],
-  );
+  const moveFocus = (move: "next" | "previous" | "first" | "last"): string | null => {
+    if (commitHashes.length === 0) return null;
+    if (move === "first") return commitHashes[0] ?? null;
+    if (move === "last") return commitHashes[commitHashes.length - 1] ?? null;
+    const index = focusedHash === null ? -1 : commitHashes.indexOf(focusedHash);
+    if (index === -1) {
+      return move === "next"
+        ? (commitHashes[0] ?? null)
+        : (commitHashes[commitHashes.length - 1] ?? null);
+    }
+    const nextIndex = move === "next" ? index + 1 : index - 1;
+    if (nextIndex < 0 || nextIndex >= commitHashes.length) return focusedHash;
+    return commitHashes[nextIndex] ?? null;
+  };
 
-  const handleKeyDown = useCallback(
-    (event: React.KeyboardEvent<HTMLDivElement>) => {
-      const target = event.target as HTMLElement | null;
-      if (
-        target?.closest("input, textarea, [contenteditable='true']") ||
-        event.metaKey ||
-        event.ctrlKey ||
-        event.altKey
-      ) {
+  const handleKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    const target = event.target as HTMLElement | null;
+    if (
+      target?.closest("input, textarea, [contenteditable='true']") ||
+      event.metaKey ||
+      event.ctrlKey ||
+      event.altKey
+    ) {
+      return;
+    }
+    if (HISTORY_LIST_OWNED_KEYS.has(event.key)) {
+      event.stopPropagation();
+    }
+    switch (event.key) {
+      case "j":
+      case "ArrowDown":
+        event.preventDefault();
+        focusCommit(moveFocus("next"));
         return;
-      }
-      if (HISTORY_LIST_OWNED_KEYS.has(event.key)) {
-        event.stopPropagation();
-      }
-      switch (event.key) {
-        case "j":
-        case "ArrowDown":
+      case "k":
+      case "ArrowUp":
+        event.preventDefault();
+        focusCommit(moveFocus("previous"));
+        return;
+      case "Home":
+        event.preventDefault();
+        focusCommit(moveFocus("first"));
+        return;
+      case "End":
+        event.preventDefault();
+        focusCommit(moveFocus("last"));
+        return;
+      case "Enter":
+        if (focusedHash === null) return;
+        event.preventDefault();
+        props.onExpandedHashChange(props.expandedHash === focusedHash ? null : focusedHash);
+        return;
+      case "Escape":
+        if (props.expandedHash !== null) {
           event.preventDefault();
-          focusCommit(moveFocus("next"));
+          props.onExpandedHashChange(null);
           return;
-        case "k":
-        case "ArrowUp":
+        }
+        if (history.filterActive) {
           event.preventDefault();
-          focusCommit(moveFocus("previous"));
-          return;
-        case "Home":
-          event.preventDefault();
-          focusCommit(moveFocus("first"));
-          return;
-        case "End":
-          event.preventDefault();
-          focusCommit(moveFocus("last"));
-          return;
-        case "Enter":
-          if (focusedHash === null) return;
-          event.preventDefault();
-          props.onExpandedHashChange(props.expandedHash === focusedHash ? null : focusedHash);
-          return;
-        case "Escape":
-          if (props.expandedHash !== null) {
-            event.preventDefault();
-            props.onExpandedHashChange(null);
-            return;
-          }
-          if (history.filterActive) {
-            event.preventDefault();
-            props.onFilterChange({ query: "", author: "" });
-          }
-          return;
-        default:
-          return;
-      }
-    },
-    [focusCommit, focusedHash, history.filterActive, moveFocus, props],
-  );
+          props.onFilterChange({ query: "", author: "" });
+        }
+        return;
+      default:
+        return;
+    }
+  };
 
-  const handleContainerFocus = useCallback(
-    (event: React.FocusEvent<HTMLDivElement>) => {
-      if (event.target !== event.currentTarget) return;
-      if (focusedHash !== null) return;
-      const first = commitHashes[0];
-      if (first !== undefined) setFocusedHash(first);
-    },
-    [commitHashes, focusedHash],
-  );
+  const handleContainerFocus = (event: React.FocusEvent<HTMLDivElement>) => {
+    if (event.target !== event.currentTarget) return;
+    if (focusedHash !== null) return;
+    const first = commitHashes[0];
+    if (first !== undefined) setFocusedHash(first);
+  };
 
-  const renderRow = useCallback(
-    (row: HistoryRow) => {
-      if (row.kind === "day") {
-        return (
-          <div
-            style={{ height: HISTORY_DAY_ROW_HEIGHT }}
-            className="flex items-center bg-background px-3 font-medium text-[11px] text-muted-foreground/70 uppercase tracking-[0.08em]"
-          >
-            {row.label ?? historyDayLabel(row.entry?.authoredAt ?? "")}
-          </div>
-        );
-      }
-      if (row.kind === "load-more") {
-        return (
-          <div
-            style={{ height: HISTORY_LOAD_MORE_ROW_HEIGHT }}
-            className="flex items-center justify-center"
-          >
-            {/* fork: f4 F-16 — disabled while ANY read is in flight, but the
-                label only says "Loading…" for the page read this row owns. */}
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={history.isLoading}
-              onClick={history.loadMore}
-            >
-              {history.isLoadingMore ? "Loading…" : "Load more"}
-            </Button>
-          </div>
-        );
-      }
-      if (row.kind === "drawer") {
-        return (
-          <CommitDrawer
-            detail={props.commitDetail}
-            isLoading={props.commitDetailLoading}
-            height={drawerHeight}
-            onMeasure={handleMeasureDrawer}
-            onCopy={props.onCopy}
-            onOpenFile={(path, oldPath) =>
-              props.onOpenCommitFile(row.entry?.hash ?? "", path, oldPath)
-            }
-          />
-        );
-      }
-      const entry = row.entry;
-      if (!entry) return null;
+  const renderRow = (row: HistoryRow) => {
+    if (row.kind === "day") {
       return (
-        <CommitRow
-          entry={entry}
-          domId={historyRowDomId(entry.hash)}
-          focused={focusedHash === entry.hash}
-          node={
-            suppression === null ? (nodeByHash.get(entry.hash) ?? null) : plainLaneNode(entry.hash)
-          }
-          graphWidth={suppression === null ? graphWidth : 1}
-          density={props.density}
-          width={width}
-          selected={props.expandedHash === entry.hash}
-          detached={props.detached}
-          dirty={props.dirty}
-          isBusy={props.isBusy}
-          onToggleDrawer={(hash) => {
-            setFocusedHash(hash);
-            props.onExpandedHashChange(props.expandedHash === hash ? null : hash);
-          }}
+        <div
+          style={{ height: HISTORY_DAY_ROW_HEIGHT }}
+          className="flex items-center bg-background px-3 font-medium text-2xs text-muted-foreground/70 uppercase tracking-wider"
+        >
+          {row.label ?? historyDayLabel(row.entry?.authoredAt ?? "")}
+        </div>
+      );
+    }
+    if (row.kind === "load-more") {
+      return (
+        <div
+          style={{ height: HISTORY_LOAD_MORE_ROW_HEIGHT }}
+          className="flex items-center justify-center"
+        >
+          {/* fork: f4 F-16 — disabled while ANY read is in flight, but the
+                label only says "Loading…" for the page read this row owns. */}
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={history.isLoading}
+            onClick={history.loadMore}
+          >
+            {history.isLoadingMore ? "Loading…" : "Load more"}
+          </Button>
+        </div>
+      );
+    }
+    if (row.kind === "drawer") {
+      return (
+        <CommitDrawer
+          detail={props.commitDetail}
+          isLoading={props.commitDetailLoading}
+          height={drawerHeight}
+          onMeasure={handleMeasureDrawer}
           onCopy={props.onCopy}
-          onFilterAuthor={(author) => props.onFilterChange({ ...props.filter, author })}
-          onTag={props.onTag}
-          onCherryPick={props.onCherryPick}
-          onCheckout={props.onCheckout}
-          onReset={props.onReset}
-          onRevert={props.onRevert}
+          onOpenFile={(path, oldPath) =>
+            props.onOpenCommitFile(row.entry?.hash ?? "", path, oldPath)
+          }
         />
       );
-    },
-    [
-      drawerHeight,
-      focusedHash,
-      graphWidth,
-      handleMeasureDrawer,
-      history,
-      nodeByHash,
-      props,
-      suppression,
-      width,
-    ],
-  );
+    }
+    const entry = row.entry;
+    if (!entry) return null;
+    return (
+      <CommitRow
+        entry={entry}
+        domId={historyRowDomId(entry.hash)}
+        focused={focusedHash === entry.hash}
+        node={
+          suppression === null ? (nodeByHash.get(entry.hash) ?? null) : plainLaneNode(entry.hash)
+        }
+        graphWidth={suppression === null ? graphWidth : 1}
+        density={props.density}
+        width={width}
+        selected={props.expandedHash === entry.hash}
+        detached={props.detached}
+        dirty={props.dirty}
+        isBusy={props.isBusy}
+        onToggleDrawer={(hash) => {
+          setFocusedHash(hash);
+          props.onExpandedHashChange(props.expandedHash === hash ? null : hash);
+        }}
+        onCopy={props.onCopy}
+        onFilterAuthor={(author) => props.onFilterChange({ ...props.filter, author })}
+        onTag={props.onTag}
+        onCherryPick={props.onCherryPick}
+        onCheckout={props.onCheckout}
+        onReset={props.onReset}
+        onRevert={props.onRevert}
+      />
+    );
+  };
 
   const firstLoad = history.isLoading && history.entries.length === 0;
   const empty = !firstLoad && history.entries.length === 0;
@@ -402,7 +358,7 @@ export function HistoryList(props: HistoryListProps) {
       aria-activedescendant={focusedHash === null ? undefined : historyRowDomId(focusedHash)}
     >
       {suppression ? (
-        <div className="flex flex-none items-center gap-2 border-border/60 border-b bg-muted/60 px-3 py-1 text-[11px] text-muted-foreground">
+        <div className="flex flex-none items-center gap-2 border-border/60 border-b bg-muted/60 px-3 py-1 text-2xs text-muted-foreground">
           <span className="min-w-0 flex-1">
             The graph is hidden while the list is {suppression}.
           </span>

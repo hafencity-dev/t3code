@@ -1,3 +1,4 @@
+import { observeResize } from "~/lib/observeResize";
 /**
  * The expanded commit detail.
  *
@@ -59,12 +60,8 @@ export function CommitDrawer(props: {
     };
     report();
     if (typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(report);
-    observer.observe(element);
-    return () => {
-      observer.disconnect();
-    };
-  }, [onMeasure, props.detail, props.isLoading]);
+    return observeResize(element, report);
+  }, [onMeasure]);
 
   return (
     <div

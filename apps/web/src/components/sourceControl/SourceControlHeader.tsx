@@ -75,7 +75,7 @@ export function SourceControlHeader(props: SourceControlHeaderProps) {
       <Tooltip>
         <TooltipTrigger
           render={
-            <div className="flex min-w-0 flex-1 items-center gap-2 rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-ring" />
+            <div className="flex min-w-0 flex-1 items-center gap-2 rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring" />
           }
         >
           <FolderGit2 className="size-4 shrink-0 text-muted-foreground" />
@@ -83,12 +83,12 @@ export function SourceControlHeader(props: SourceControlHeaderProps) {
             <span className="flex min-w-0 items-center gap-1.5">
               <span className="truncate text-xs font-semibold">{props.repoLabel}</span>
               {props.dirtyCount > 0 ? (
-                <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">
+                <span className="shrink-0 text-2xs tabular-nums text-muted-foreground">
                   {props.dirtyCount}
                 </span>
               ) : null}
             </span>
-            <span className="flex min-w-0 items-center gap-1 text-[11px] leading-3 text-muted-foreground">
+            <span className="flex min-w-0 items-center gap-1 text-2xs leading-3 text-muted-foreground">
               <GitBranch className="size-3 shrink-0" />
               <span className="truncate">
                 {props.status?.refName ??

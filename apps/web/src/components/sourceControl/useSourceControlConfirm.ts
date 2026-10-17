@@ -8,7 +8,7 @@
  *
  * fork: f4 source-control panel
  */
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import type { SourceControlConfirmOptions } from "~/lib/sourceControl/safetyLadder";
 
@@ -78,7 +78,7 @@ export function useSourceControlConfirm(): SourceControlConfirmController {
     [],
   );
 
-  const confirm = useCallback((options: SourceControlConfirmOptions) => {
+  const confirm = (options: SourceControlConfirmOptions) => {
     // A second request while one is open cancels the first rather than stacking
     // dialogs — two modals over one list is how people confirm the wrong thing.
     resolverRef.current?.("cancelled");
@@ -87,9 +87,9 @@ export function useSourceControlConfirm(): SourceControlConfirmController {
     return new Promise<ConfirmOutcome>((resolvePromise) => {
       resolverRef.current = (outcome) => resolvePromise(outcome);
     });
-  }, []);
+  };
 
-  const promptText = useCallback((options: SourceControlPromptOptions) => {
+  const promptText = (options: SourceControlPromptOptions) => {
     resolverRef.current?.("cancelled");
     idRef.current += 1;
     setPending({ id: idRef.current, kind: "prompt", options });
@@ -98,14 +98,14 @@ export function useSourceControlConfirm(): SourceControlConfirmController {
         resolvePromise(outcome === "confirmed" ? (value ?? "") : null);
       };
     });
-  }, []);
+  };
 
-  const resolve = useCallback((outcome: ConfirmOutcome, value?: string) => {
+  const resolve = (outcome: ConfirmOutcome, value?: string) => {
     const resolver = resolverRef.current;
     resolverRef.current = null;
     setPending(null);
     resolver?.(outcome, value);
-  }, []);
+  };
 
   return { pending, confirm, promptText, resolve };
 }

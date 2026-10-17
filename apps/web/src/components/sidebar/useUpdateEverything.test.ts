@@ -20,14 +20,25 @@ const fixtures = vi.hoisted(() => ({
   ],
 }));
 
-vi.mock("react", () => ({ useMemo: (compute: () => unknown) => compute() }));
-vi.mock("@effect/atom-react", () => ({ useAtomValue: () => fixtures.machines }));
+vi.mock("@effect/atom-react", () => ({ useAtomValue: (value: unknown) => value }));
 vi.mock("~/branding", () => ({ APP_VERSION: "0.0.50" }));
 vi.mock("~/env", () => ({ isElectron: true }));
-vi.mock("~/state/environments", () => ({ useEnvironments: () => ({ environments: [] }) }));
+vi.mock("~/state/environments", () => ({
+  useEnvironments: () => ({
+    environments: fixtures.machines.map((machine) => ({
+      ...machine,
+      connection: { phase: "connected" },
+      entry: { target: { _tag: "BearerConnectionTarget", connectionId: "remote" } },
+    })),
+  }),
+}));
 vi.mock("~/state/npmRelease", () => ({ useNpmReleasePublished: () => true }));
-vi.mock("~/state/server", () => ({ serverEnvironment: {} }));
-vi.mock("~/state/session", () => ({ environmentSession: {} }));
+vi.mock("~/state/server", () => ({
+  environmentUpdateStatesAtom: () => fixtures.machines.map((machine) => machine.updateState),
+}));
+vi.mock("~/state/session", () => ({
+  environmentSessionStatesAtom: () => fixtures.machines.map(() => ({ authenticated: true })),
+}));
 vi.mock("../ProviderUpdatesAction", () => ({
   useProviderUpdates: () => ({ machines: [], updateAll: async () => [] }),
 }));

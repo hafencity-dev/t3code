@@ -31,7 +31,7 @@ import {
   type WorkingCopyStashEntry,
   type WorkingCopyStatusResult,
 } from "@t3tools/contracts";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import {
   commitToastText,
@@ -173,32 +173,30 @@ export function useWorkingCopyStatus(
   const refreshRepository = useAtomCommand(workingCopyEnvironment.refresh, {
     reportFailure: false,
   });
-  const refreshAll = useCallback(() => {
+  const refreshAll = () => {
     if (scope === null) return;
     void refreshRepository({ environmentId: scope.environmentId, input: { cwd: scope.cwd } });
-  }, [refreshRepository, scope]);
-  const refreshWorktree = useCallback(() => {
+  };
+  const refreshWorktree = () => {
     if (scope === null) return;
     void refreshRepository({
       environmentId: scope.environmentId,
       input: { cwd: scope.cwd, domains: ["worktree", "stashes"] },
     });
-  }, [refreshRepository, scope]);
+  };
 
   const scopeKey = scope === null ? null : JSON.stringify([scope.environmentId, scope.cwd]);
   const [lastGood, setLastGood] = useState<{
     readonly scopeKey: string;
     readonly status: WorkingCopyStatusResult;
   } | null>(null);
-  useEffect(() => {
-    const nextStatus = query.data;
-    if (scopeKey === null || nextStatus === null) return;
-    setLastGood((current) =>
-      current?.scopeKey === scopeKey && current.status === nextStatus
-        ? current
-        : { scopeKey, status: nextStatus },
-    );
-  }, [query.data, scopeKey]);
+  if (
+    scopeKey !== null &&
+    query.data !== null &&
+    (lastGood?.scopeKey !== scopeKey || lastGood.status !== query.data)
+  ) {
+    setLastGood({ scopeKey, status: query.data });
+  }
   // A failed background refresh must not blank a perfectly usable tree. The
   // error band says the snapshot may be stale while the last good data remains
   // actionable, matching VS Code's stale-while-revalidate behavior.
@@ -207,36 +205,45 @@ export function useWorkingCopyStatus(
   const [failureStreak, setFailureStreak] = useState(0);
   const [dismissed, setDismissed] = useState(false);
   const refreshPendingRef = useRef(query.isPending);
-  refreshPendingRef.current = query.isPending;
-  const queuedRefreshRef = useRef(false);
-  const requestRefresh = useCallback(() => {
+  useLayoutEffect(() => {
+    refreshPendingRef.current = query.isPending;
+  }, [query.isPending]);
+  const queuedRefreshRef = useRef<string | null>(null);
+  const requestRefresh = () => {
     if (scopeKey === null) return;
     if (refreshPendingRef.current) {
-      queuedRefreshRef.current = true;
+      queuedRefreshRef.current = scopeKey;
       return;
     }
     query.refresh();
-  }, [query.refresh, scopeKey]);
+  };
 
-  // Multiple mutation invalidations, status pushes and poll ticks may arrive
-  // during one read. Collapse them into at most one follow-up read.
+  const refreshQuery = query.refresh;
   useEffect(() => {
-    if (query.isPending || !queuedRefreshRef.current || scopeKey === null) return;
-    queuedRefreshRef.current = false;
-    query.refresh();
-  }, [query.isPending, query.refresh, scopeKey]);
+    if (query.isPending || scopeKey === null || queuedRefreshRef.current !== scopeKey) return;
+    queuedRefreshRef.current = null;
+    refreshQuery();
+  }, [query.isPending, refreshQuery, scopeKey]);
 
-  useEffect(() => {
-    setFailureStreak(0);
-    setDismissed(false);
-    queuedRefreshRef.current = false;
-  }, [scopeKey]);
-
-  useEffect(() => {
-    if (query.isPending) return;
-    setFailureStreak((current) => nextStatusFailureStreak(current, query.error !== null));
-    if (query.error === null) setDismissed(false);
-  }, [query.error, query.isPending]);
+  const [observedQuery, setObservedQuery] = useState<{
+    scopeKey: string | null;
+    pending: boolean;
+    error: typeof query.error;
+  } | null>(null);
+  if (
+    observedQuery?.scopeKey !== scopeKey ||
+    observedQuery.pending !== query.isPending ||
+    observedQuery.error !== query.error
+  ) {
+    setObservedQuery({ scopeKey, pending: query.isPending, error: query.error });
+    if (observedQuery?.scopeKey !== scopeKey) {
+      setFailureStreak(0);
+      setDismissed(false);
+    } else if (!query.isPending) {
+      setFailureStreak(nextStatusFailureStreak(failureStreak, query.error !== null));
+      if (query.error === null) setDismissed(false);
+    }
+  }
 
   // Coming back to the tab re-reads every active view once. `focus` and
   // `visibilitychange` fire together, so one short window collapses the pair.
@@ -265,7 +272,9 @@ export function useWorkingCopyStatus(
    * fire. Busy is read through a ref inside the tick instead.
    */
   const pollBusyRef = useRef(options.busy);
-  pollBusyRef.current = options.busy;
+  useLayoutEffect(() => {
+    pollBusyRef.current = options.busy;
+  }, [options.busy]);
   const isRepo = status?.isRepo ?? null;
   useEffect(() => {
     if (
@@ -293,9 +302,9 @@ export function useWorkingCopyStatus(
     };
   }, [isRepo, options.visible, requestRefresh, scope]);
 
-  const dismissErrorBanner = useCallback(() => {
+  const dismissErrorBanner = () => {
     setDismissed(true);
-  }, []);
+  };
 
   return {
     status,
@@ -390,15 +399,14 @@ export function useWorkingCopyActions(
   const generateCommitMessageCommand = useAtomCommand(workingCopyEnvironment.generateCommitMessage); // fork: f4 AI commit message
 
   const busyRef = useRef(busy);
-  busyRef.current = busy;
 
-  const setBusyKey = useCallback((key: string, active: boolean) => {
+  const setBusyKey = (key: string, active: boolean) => {
     const next = withBusyKey(busyRef.current, key, active);
     // Update the ref synchronously. React state does not commit until the next
     // render, so ref-only-on-render leaves a same-tick double press unguarded.
     busyRef.current = next;
     setBusy(next);
-  }, []);
+  };
 
   /**
    * Re-entrant press on a key already in flight is a no-op. Doubling `discard`
@@ -411,38 +419,35 @@ export function useWorkingCopyActions(
    * the keyboard, where nothing can be greyed out. When it does happen it says
    * so, because "accepted and discarded with no feedback" is the defect.
    */
-  const run = useCallback(
-    async <A>(
-      key: string,
-      title: string,
-      execute: () => Promise<AtomCommandResult<A, unknown>>,
-    ): Promise<A | null> => {
-      if (busyRef.current.has(key)) {
-        sourceControlInfoToast(BUSY_DROPPED_PRESS_TITLE);
+  const run = async <A>(
+    key: string,
+    title: string,
+    execute: () => Promise<AtomCommandResult<A, unknown>>,
+  ): Promise<A | null> => {
+    if (busyRef.current.has(key)) {
+      sourceControlInfoToast(BUSY_DROPPED_PRESS_TITLE);
+      return null;
+    }
+    setBusyKey(key, true);
+    return await (async () => {
+      const result = await execute();
+      if (result._tag === "Failure") {
+        if (!isAtomCommandInterrupted(result)) {
+          const error = squashAtomCommandFailure(result);
+          errorToast(
+            isCwdDeniedError(error) ? "This folder is outside your open projects" : title,
+            failureMessage(result),
+          );
+        }
         return null;
       }
-      setBusyKey(key, true);
-      try {
-        const result = await execute();
-        if (result._tag === "Failure") {
-          if (!isAtomCommandInterrupted(result)) {
-            const error = squashAtomCommandFailure(result);
-            errorToast(
-              isCwdDeniedError(error) ? "This folder is outside your open projects" : title,
-              failureMessage(result),
-            );
-          }
-          return null;
-        }
-        return result.value;
-      } finally {
-        setBusyKey(key, false);
-      }
-    },
-    [setBusyKey],
-  );
+      return result.value;
+    })().finally(() => {
+      setBusyKey(key, false);
+    });
+  };
 
-  return useMemo<WorkingCopyActions>(() => {
+  return ((): WorkingCopyActions => {
     const noScope = async () => undefined;
     if (scope === null) {
       const never = async () => {
@@ -784,7 +789,7 @@ export function useWorkingCopyActions(
           return null;
         }
         setBusyKey(key, true);
-        try {
+        return await (async () => {
           const result = await generateCommitMessageCommand(target(amend ? { amend } : {}));
           if (result._tag === "Failure") {
             if (isAtomCommandInterrupted(result)) return null;
@@ -808,37 +813,10 @@ export function useWorkingCopyActions(
             return null;
           }
           return result.value.message;
-        } finally {
+        })().finally(() => {
           setBusyKey(key, false);
-        }
+        });
       },
     };
-  }, [
-    abortOperationCommand,
-    amendCommit,
-    applyPatchCommand,
-    busy,
-    checkoutCommand,
-    cherryPickCommand,
-    commitStaged,
-    confirmWith,
-    discardPaths,
-    generateCommitMessageCommand,
-    resetCommand,
-    resolveConflictCommand,
-    restoreDiscardBackup,
-    revertCommand,
-    run,
-    setBusyKey,
-    scope,
-    stagePaths,
-    stashApplyCommand,
-    stashDropCommand,
-    stashIdentitySupported,
-    stashPopCommand,
-    stashPushCommand,
-    tagCommand,
-    undoCommit,
-    unstagePaths,
-  ]);
+  })();
 }

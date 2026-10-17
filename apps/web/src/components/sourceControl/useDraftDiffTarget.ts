@@ -7,7 +7,6 @@
  */
 import { scopeProjectRef } from "@t3tools/client-runtime/environment";
 import type { ScopedThreadRef } from "@t3tools/contracts";
-import { useMemo } from "react";
 
 import { type DraftId, useComposerDraftStore } from "~/composerDraftStore";
 import {
@@ -31,8 +30,5 @@ export function useDraftDiffTarget(target: ScopedThreadRef | DraftId | null): Dr
   const project = useProject(
     draft === null ? null : scopeProjectRef(draft.environmentId, draft.projectId),
   );
-  return useMemo(
-    () => (draft === null ? NO_DRAFT_DIFF_TARGET : resolveDraftDiffTarget(draft, project)),
-    [draft, project],
-  );
+  return draft === null ? NO_DRAFT_DIFF_TARGET : resolveDraftDiffTarget(draft, project);
 }

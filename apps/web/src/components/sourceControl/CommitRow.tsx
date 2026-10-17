@@ -13,7 +13,6 @@
  * fork: f4 source-control panel
  */
 import type { WorkingCopyLogEntry } from "@t3tools/contracts";
-import { memo } from "react";
 
 import {
   historyCommitRowHeight,
@@ -139,4 +138,4 @@ function relativeDate(at: Date): string {
   return at.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
-export const CommitRow = memo(CommitRowImpl);
+export const CommitRow = CommitRowImpl;

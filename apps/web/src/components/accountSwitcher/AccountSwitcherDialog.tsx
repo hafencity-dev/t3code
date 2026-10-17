@@ -109,7 +109,7 @@ export function AccountSwitcherDialog({
     // The row disables its button during the cooldown; the clock ticks when it expires.
     if (!environmentId || pendingIds.current.has(account.id)) return;
     track(account.id, true);
-    try {
+    await (async () => {
       const result = account.active
         ? await refreshActive(environmentId, account)
         : await refreshUsage({
@@ -124,12 +124,12 @@ export function AccountSwitcherDialog({
           description: failure instanceof Error ? failure.message : "Please try again.",
         });
       }
-    } finally {
+    })().finally(() => {
       track(account.id, false);
       const completedAt = Date.now();
       setManualRefreshedAt((previous) => new Map(previous).set(account.id, completedAt));
       setNow(completedAt);
-    }
+    });
   };
   // Background refresh probes at most one stale inactive account; the server gate decides.
   const autoRefresh = useEffectEvent((at: number) => {

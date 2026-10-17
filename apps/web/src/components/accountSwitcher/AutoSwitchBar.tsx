@@ -104,7 +104,7 @@ export function AutoSwitchBar({
     if (pending.current) return;
     pending.current = true;
     setSaving(true);
-    try {
+    await (async () => {
       const result = await setAutoSwitch({
         environmentId,
         input: autoSwitchInput(group.driver, enabled, autoSwitch, thresholds),
@@ -117,10 +117,10 @@ export function AutoSwitchBar({
           description: error instanceof Error ? error.message : "Please try again.",
         });
       }
-    } finally {
+    })().finally(() => {
       pending.current = false;
       setSaving(false);
-    }
+    });
   };
   const status = autoSwitchStatus(group, event);
   const endgameBadge = autoSwitchEndgameBadge(autoSwitch);

@@ -33,7 +33,7 @@ import type { HistoryFilter } from "@t3tools/client-runtime/state/working-copy-l
 import { historyAuthorFacets } from "@t3tools/client-runtime/state/working-copy-logic";
 import { useAtomValue } from "@effect/atom-react";
 import { GitBranch, FolderGit2, Search, X } from "lucide-react";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { confirmResetHard, confirmRevertMerge } from "~/lib/sourceControl/safetyLadder";
 import {
@@ -143,10 +143,8 @@ export interface SourceControlPanelProps {
 }
 
 export function SourceControlPanel(props: SourceControlPanelProps) {
-  const scope: SourceControlScope | null = useMemo(
-    () => (props.cwd === null ? null : { environmentId: props.environmentId, cwd: props.cwd }),
-    [props.cwd, props.environmentId],
-  );
+  const scope: SourceControlScope | null =
+    props.cwd === null ? null : { environmentId: props.environmentId, cwd: props.cwd };
 
   const prefs = useSourceControlStore((state) =>
     selectSourceControlPrefs(state.prefsByScope, props.scopeKey),
@@ -231,15 +229,12 @@ export function SourceControlPanel(props: SourceControlPanelProps) {
   // fork: f4 AI commit message — read from THIS environment's config, not the
   // primary server's: a remote environment runs generation on its own host with
   // its own settings and its own providers.
-  const textGenerationConfigured = useMemo(
-    () => isTextGenerationConfigured(serverConfig, props.projectId),
-    [serverConfig, props.projectId],
-  );
+  const textGenerationConfigured = isTextGenerationConfigured(serverConfig, props.projectId);
 
   const history = useWorkingCopyHistory(scope, historyFilter, {
     enabled: props.visible && prefs.activeSection === "history",
   });
-  const authors = useMemo(() => historyAuthorFacets(history.page.entries), [history.page.entries]);
+  const authors = historyAuthorFacets(history.page.entries);
   const commitDetailQuery = useEnvironmentQuery(
     scope && expandedHash
       ? workingCopyEnvironment.commitDetail({
@@ -262,83 +257,80 @@ export function SourceControlPanel(props: SourceControlPanelProps) {
   const [pendingSyncKind, setPendingSyncKind] = useState<SourceControlSyncKind | null>(null);
   const syncInFlightRef = useRef(false);
 
-  const handleSync = useCallback(
-    async (kind: SourceControlSyncKind): Promise<boolean> => {
-      if (props.cwd === null || syncInFlightRef.current) return false;
-      syncInFlightRef.current = true;
-      setPendingSyncKind(kind);
-      try {
-        switch (kind) {
-          case "pull": {
-            // fork: f4 F-01 — the result used to be dropped on the floor, so a
-            // rejected pull produced no toast, no banner and no console line.
-            const pulled = await pull.run();
-            if (pulled._tag === "Failure") {
-              reportSourceControlFailure("Could not pull", pulled);
-              return false;
-            }
-            return true;
+  const handleSync = async (kind: SourceControlSyncKind): Promise<boolean> => {
+    if (props.cwd === null || syncInFlightRef.current) return false;
+    syncInFlightRef.current = true;
+    setPendingSyncKind(kind);
+    return await (async () => {
+      switch (kind) {
+        case "pull": {
+          // fork: f4 F-01 — the result used to be dropped on the floor, so a
+          // rejected pull produced no toast, no banner and no console line.
+          const pulled = await pull.run();
+          if (pulled._tag === "Failure") {
+            reportSourceControlFailure("Could not pull", pulled);
+            return false;
           }
-          case "push":
-          case "publish": {
-            const pushed = await stacked.run({
-              actionId: `source-control-${kind}`,
-              action: "push",
-            });
-            if (pushed._tag === "Failure") {
-              reportSourceControlFailure(
-                kind === "publish" ? "Could not publish the branch" : "Could not push",
-                pushed,
-              );
-              return false;
-            }
-            return true;
-          }
-          case "sync": {
-            // Pull first, and push only if the pull landed — pushing over a
-            // behind branch is what produces the "rejected, fetch first" wall.
-            const pulled = await pull.run();
-            if (pulled._tag === "Failure") {
-              // Saying only "could not pull" here would leave the user waiting
-              // for a push that was deliberately skipped.
-              reportSourceControlFailure(
-                "Sync stopped — the pull failed, so nothing was pushed",
-                pulled,
-              );
-              return false;
-            }
-            const pushed = await stacked.run({ actionId: "source-control-sync", action: "push" });
-            if (pushed._tag === "Failure") {
-              reportSourceControlFailure("Sync pulled, but the push failed", pushed);
-              return false;
-            }
-            return true;
-          }
-          case "fetch": {
-            setRefreshingRemote(true);
-            try {
-              const refreshed = await refreshVcsStatus({
-                environmentId: props.environmentId,
-                input: { cwd: props.cwd ?? "" },
-              });
-              if (refreshed._tag === "Failure") {
-                reportSourceControlFailure("Could not refresh from the remote", refreshed);
-                return false;
-              }
-              status.refresh();
-              return true;
-            } finally {
-              setRefreshingRemote(false);
-            }
-          }
+          return true;
         }
-      } finally {
-        syncInFlightRef.current = false;
-        setPendingSyncKind(null);
+        case "push":
+        case "publish": {
+          const pushed = await stacked.run({
+            actionId: `source-control-${kind}`,
+            action: "push",
+          });
+          if (pushed._tag === "Failure") {
+            reportSourceControlFailure(
+              kind === "publish" ? "Could not publish the branch" : "Could not push",
+              pushed,
+            );
+            return false;
+          }
+          return true;
+        }
+        case "sync": {
+          // Pull first, and push only if the pull landed — pushing over a
+          // behind branch is what produces the "rejected, fetch first" wall.
+          const pulled = await pull.run();
+          if (pulled._tag === "Failure") {
+            // Saying only "could not pull" here would leave the user waiting
+            // for a push that was deliberately skipped.
+            reportSourceControlFailure(
+              "Sync stopped — the pull failed, so nothing was pushed",
+              pulled,
+            );
+            return false;
+          }
+          const pushed = await stacked.run({ actionId: "source-control-sync", action: "push" });
+          if (pushed._tag === "Failure") {
+            reportSourceControlFailure("Sync pulled, but the push failed", pushed);
+            return false;
+          }
+          return true;
+        }
+        case "fetch": {
+          setRefreshingRemote(true);
+          return await (async () => {
+            const refreshed = await refreshVcsStatus({
+              environmentId: props.environmentId,
+              input: { cwd: props.cwd ?? "" },
+            });
+            if (refreshed._tag === "Failure") {
+              reportSourceControlFailure("Could not refresh from the remote", refreshed);
+              return false;
+            }
+            status.refresh();
+            return true;
+          })().finally(() => {
+            setRefreshingRemote(false);
+          });
+        }
       }
-    },
-    [props.cwd, props.environmentId, pull, refreshVcsStatus, stacked, status],
-  );
+    })().finally(() => {
+      syncInFlightRef.current = false;
+      setPendingSyncKind(null);
+    });
+  };
 
   /**
    * fork: f4 F-12 — `navigator.clipboard` is undefined outside a secure context
@@ -363,49 +355,37 @@ export function SourceControlPanel(props: SourceControlPanelProps) {
       );
     },
   });
-  const copyText = useCallback(
-    (text: string, label = "to the clipboard") => {
-      if (text.length === 0) return;
-      copyToClipboard(text, label);
-    },
-    [copyToClipboard],
-  );
+  const copyText = (text: string, label = "to the clipboard") => {
+    if (text.length === 0) return;
+    copyToClipboard(text, label);
+  };
 
-  const handleCommit = useCallback(
-    async (options: { stageAllFirst: boolean }) => {
-      if (draftKey === null) return false;
-      const committed = await commitSourceControlDraft(draftKey, (message) =>
-        actions.commit(message, options),
-      );
-      if (committed && activeDraftKey.current === draftKey) setAmend(false);
-      return committed;
-    },
-    [actions, draftKey],
-  );
+  const handleCommit = async (options: { stageAllFirst: boolean }) => {
+    if (draftKey === null) return false;
+    const committed = await commitSourceControlDraft(draftKey, (message) =>
+      actions.commit(message, options),
+    );
+    if (committed && activeDraftKey.current === draftKey) setAmend(false);
+    return committed;
+  };
 
-  const handleReset = useCallback(
-    async (entry: WorkingCopyLogEntry, resetMode: "soft" | "mixed" | "hard") => {
-      if (resetMode === "hard") {
-        const outcome = await confirm.confirm(confirmResetHard(entry.hash, dirtyCount > 0));
-        if (outcome !== "confirmed") return;
-      }
-      await actions.resetToCommit(entry.hash, resetMode);
-    },
-    [actions, confirm, dirtyCount],
-  );
+  const handleReset = async (entry: WorkingCopyLogEntry, resetMode: "soft" | "mixed" | "hard") => {
+    if (resetMode === "hard") {
+      const outcome = await confirm.confirm(confirmResetHard(entry.hash, dirtyCount > 0));
+      if (outcome !== "confirmed") return;
+    }
+    await actions.resetToCommit(entry.hash, resetMode);
+  };
 
-  const handleRevert = useCallback(
-    async (entry: WorkingCopyLogEntry) => {
-      if (entry.parents.length > 1) {
-        const outcome = await confirm.confirm(confirmRevertMerge(entry.hash));
-        if (outcome !== "confirmed") return;
-        await actions.revertCommit(entry.hash, 1);
-        return;
-      }
-      await actions.revertCommit(entry.hash);
-    },
-    [actions, confirm],
-  );
+  const handleRevert = async (entry: WorkingCopyLogEntry) => {
+    if (entry.parents.length > 1) {
+      const outcome = await confirm.confirm(confirmRevertMerge(entry.hash));
+      if (outcome !== "confirmed") return;
+      await actions.revertCommit(entry.hash, 1);
+      return;
+    }
+    await actions.revertCommit(entry.hash);
+  };
 
   /**
    * fork: f4 AI commit message.
@@ -417,40 +397,37 @@ export function SourceControlPanel(props: SourceControlPanelProps) {
    *   - draft edited while the model was thinking → result dropped on the floor,
    *   - non-empty and untouched → one confirm before replacing.
    */
-  const handleGenerateMessage = useCallback(() => {
+  const handleGenerateMessage = () => {
     if (draftKey === null) return;
     void generateSourceControlDraft(
       draftKey,
       () => actions.generateCommitMessage({ amend }),
       confirm.confirm,
     );
-  }, [actions, amend, confirm.confirm, draftKey]);
+  };
 
   const [stashDialogOpen, setStashDialogOpen] = useState(false);
   const [pendingComposerLabel, setPendingComposerLabel] = useState<string | null>(null);
   const composerInFlightRef = useRef(false);
 
-  const runComposerOperation = useCallback(
-    async (
-      initialLabel: string,
-      operation: (setLabel: (label: string) => void) => Promise<void>,
-    ) => {
-      if (composerInFlightRef.current) return;
-      composerInFlightRef.current = true;
-      setPendingComposerLabel(initialLabel);
-      try {
-        await operation(setPendingComposerLabel);
-      } finally {
-        composerInFlightRef.current = false;
-        setPendingComposerLabel(null);
-      }
-    },
-    [],
-  );
+  const runComposerOperation = async (
+    initialLabel: string,
+    operation: (setLabel: (label: string) => void) => Promise<void>,
+  ) => {
+    if (composerInFlightRef.current) return;
+    composerInFlightRef.current = true;
+    setPendingComposerLabel(initialLabel);
+    await (async () => {
+      await operation(setPendingComposerLabel);
+    })().finally(() => {
+      composerInFlightRef.current = false;
+      setPendingComposerLabel(null);
+    });
+  };
 
   // fork: f4 — per-row spinners were plumbed all the way into `ChangeRow` but
   // fed a module-level empty set, so a slow stage showed no row feedback at all.
-  const busyPaths = useMemo(() => busyPathsFromKeys(actions.busy), [actions.busy]);
+  const busyPaths = busyPathsFromKeys(actions.busy);
 
   /**
    * fork: f4 redesign — the panel's ONE primary action. `Publish` and `Commit`
@@ -496,48 +473,45 @@ export function SourceControlPanel(props: SourceControlPanelProps) {
     : history.filterActive;
   const showFilterRow = filterOpen || filterActive;
 
-  const clearActiveFilter = useCallback(() => {
+  const clearActiveFilter = () => {
     if (onChanges) {
       setPathQuery("");
       setPrefs(props.scopeKey, { filter: "all" });
     } else {
       setHistoryFilter(EMPTY_FILTER);
     }
-  }, [onChanges, props.scopeKey, setPrefs]);
+  };
 
-  const handleToggleFilter = useCallback(() => {
+  const handleToggleFilter = () => {
     if (showFilterRow) {
       clearActiveFilter();
       setFilterOpen(false);
       return;
     }
     setFilterOpen(true);
-  }, [clearActiveFilter, showFilterRow]);
+  };
 
   useEffect(() => {
     if (!filterOpen) return;
     const input = filterInputRef.current;
     input?.focus();
     input?.select();
-  }, [filterOpen, onChanges]);
+  }, [filterOpen]);
 
   /** `/` focuses the one filter box, from anywhere in the panel body. */
-  const handleBodyKeyDown = useCallback(
-    (event: React.KeyboardEvent<HTMLDivElement>) => {
-      if (event.key !== "/" || event.metaKey || event.ctrlKey || event.altKey) return;
-      const target = event.target as HTMLElement | null;
-      if (target?.closest("input, textarea, [contenteditable='true']")) return;
-      event.preventDefault();
-      event.stopPropagation();
-      if (!showFilterRow) {
-        setFilterOpen(true);
-        return;
-      }
-      filterInputRef.current?.focus();
-      filterInputRef.current?.select();
-    },
-    [showFilterRow],
-  );
+  const handleBodyKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== "/" || event.metaKey || event.ctrlKey || event.altKey) return;
+    const target = event.target as HTMLElement | null;
+    if (target?.closest("input, textarea, [contenteditable='true']")) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (!showFilterRow) {
+      setFilterOpen(true);
+      return;
+    }
+    filterInputRef.current?.focus();
+    filterInputRef.current?.select();
+  };
 
   const sourceControlHeader = (
     <SourceControlHeader

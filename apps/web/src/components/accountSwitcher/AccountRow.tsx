@@ -265,7 +265,7 @@ export function AccountRow({
     if (exclusionBusy) return;
     const excluded = account.autoSwitchExcluded !== true;
     setExclusionBusy(true);
-    try {
+    await (async () => {
       const result = await setAutoSwitchExcluded({
         environmentId,
         input: { accountId: account.id, excluded },
@@ -278,9 +278,9 @@ export function AccountRow({
           description: error instanceof Error ? error.message : "Please try again.",
         });
       }
-    } finally {
+    })().finally(() => {
       setExclusionBusy(false);
-    }
+    });
   };
   const ariaLabel = [
     account.label,

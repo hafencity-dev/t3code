@@ -40,13 +40,13 @@ export function HunkActionCluster(props: {
   const { cluster } = props;
   return (
     <div
-      className="flex items-center gap-2 border-border/60 border-y bg-muted/40 px-2 py-1 font-sans text-[11px]"
+      className="flex items-center gap-2 border-border/60 border-y bg-muted/40 px-2 py-1 font-sans text-2xs"
       data-hunk-actions={cluster.index}
     >
       <span className="truncate font-mono text-muted-foreground/80">{cluster.label}</span>
       <span className="shrink-0 tabular-nums text-muted-foreground/70">
-        <span className="text-[var(--diffs-addition-base)]">+{cluster.additions}</span>{" "}
-        <span className="text-[var(--diffs-deletion-base)]">-{cluster.deletions}</span>
+        <span className="text-(--diffs-addition-base)">+{cluster.additions}</span>{" "}
+        <span className="text-(--diffs-deletion-base)">-{cluster.deletions}</span>
       </span>
       <span className="ml-auto flex shrink-0 items-center gap-1">
         {props.actions.map((action) => {

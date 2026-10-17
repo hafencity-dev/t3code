@@ -37,7 +37,7 @@ export function WindowPrimerRow({
     if (pending.current) return;
     pending.current = true;
     setSaving(true);
-    try {
+    await (async () => {
       const result = await setWindowPrimer({
         environmentId,
         input: { driver: "claudeAgent", enabled },
@@ -50,10 +50,10 @@ export function WindowPrimerRow({
           description: error instanceof Error ? error.message : "Please try again.",
         });
       }
-    } finally {
+    })().finally(() => {
       pending.current = false;
       setSaving(false);
-    }
+    });
   };
   const status = windowPrimerStatus(primer, accounts, now);
   return (

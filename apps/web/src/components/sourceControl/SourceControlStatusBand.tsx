@@ -144,7 +144,7 @@ export function SourceControlStatusBand(props: SourceControlStatusBandProps) {
       {/* The blocked reason stays visible, not only in the tooltip: a greyed
           button with no stated reason is the defect F-11 was raised for. */}
       {guidance.canContinueInPanel && continueBlockedReason !== null ? (
-        <p className="px-1 pt-1 text-[11px] text-muted-foreground">{continueBlockedReason}</p>
+        <p className="px-1 pt-1 text-2xs text-muted-foreground">{continueBlockedReason}</p>
       ) : null}
     </div>
   );

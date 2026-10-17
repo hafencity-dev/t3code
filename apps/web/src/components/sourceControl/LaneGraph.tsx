@@ -8,7 +8,6 @@
  *
  * fork: f4 source-control panel
  */
-import { memo } from "react";
 
 import type { LaneNode } from "~/lib/sourceControl/laneGraph";
 
@@ -79,7 +78,7 @@ function LaneGraphRowImpl({ node, width, height, isMerge }: LaneGraphRowProps) {
   );
 }
 
-export const LaneGraphRow = memo(LaneGraphRowImpl);
+export const LaneGraphRow = LaneGraphRowImpl;
 
 export function laneGutterPixelWidth(width: number): number {
   return laneCenterX(Math.max(width, 1)) + LANE_COLUMN_WIDTH / 2;

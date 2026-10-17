@@ -21,7 +21,7 @@
  * fork: f4 source-control panel
  */
 import { ChevronDown, Loader2, Sparkles } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useEffect, useLayoutEffect, useRef } from "react";
 import {
   COMMIT_SUBJECT_HARD_LIMIT,
   COMMIT_SUBJECT_SOFT_LIMIT,
@@ -93,15 +93,12 @@ export function CommitComposer(props: CommitComposerProps) {
   const { subject } = splitCommitMessage(props.message);
   const lengthState = commitSubjectLengthState(subject);
 
-  const actionInput = useMemo(
-    () => ({
-      amend: props.amend,
-      stagedCount: props.stagedCount,
-      dirtyCount: props.dirtyCount,
-      ahead: props.ahead,
-    }),
-    [props.ahead, props.amend, props.dirtyCount, props.stagedCount],
-  );
+  const actionInput = {
+    amend: props.amend,
+    stagedCount: props.stagedCount,
+    dirtyCount: props.dirtyCount,
+    ahead: props.ahead,
+  };
   const action = commitPrimaryAction(actionInput);
   const hasMessage = props.message.trim().length > 0;
   const enabled =
@@ -139,7 +136,9 @@ export function CommitComposer(props: CommitComposerProps) {
   // be cleared or edited down while Amend was ticked.
   const { amend, message, onMessageChange, lastCommitMessage } = props;
   const messageRef = useRef(message);
-  messageRef.current = message;
+  useLayoutEffect(() => {
+    messageRef.current = message;
+  }, [message]);
   const prefilledForRef = useRef<string | null>(null);
   useEffect(() => {
     if (!amend) {
@@ -159,7 +158,7 @@ export function CommitComposer(props: CommitComposerProps) {
     if (fill && lastCommitMessage !== null) onMessageChange(lastCommitMessage);
   }, [amend, lastCommitMessage, onMessageChange]);
 
-  const runPrimary = useCallback(() => {
+  const runPrimary = () => {
     if (!enabled) return;
     switch (action) {
       case "amend":
@@ -175,22 +174,19 @@ export function CommitComposer(props: CommitComposerProps) {
         props.onCommit({ stageAllFirst: true });
         return;
     }
-  }, [action, enabled, props]);
+  };
 
-  const handleKeyDown = useCallback(
-    (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
-      if (event.key !== "Enter" || !(event.metaKey || event.ctrlKey)) return;
-      event.preventDefault();
-      if (event.shiftKey) {
-        // fork: f4 F-07 — this branch used to bypass every gate.
-        if (!commitAndPushEnabled) return;
-        props.onCommitAndPush({ stageAllFirst: props.stagedCount === 0 });
-        return;
-      }
-      runPrimary();
-    },
-    [commitAndPushEnabled, props, runPrimary],
-  );
+  const handleKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key !== "Enter" || !(event.metaKey || event.ctrlKey)) return;
+    event.preventDefault();
+    if (event.shiftKey) {
+      // fork: f4 F-07 — this branch used to bypass every gate.
+      if (!commitAndPushEnabled) return;
+      props.onCommitAndPush({ stageAllFirst: props.stagedCount === 0 });
+      return;
+    }
+    runPrimary();
+  };
 
   const showCounter = subject.length >= COUNTER_REVEAL_AT;
 
@@ -221,7 +217,7 @@ export function CommitComposer(props: CommitComposerProps) {
               render={
                 <span
                   className={cn(
-                    "pointer-events-auto absolute top-1 right-2 text-[11px] tabular-nums",
+                    "pointer-events-auto absolute top-1 right-2 text-2xs tabular-nums",
                     lengthState === "hard"
                       ? "text-destructive-foreground"
                       : lengthState === "soft"
@@ -277,7 +273,7 @@ export function CommitComposer(props: CommitComposerProps) {
           </Tooltip>
         )}
 
-        <span className="ml-auto text-[10px] text-muted-foreground/70">
+        <span className="ml-auto text-3xs text-muted-foreground/70">
           {props.stagedCount > 0
             ? `${props.stagedCount} staged`
             : props.dirtyCount > 0

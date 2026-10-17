@@ -5,7 +5,7 @@ import type {
   ProviderAccountDriver,
 } from "@t3tools/contracts";
 import { Atom } from "effect/reactivity";
-import { useCallback, useContext, useEffect } from "react";
+import { useContext, useEffect } from "react";
 import { environmentPresentations } from "../../state/presentation";
 import { toastManager } from "../ui/toast";
 import { autoSwitchToastTitle, shouldToastAutoSwitch } from "./accounts.logic";
@@ -66,35 +66,32 @@ export function ProviderAccountsAutoSwitchHost() {
   const presentations = useAtomValue(environmentPresentations.presentationsAtom);
   const registry = useContext(RegistryContext);
   const connected = connectedDevices(presentations);
-  const onEvent = useCallback(
-    (environmentId: EnvironmentId, event: ProviderAccountAutoSwitchEvent) => {
-      // `changed` only invalidates the list in client-runtime. Future tags are not notifications.
-      if (event._tag !== "switched" && event._tag !== "pending" && event._tag !== "blocked") return;
-      if (event._tag === "switched") {
-        if (!shouldToastAutoSwitch(toastedSwitches, environmentId, event)) return;
-        // More than one device: name the one that switched.
-        const names = new Map(
-          connectedDevices(registry.get(environmentPresentations.presentationsAtom)),
-        );
-        toastManager.add({
-          type: "success",
-          title: autoSwitchToastTitle(
-            event.driver,
-            event.toLabel,
-            names.size > 1 ? names.get(environmentId) : undefined,
-          ),
-          description: event.reason,
-        });
-      }
-      registry.update(autoSwitchEventsAtom, (previous) =>
-        new Map(previous).set(environmentId, {
-          ...previous.get(environmentId),
-          [event.driver]: event,
-        }),
+  const onEvent = (environmentId: EnvironmentId, event: ProviderAccountAutoSwitchEvent) => {
+    // `changed` only invalidates the list in client-runtime. Future tags are not notifications.
+    if (event._tag !== "switched" && event._tag !== "pending" && event._tag !== "blocked") return;
+    if (event._tag === "switched") {
+      if (!shouldToastAutoSwitch(toastedSwitches, environmentId, event)) return;
+      // More than one device: name the one that switched.
+      const names = new Map(
+        connectedDevices(registry.get(environmentPresentations.presentationsAtom)),
       );
-    },
-    [registry],
-  );
+      toastManager.add({
+        type: "success",
+        title: autoSwitchToastTitle(
+          event.driver,
+          event.toLabel,
+          names.size > 1 ? names.get(environmentId) : undefined,
+        ),
+        description: event.reason,
+      });
+    }
+    registry.update(autoSwitchEventsAtom, (previous) =>
+      new Map(previous).set(environmentId, {
+        ...previous.get(environmentId),
+        [event.driver]: event,
+      }),
+    );
+  };
   return connected.map(([id]) => (
     <AutoSwitchSubscription key={id} environmentId={id} onEvent={onEvent} />
   ));
