@@ -45,6 +45,10 @@ it("defines the legacy-compatible 2code production identity", () => {
       url: "https://pub-cb9e18e7e55d46cf9c297e4b612881f7.r2.dev/releases/desktop",
       updaterCacheDirName: "2code-updater",
     },
+    releaseNotes: {
+      repository: "hafencity-dev/t3code",
+      tagPrefix: "2code-v",
+    },
     macSigning: "legacy-entitlements",
   });
   assert.equal(`${profile?.packageName}-updater`, profile?.updates.updaterCacheDirName);

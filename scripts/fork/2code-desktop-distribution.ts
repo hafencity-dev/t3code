@@ -30,6 +30,10 @@ export interface DesktopDistributionProfile {
     readonly url: string;
     readonly updaterCacheDirName: string;
   };
+  readonly releaseNotes: {
+    readonly repository: string;
+    readonly tagPrefix: string;
+  };
   readonly macSigning: "legacy-entitlements";
 }
 
@@ -66,6 +70,10 @@ export const TWO_CODE_PRODUCTION_PROFILE: DesktopDistributionProfile = {
     provider: "generic",
     url: "https://pub-cb9e18e7e55d46cf9c297e4b612881f7.r2.dev/releases/desktop",
     updaterCacheDirName: "2code-updater",
+  },
+  releaseNotes: {
+    repository: "hafencity-dev/t3code",
+    tagPrefix: "2code-v",
   },
   macSigning: "legacy-entitlements",
 };

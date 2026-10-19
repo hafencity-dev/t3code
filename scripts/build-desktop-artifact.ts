@@ -2770,6 +2770,10 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
     ],
   };
   const updateChannel = resolveDesktopUpdateChannel(version);
+  // A missing `publish` makes electron-builder infer a GitHub feed from
+  // GH_TOKEN/GITHUB_TOKEN. The staged app has no repository to resolve it
+  // against, so writing update manifests then crashes on a null config.
+  buildConfig.publish = null;
   const publishConfig = distributionProfile
     ? undefined
     : isDesktopPreviewVersion(version)
@@ -3605,6 +3609,16 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
       ChildProcess.make(spawnCommand.command, spawnCommand.args, {
         cwd: repoRoot,
         shell: spawnCommand.shell,
+        // fork: the renderer links to the distribution's release, not the embedded runtime's.
+        ...(distributionProfile
+          ? {
+              env: {
+                ...process.env,
+                T3CODE_DESKTOP_UPDATE_REPOSITORY: distributionProfile.releaseNotes.repository,
+                T3CODE_DESKTOP_UPDATE_TAG_PREFIX: distributionProfile.releaseNotes.tagPrefix,
+              },
+            }
+          : {}),
       }),
       { label: "vp run build:desktop", verbose: options.verbose },
     );

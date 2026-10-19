@@ -201,13 +201,46 @@ describe("getDesktopUpdateActionError", () => {
 
 describe("desktop update UI helpers", () => {
   it("builds the stable release URL for a downloaded version", () => {
-    expect(getDesktopUpdateReleaseUrl("0.0.30")).toBe(
+    expect(getDesktopUpdateReleaseUrl("0.0.30", "pingdotgg/t3code")).toBe(
       "https://github.com/pingdotgg/t3code/releases/tag/v0.0.30",
     );
   });
 
+  it("keeps 2code desktop tags separate from upstream runtime tags", () => {
+    expect(getDesktopUpdateReleaseUrl("1.0.166", "hafencity-dev/t3code", "2code-v")).toBe(
+      "https://github.com/hafencity-dev/t3code/releases/tag/2code-v1.0.166",
+    );
+    expect(getDesktopUpdateReleaseUrl("0.0.50", "pingdotgg/t3code", "v")).toBe(
+      "https://github.com/pingdotgg/t3code/releases/tag/v0.0.50",
+    );
+  });
+
+  it("uses the configured desktop update repository for release URLs", () => {
+    expect(getDesktopUpdateReleaseUrl("1.2.3", "JustYannicc/t3code")).toBe(
+      "https://github.com/JustYannicc/t3code/releases/tag/v1.2.3",
+    );
+    expect(getDesktopUpdateReleaseHistoryUrl("JustYannicc/t3code")).toBe(
+      "https://github.com/JustYannicc/t3code/releases",
+    );
+  });
+
+  it.each([
+    "owner/repo/extra",
+    "owner#notes/repo",
+    "owner/repo#notes",
+    "owner?tab=notes/repo",
+    "owner/repo?tab=notes",
+  ])("falls back to upstream for an invalid configured repository: %s", (repository) => {
+    expect(getDesktopUpdateReleaseHistoryUrl(repository)).toBe(
+      "https://github.com/pingdotgg/t3code/releases",
+    );
+    expect(getDesktopUpdateReleaseUrl("1.2.3", repository)).toBe(
+      "https://github.com/pingdotgg/t3code/releases/tag/v1.2.3",
+    );
+  });
+
   it("builds the nightly release URL without dropping its version suffix", () => {
-    expect(getDesktopUpdateReleaseUrl("0.0.30-nightly.20260728.931")).toBe(
+    expect(getDesktopUpdateReleaseUrl("0.0.30-nightly.20260728.931", "pingdotgg/t3code")).toBe(
       "https://github.com/pingdotgg/t3code/releases/tag/v0.0.30-nightly.20260728.931",
     );
   });
@@ -218,7 +251,7 @@ describe("desktop update UI helpers", () => {
   });
 
   it("builds the release history URL", () => {
-    expect(getDesktopUpdateReleaseHistoryUrl()).toBe(
+    expect(getDesktopUpdateReleaseHistoryUrl("pingdotgg/t3code")).toBe(
       "https://github.com/pingdotgg/t3code/releases",
     );
   });

@@ -24,6 +24,7 @@ import { providerAccountsEnvironment } from "./state";
 
 export function SidebarAccountSwitcherButton() {
   const presentations = useAtomValue(environmentPresentations.presentationsAtom);
+  const providersByEnvironment = useAtomValue(environmentPresentations.providersByEnvironmentAtom);
   const autoEvents = useAtomValue(autoSwitchEventsAtom);
   const [selectedDevice, setSelectedDevice] = useState<EnvironmentId | null>(null);
   const [open, setOpen] = useState(false);
@@ -37,7 +38,6 @@ export function SidebarAccountSwitcherButton() {
     connected.map(([id]) => id),
     open,
   );
-  const selected = connected.find(([id]) => id === environmentId);
   const offlineLabel = offlineId
     ? (presentations.get(offlineId)?.entry.target.label ?? "This device")
     : undefined;
@@ -49,7 +49,7 @@ export function SidebarAccountSwitcherButton() {
     label: presentation.entry.target.label,
   }));
   if (offlineId && offlineLabel) devices.push({ id: offlineId, label: offlineLabel });
-  const providers = selected?.[1].serverConfig?.providers ?? [];
+  const providers = environmentId ? (providersByEnvironment.get(environmentId) ?? []) : [];
   const usageKey = providerAccountsUsageKey(providers);
   const observedUsage = useRef<{ environmentId: EnvironmentId | null; key: string } | null>(null);
   const refreshAccounts = query.refresh;

@@ -69,7 +69,11 @@ layer("reconcileLegacy2codeMigrationLedger", (it) => {
       const before = yield* readLedger;
       yield* forkifyLedger;
 
-      assert.deepStrictEqual(yield* runMigrations(), [[62, "ThreadFailureLookupIndex"]]);
+      assert.deepStrictEqual(yield* runMigrations(), [
+        [62, "ThreadFailureLookupIndex"],
+        [63, "DropUnusedV1Projections"],
+        [64, "CanonicalizeThreadPullRequestLinks"],
+      ]);
       assert.deepStrictEqual((yield* readLedger).slice(0, before.length), before);
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
@@ -101,12 +105,14 @@ layer("reconcileLegacy2codeMigrationLedger", (it) => {
           "60_ThreadSnapshotWindowIndexes",
           "61_PullRequestReviewGuides",
           "62_ThreadFailureLookupIndex",
+          "63_DropUnusedV1Projections",
+          "64_CanonicalizeThreadPullRequestLinks",
         ],
       );
       const repaired = yield* readLedger;
       assert.deepStrictEqual(repaired.slice(0, upstreamLedger.length), upstreamLedger);
-      assert.strictEqual(repaired.length, upstreamLedger.length + 11);
-      assert.strictEqual(repaired.at(-1)?.name, "ThreadFailureLookupIndex");
+      assert.strictEqual(repaired.length, upstreamLedger.length + 13);
+      assert.strictEqual(repaired.at(-1)?.name, "CanonicalizeThreadPullRequestLinks");
 
       // Running again changes nothing.
       assert.strictEqual(yield* reconcileLegacy2codeMigrationLedger(), false);
