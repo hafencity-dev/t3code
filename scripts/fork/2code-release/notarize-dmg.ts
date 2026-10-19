@@ -6,6 +6,7 @@ import * as NodePath from "node:path";
 
 import { notarize, type NotarizeOptions } from "@electron/notarize";
 
+import { withAppleNetworkRetry } from "./apple-network-retry.ts";
 import { regenerateElectronBlockmap } from "./electron-blockmap.ts";
 import {
   expectedArtifactNames,
@@ -59,7 +60,7 @@ async function main(): Promise<void> {
   const config = await readReleaseConfig(configPath);
   const options = resolveDmgNotarizationOptions(config, artifactDirectory, process.env);
   await NodeFSP.access(options.appPath);
-  await notarize(options);
+  await withAppleNetworkRetry("Notarize and staple disk image", () => notarize(options));
   const blockmapPath = await regenerateElectronBlockmap(options.appPath);
   console.log(
     `Notarized and stapled ${NodePath.basename(options.appPath)}; regenerated ${NodePath.basename(blockmapPath)}.`,

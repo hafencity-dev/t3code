@@ -11,6 +11,7 @@ import * as NodeCrypto from "node:crypto";
 import { PNG } from "pngjs";
 
 import { TWO_CODE_PRODUCTION_PROFILE } from "../2code-desktop-distribution.ts";
+import { withAppleNetworkRetry } from "./apple-network-retry.ts";
 import { verifyAppUpdateConfiguration } from "./app-update-config.ts";
 import { verifyElectronBlockmap } from "./electron-blockmap.ts";
 import {
@@ -52,7 +53,7 @@ function run(command: string, args: readonly string[]): { stdout: string; stderr
   });
   if ((result.status ?? 1) !== 0) {
     throw new Error(
-      `${command} failed: ${(result.stderr || result.stdout || String(result.error ?? "")).trim()}`,
+      `${command} failed: ${[result.stderr, result.stdout, result.error?.message].filter(Boolean).join("\n").trim()}`,
     );
   }
   return { stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
@@ -331,12 +332,16 @@ async function main(): Promise<void> {
       size: 512,
       artifactLabel: "Dock icon",
     });
-    run("xcrun", ["stapler", "validate", appPath]);
+    await withAppleNetworkRetry("Validate app notarization ticket", () =>
+      run("xcrun", ["stapler", "validate", appPath]),
+    );
     run("spctl", ["--assess", "--type", "execute", "--verbose=4", appPath]);
     run("codesign", ["--verify", "--strict", "--verbose=2", dmgPath]);
     const dmgSignature = run("codesign", ["-d", "--verbose=4", dmgPath]).stderr;
     verifyDeveloperIdSignature(config, dmgSignature, "Signed disk image");
-    run("xcrun", ["stapler", "validate", dmgPath]);
+    await withAppleNetworkRetry("Validate disk image notarization ticket", () =>
+      run("xcrun", ["stapler", "validate", dmgPath]),
+    );
     run("spctl", [
       "--assess",
       "--type",
