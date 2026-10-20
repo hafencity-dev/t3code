@@ -118,6 +118,8 @@ export function renderTwoCodeLegacyMacEntitlements(): string {
     <true/>
     <key>com.apple.security.network.server</key>
     <true/>
+    <key>com.apple.security.device.camera</key>
+    <true/>
     <key>com.apple.security.device.audio-input</key>
     <true/>
   </dict>

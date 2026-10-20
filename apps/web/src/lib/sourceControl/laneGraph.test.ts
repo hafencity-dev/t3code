@@ -49,8 +49,6 @@ function nodeLookup(nodes: ReadonlyArray<LaneNode>): (hash: string) => LaneNode 
   };
 }
 
-// --- Fixtures -------------------------------------------------------------
-
 /** c1 → c2 → c3, with c3 a true root (no parents). */
 const LINEAR = [entry("c1", ["c2"]), entry("c2", ["c3"]), entry("c3", [])];
 
@@ -97,8 +95,6 @@ const OCTOPUS_9 = [
   entry("big", ["p0", "p1", "p2", "p3", "p4", "p5", "p6", "p7", "p8"]),
   ...Array.from({ length: 9 }, (_, index) => entry(`p${index}`, [])),
 ];
-
-// --- Tests ----------------------------------------------------------------
 
 describe("buildLaneGraph — degenerate input", () => {
   it("returns an empty array for empty input", () => {

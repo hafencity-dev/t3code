@@ -114,14 +114,6 @@ export function manualServerUpdateCommand(
   return `${runner} t3@${targetVersion}`;
 }
 
-/** One sentence telling the user how to resolve version skew for a server,
-    matched to the update path it offers. */
-export function serverUpdateGuidance(capability: ServerSelfUpdateCapability): string {
-  return capability === "desktop-managed"
-    ? "Update the 2code desktop app"
-    : "Update to stay in sync";
-}
-
 export function buildVersionMismatchDismissalKey(
   environmentId: EnvironmentId,
   mismatch: Pick<VersionMismatch, "clientVersion" | "serverVersion">,

@@ -364,6 +364,12 @@ export function createVcsEnvironmentAtoms<R, E>(
 
   return {
     listRefs,
+    // An uncached read for decisions that must match the repository now, not
+    // the persisted list a picker renders from.
+    readRefs: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:vcs:read-refs",
+      tag: WS_METHODS.vcsListRefs,
+    }),
     status: statusSubscription("environment-data:vcs:status", VCS_STATUS_IDLE_TTL_MS),
     // fork: project session grid — historical batches must release their
     // server pollers immediately instead of inheriting the UI cache's 5m TTL.

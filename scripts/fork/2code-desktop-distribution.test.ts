@@ -94,6 +94,7 @@ it("renders the non-App-Sandbox entitlements used by the existing 2code signatur
   assert.include(entitlements, "<key>com.apple.security.cs.disable-library-validation</key>");
   assert.include(entitlements, "<key>com.apple.security.network.client</key>");
   assert.include(entitlements, "<key>com.apple.security.device.audio-input</key>");
+  assert.include(entitlements, "<key>com.apple.security.device.camera</key>");
   assert.notInclude(entitlements, "com.apple.application-identifier");
   assert.notInclude(entitlements, "com.apple.developer.associated-domains");
 });
