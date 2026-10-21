@@ -91,6 +91,70 @@ describe("carriesPreviousAccountWindows", () => {
 });
 
 describe("makeClaudeHotSwitchUsageGuard", () => {
+  it("finishes verification when a fresh probe confirms the account has no quota windows", () => {
+    const checkedAt = "2026-09-27T11:21:09.000Z";
+    expect(
+      switched().resolve(
+        "b",
+        snapshot({
+          checkedAt: "2026-09-27T11:21:07.100Z",
+          email: "b@example.test",
+          usage: {
+            checkedAt,
+            probeCheckedAt: checkedAt,
+            windows: [],
+            unavailable: { reason: "unsupported" },
+          },
+        }),
+      ),
+    ).toEqual({ live: true });
+  });
+
+  it("verifies an explicitly measured probe even when capability and snapshot clocks differ", () => {
+    const guard = switched();
+    const measuredAt = "2026-09-27T11:21:09.000Z";
+    const usage = { ...stored, checkedAt: measuredAt, probeCheckedAt: measuredAt };
+    expect(
+      guard.resolve(
+        "b",
+        snapshot({
+          checkedAt: "2026-09-27T11:21:07.100Z",
+          email: "b@example.test",
+          usage,
+        }),
+      ),
+    ).toEqual({ live: true });
+    expect(
+      guard.resolve(
+        "b",
+        snapshot({
+          checkedAt: "2026-09-27T11:25:00.000Z",
+          email: "b@example.test",
+          usage,
+        }),
+      ),
+    ).toEqual({ live: true });
+  });
+
+  it("does not verify retained usage from a failed probe or a later runtime update", () => {
+    const measuredAt = "2026-09-27T11:21:09.000Z";
+    for (const usage of [
+      { ...stored, probeCheckedAt: measuredAt, unavailable: { reason: "probeFailed" as const } },
+      { ...stored, checkedAt: "2026-09-27T11:22:00.000Z", probeCheckedAt: measuredAt },
+    ]) {
+      expect(
+        switched().resolve(
+          "b",
+          snapshot({
+            checkedAt: "2026-09-27T11:21:07.100Z",
+            email: "b@example.test",
+            usage,
+          }),
+        ),
+      ).toMatchObject({ live: false, reason: "unverified" });
+    }
+  });
+
   it("applies to nothing but the account switched to", () => {
     const guard = switched();
     expect(guard.resolve("a", undefined)).toEqual({ live: true });
@@ -166,6 +230,31 @@ describe("makeClaudeHotSwitchUsageGuard", () => {
         snapshot({ checkedAt: "2026-09-27T11:22:00.000Z", email: "b@example.test", usage: rolled }),
       ),
     ).toEqual({ live: true });
+  });
+
+  it("does not verify or accept another workspace under the same email", () => {
+    const guard = makeClaudeHotSwitchUsageGuard();
+    guard.switched({
+      toAccountId: "b",
+      toEmail: "b@example.test",
+      toWorkspaceId: "workspace-b",
+      toStored: stored,
+      previous: [previous],
+      now: Date.parse(stored.checkedAt),
+    });
+    const at = "2026-09-27T11:22:00.000Z";
+    const probe = snapshot({
+      checkedAt: at,
+      email: "b@example.test",
+      usage: { ...stored, checkedAt: at, probeCheckedAt: at },
+    });
+    const foreign = { ...probe, auth: { ...probe.auth, workspaceId: "workspace-a" } };
+    guard.observe(foreign);
+    expect(guard.resolve("b", foreign)).toMatchObject({ live: false, reason: "unverified" });
+    expect(
+      guard.resolve("b", { ...probe, auth: { ...probe.auth, workspaceId: "workspace-b" } }),
+    ).toEqual({ live: true });
+    expect(guard.resolve("b", foreign)).toMatchObject({ live: false, reason: "unverified" });
   });
 
   it("never verifies on another identity's probe", () => {

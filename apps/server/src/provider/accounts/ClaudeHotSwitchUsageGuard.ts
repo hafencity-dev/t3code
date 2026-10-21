@@ -55,23 +55,36 @@ export function carriesPreviousAccountWindows(
 /**
  * A snapshot whose windows this very probe measured, for this identity. A probe that failed its
  * usage request keeps the older windows (and their older `checkedAt`); a runtime event stamps
- * its own time. Identity and usage come from the same CLI process, so they belong together.
+ * its own time. Explicit probe provenance survives the capabilities cache; snapshot timestamps
+ * are independent of when usage was measured.
  */
-export function isVerifiedProbe(snapshot: ServerProvider, email: string | undefined) {
+export function isVerifiedProbe(
+  snapshot: ServerProvider,
+  email: string | undefined,
+  workspaceId?: string,
+) {
   const usage = snapshot.usageLimits;
+  const measured = usage?.probeCheckedAt !== undefined && usage.probeCheckedAt === usage.checkedAt;
+  const noQuota = measured && usage?.unavailable?.reason === "unsupported";
   return (
     snapshot.auth.status === "authenticated" &&
     (email === undefined || snapshot.auth.email?.toLowerCase() === email.toLowerCase()) &&
+    (workspaceId === undefined ||
+      snapshot.auth.workspaceId === undefined ||
+      workspaceId === snapshot.auth.workspaceId) &&
     usage !== undefined &&
-    usage.unavailable === undefined &&
-    usage.windows.length > 0 &&
-    usage.checkedAt === snapshot.checkedAt
+    (noQuota ||
+      (usage.unavailable === undefined &&
+        usage.windows.length > 0 &&
+        (measured ||
+          (usage.probeCheckedAt === undefined && usage.checkedAt === snapshot.checkedAt))))
   );
 }
 
 interface HotSwitchRecord {
   readonly toAccountId: string;
   readonly toEmail: string | undefined;
+  readonly toWorkspaceId?: string | undefined;
   /** Windows the accounts switched away from were last known to have. */
   readonly previous: ReadonlyArray<UsageWindowFingerprint>;
   /** The new account's own windows: stored, then from each verified probe. */
@@ -94,7 +107,8 @@ export function makeClaudeHotSwitchUsageGuard() {
   let record: HotSwitchRecord | undefined;
   /** Every published snapshot: a verified probe verifies the account and renews its windows. */
   const observe = (snapshot: ServerProvider | undefined) => {
-    if (!record || !snapshot || !isVerifiedProbe(snapshot, record.toEmail)) return;
+    if (!record || !snapshot || !isVerifiedProbe(snapshot, record.toEmail, record.toWorkspaceId))
+      return;
     record.verified = true;
     record.own = usageFingerprint(snapshot.usageLimits);
   };
@@ -107,6 +121,7 @@ export function makeClaudeHotSwitchUsageGuard() {
     switched(input: {
       readonly toAccountId: string;
       readonly toEmail: string | undefined;
+      readonly toWorkspaceId?: string | undefined;
       readonly toStored: ServerProviderUsageLimits | undefined;
       readonly previous: ReadonlyArray<ServerProviderUsageLimits | undefined>;
       readonly now: number;
@@ -115,6 +130,7 @@ export function makeClaudeHotSwitchUsageGuard() {
       record = {
         toAccountId: input.toAccountId,
         toEmail: input.toEmail,
+        toWorkspaceId: input.toWorkspaceId,
         previous: [...carried, ...input.previous.flatMap(usageFingerprint)],
         own: usageFingerprint(input.toStored),
         verified: false,
@@ -128,9 +144,12 @@ export function makeClaudeHotSwitchUsageGuard() {
       observe(snapshot);
       // Another identity's snapshot is never this account's; ownership checks drop it anyway.
       const foreign =
-        record.toEmail !== undefined &&
-        snapshot?.auth.email !== undefined &&
-        snapshot.auth.email.toLowerCase() !== record.toEmail.toLowerCase();
+        (record.toEmail !== undefined &&
+          snapshot?.auth.email !== undefined &&
+          snapshot.auth.email.toLowerCase() !== record.toEmail.toLowerCase()) ||
+        (record.toWorkspaceId !== undefined &&
+          snapshot?.auth.workspaceId !== undefined &&
+          snapshot.auth.workspaceId !== record.toWorkspaceId);
       if (!record.verified || !snapshot?.usageLimits || foreign)
         return { live: false, usage: record.accepted, reason: "unverified" };
       if (carriesPreviousAccountWindows(snapshot.usageLimits, record.previous, record.own))

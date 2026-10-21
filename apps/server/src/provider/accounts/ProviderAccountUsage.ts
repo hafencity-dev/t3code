@@ -9,7 +9,7 @@ import {
 import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
-import * as Predicate from "effect/Predicate";
+import { usageProbeFailureDetails } from "../../fork/claudeUsageProbe.ts";
 import { query as claudeQuery, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import { hasClaudeManagedMcpConfig, makeClaudeEnvironment } from "../Drivers/ClaudeHome.ts";
 import { resolveClaudeSdkExecutablePath } from "../Drivers/ClaudeExecutable.ts";
@@ -80,7 +80,9 @@ export const probeAccountUsage = Effect.fn("providerAccounts.probeUsage")(functi
       const init = await q.initializationResult();
       const account = init.account;
       if (!account?.email && !account?.tokenSource && !account?.subscriptionType) return undefined;
-      const usage = await q.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET();
+      const usage = await q.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET({
+        skipBehaviors: true,
+      });
       return { ...account, usage };
     }).pipe(Effect.ensuring(Effect.sync(() => abort.abort())));
     if (!result) return { checkedAt, status: "signedOut" } satisfies AccountUsage;
@@ -151,44 +153,6 @@ export function storedUsageStaleness(
 const MANUAL_FLOOR_MS = 60_000;
 const MAX_ATTEMPTS = 4;
 
-/** Inspect wrapped SDK / JSON-RPC errors, never expose their private text to clients. */
-function failureDetails(error: unknown, now: number) {
-  const texts: string[] = [];
-  let retryAt = 0;
-  const seen = new Set<unknown>();
-  const visit = (value: unknown, depth: number) => {
-    if (depth > 6 || value == null || seen.has(value)) return;
-    if (typeof value === "string" || typeof value === "number") {
-      texts.push(String(value));
-      return;
-    }
-    if (!Predicate.isObject(value)) return;
-    seen.add(value);
-    if (value instanceof Error) texts.push(value.message);
-    if (value instanceof Headers) {
-      visit(Object.fromEntries(value.entries()), depth + 1);
-      return;
-    }
-    for (const [key, item] of Object.entries(value)) {
-      if (/^(retry[-_]?after|retryAfterSeconds|reset[-_]?seconds|resetsInSeconds)$/i.test(key)) {
-        const seconds = Number(item);
-        const at = Number.isFinite(seconds) ? now + seconds * 1_000 : Date.parse(String(item));
-        if (Number.isFinite(at)) retryAt = Math.max(retryAt, at);
-      }
-      visit(item, depth + 1);
-    }
-    if (value instanceof Error) visit(value.cause, depth + 1);
-  };
-  visit(error, 0);
-  const text = texts.join(" ");
-  const retry =
-    /(?:retry[- ]after|reset(?:s)?(?: in)?)[:= ]+(\d+(?:\.\d+)?)\s*(?:s(?:ec(?:onds?)?)?)?/i.exec(
-      text,
-    );
-  if (retry) retryAt = Math.max(retryAt, now + Number(retry[1]) * 1_000);
-  return { rateLimited: /\b429\b|rate[ _-]?limit|too many requests/i.test(text), retryAt };
-}
-
 /** Newer measurements and newer attempts are independent: a live snapshot must not erase backoff. */
 function newest(cached: AccountUsage | undefined, previous: AccountUsage | undefined) {
   if (!cached) return previous;
@@ -210,6 +174,7 @@ function newest(cached: AccountUsage | undefined, previous: AccountUsage | undef
 /** The only admission gate for inactive probes; skipped requests never enter a queue. */
 export const makeAccountUsageCache = <E, R>(dependencies: {
   readonly probe: (id: ProviderAccountId) => Effect.Effect<AccountUsage, E, R>;
+  readonly allowActive?: boolean;
 }) => {
   const permits = Semaphore.makeUnsafe(2);
   const lock = Semaphore.makeUnsafe(1);
@@ -259,7 +224,8 @@ export const makeAccountUsageCache = <E, R>(dependencies: {
     readonly previous?: AccountUsage;
     readonly force?: boolean;
   }) {
-    if (input.active) return { usage: input.previous, measured: false };
+    if (input.active && !dependencies.allowActive)
+      return { usage: input.previous, measured: false };
     const { effect, probing } = yield* lock.withPermit(
       Effect.gen(function* () {
         const prior = newest(cache.get(input.id), input.previous);
@@ -309,7 +275,7 @@ export const makeAccountUsageCache = <E, R>(dependencies: {
               // A stale result is neither a measurement nor a failure; the attempt still counted.
               if (error instanceof AccountUsageProbeStaleError) return undefined;
               const failedAt = yield* Clock.currentTimeMillis;
-              const { rateLimited, retryAt } = failureDetails(error, failedAt);
+              const { rateLimited, retryAt } = usageProbeFailureDetails(error, failedAt);
               const consecutiveFailures = (prior?.consecutiveFailures ?? 0) + 1;
               const cap = (rateLimited ? 120 : 60) * 60_000;
               const delay = Math.min(
@@ -323,8 +289,7 @@ export const makeAccountUsageCache = <E, R>(dependencies: {
                 status: prior?.status ?? "error",
                 lastAttemptAt: attempt.at,
                 consecutiveFailures,
-                nextAllowedAt:
-                  failedAt + Math.min(cap, Math.max(delay, rateLimited ? retryAt - failedAt : 0)),
+                nextAllowedAt: Math.max(failedAt + delay, rateLimited ? retryAt : 0),
                 lastFailureKind: rateLimited ? "rateLimited" : "failed",
                 usage: {
                   ...(prior?.usage ?? { checkedAt, windows: [] }),
@@ -363,6 +328,20 @@ export const makeAccountUsageCache = <E, R>(dependencies: {
   return {
     refresh,
     refreshMeasured,
+    get: (id: ProviderAccountId) => cache.get(id),
+    observeMeasurement: (
+      id: ProviderAccountId,
+      measurement: AccountUsage,
+      prior?: AccountUsage,
+    ) => {
+      cache.set(id, {
+        ...measurement,
+        ...(prior?.lastAttemptAt === undefined ? {} : { lastAttemptAt: prior.lastAttemptAt }),
+        consecutiveFailures: 0,
+        nextAllowedAt:
+          prior?.lastAttemptAt === undefined ? 0 : prior.lastAttemptAt + MANUAL_FLOOR_MS,
+      });
+    },
     canProbe,
     nextAllowedAt,
     /** Probes admitted in the rolling budget window, for tests and diagnostics. */

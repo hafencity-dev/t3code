@@ -3,8 +3,6 @@ import {
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
 import {
-  defaultInstanceIdForDriver,
-  ProviderDriverKind,
   type EnvironmentId,
   type ProviderAccount,
   type ProviderAccountDriver,
@@ -14,7 +12,6 @@ import {
 } from "@t3tools/contracts";
 import { HistoryIcon, MonitorIcon, TriangleAlertIcon, UnplugIcon } from "lucide-react";
 import { useEffect, useEffectEvent, useRef, useState } from "react";
-import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { Alert, AlertAction, AlertDescription, AlertTitle } from "../ui/alert";
 import { Button } from "../ui/button";
@@ -36,6 +33,8 @@ import {
   autoRefreshAccountId,
   USAGE_REFRESH_COOLDOWN_MS,
   usageResetKey,
+  usageResetCheckWillRun,
+  accountFreshness,
 } from "./accounts.logic";
 import { AccountActivityDialog } from "./AccountActivityDialog";
 import { ProviderAccountsSection } from "./ProviderAccountsSection";
@@ -90,32 +89,29 @@ export function AccountSwitcherDialog({
   const refreshUsage = useAtomCommand(providerAccountsEnvironment.refreshUsage, {
     reportFailure: false,
   });
-  const refreshProviders = useAtomCommand(serverEnvironment.refreshProviders, {
-    reportFailure: false,
-  });
   const allAccounts = groups.flatMap((group) => group.accounts);
   const track = (accountId: ProviderAccountId, pending: boolean) => {
     if (pending) pendingIds.current.add(accountId);
     else pendingIds.current.delete(accountId);
     setRefreshingIds(new Set(pendingIds.current));
   };
-  // The active account's usage is the live provider snapshot, not a saved-store probe.
-  const refreshActive = (target: EnvironmentId, account: ProviderAccount) =>
-    refreshProviders({
-      environmentId: target,
-      input: { instanceId: defaultInstanceIdForDriver(ProviderDriverKind.make(account.driver)) },
-    });
   const refreshAccount = async (account: ProviderAccount) => {
     // The row disables its button during the cooldown; the clock ticks when it expires.
-    if (!environmentId || pendingIds.current.has(account.id)) return;
+    if (
+      !environmentId ||
+      pendingIds.current.has(account.id) ||
+      !accountFreshness(account, Date.now(), {
+        refreshing: false,
+        cooldownUntil: (manualRefreshedAt.get(account.id) ?? 0) + USAGE_REFRESH_COOLDOWN_MS,
+      })?.canRefresh
+    )
+      return;
     track(account.id, true);
     await (async () => {
-      const result = account.active
-        ? await refreshActive(environmentId, account)
-        : await refreshUsage({
-            environmentId,
-            input: { accountIds: [account.id], force: true },
-          });
+      const result = await refreshUsage({
+        environmentId,
+        input: { accountIds: [account.id], force: true },
+      });
       if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
         const failure = squashAtomCommandFailure(result);
         toastManager.add({
@@ -158,7 +154,9 @@ export function AccountSwitcherDialog({
   // `checking…` next to the reset is true. Failures fall back to `not checked yet`.
   const activeResetKeys = allAccounts.flatMap((account) => {
     const key = account.active ? usageResetKey(account, now) : null;
-    return key === null || resetChecksAttempted.has(key) ? [] : [{ account, key }];
+    return key === null || !usageResetCheckWillRun(account, now, resetChecksAttempted)
+      ? []
+      : [{ account, key }];
   });
   const activeResetTrigger = activeResetKeys.map(({ key }) => key).join();
   const refreshActiveResets = useEffectEvent(() => {
@@ -168,7 +166,10 @@ export function AccountSwitcherDialog({
     setResetChecksAttempted((previous) => new Set([...previous, ...due.map(({ key }) => key)]));
     for (const { account } of due) {
       track(account.id, true);
-      void refreshActive(environmentId, account).finally(() => track(account.id, false));
+      void refreshUsage({
+        environmentId,
+        input: { accountIds: [account.id], force: true },
+      }).finally(() => track(account.id, false));
     }
   });
   useEffect(() => {

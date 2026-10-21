@@ -220,7 +220,7 @@ export function usageResetCheckWillRun(
   attempted: ReadonlySet<string>,
 ) {
   const key = usageResetKey(account, now);
-  if (key === null) return false;
+  if (key === null || Date.parse(account.usageRefresh?.nextAllowedAt ?? "") > now) return false;
   if (account.active) return !attempted.has(key);
   // Only a gating window's reset makes the automatic refresh pick an inactive account.
   return (
@@ -243,7 +243,13 @@ export function providerAccountsUsageKey(providers: readonly ServerProvider[]) {
     ACCOUNT_DRIVERS.map((driver) => {
       const provider = defaultAccountProvider(driver, providers);
       return provider
-        ? [provider.usageLimits?.checkedAt ?? null, provider.auth.email ?? null]
+        ? [
+            provider.usageLimits?.checkedAt ?? null,
+            provider.usageLimits?.probeCheckedAt ?? null,
+            provider.usageLimits?.unavailable ?? null,
+            provider.auth.status,
+            provider.auth.email ?? null,
+          ]
         : null;
     }),
   );
@@ -321,8 +327,8 @@ function checkedTime(checkedAt: string) {
 
 /**
  * The `Checked` cell as one computed state, first match wins. `null` means the row is not
- * ready and its usage columns merge into a status message. The active account's usage is
- * live, so a leftover `usageRefresh` backoff never shows next to it.
+ * ready and its usage columns merge into a status message. Server backoff applies to
+ * active and saved accounts alike, even while previous measurements remain visible.
  */
 export function accountFreshness(
   account: ProviderAccount,
@@ -360,29 +366,6 @@ export function accountFreshness(
       refreshTooltip: "Checking usage",
     };
   const cooldownTooltip = (until: number) => `You can refresh again in ${formatWait(until - now)}`;
-  // Right after a switch the live numbers may still be the previous account's.
-  if (account.active && account.usagePending)
-    return {
-      ...plain("Checking…"),
-      tone: "muted",
-      refreshing: false,
-      tooltip: `Confirming this account's usage after the switch. ${
-        usage && usage.windows.length > 0 && age
-          ? `Showing its saved numbers from ${age === "Just now" ? "just now" : age}.`
-          : "No saved numbers yet."
-      }`,
-      canRefresh: cooldown === null,
-      refreshTooltip: cooldown === null ? "Refresh usage" : cooldownTooltip(cooldown),
-    };
-  if (account.active)
-    return {
-      ...(age ? aged(age) : plain("Not checked")),
-      tone: "muted",
-      refreshing: false,
-      tooltip: "Updated with every turn on the active account.",
-      canRefresh: cooldown === null,
-      refreshTooltip: cooldown === null ? "Refresh usage" : cooldownTooltip(cooldown),
-    };
   const nextAllowedAt = Date.parse(account.usageRefresh?.nextAllowedAt ?? "");
   const gatedUntil = Number.isFinite(nextAllowedAt) && nextAllowedAt > now ? nextAllowedAt : null;
   const numbers =
@@ -421,6 +404,25 @@ export function accountFreshness(
       refreshTooltip: cooldown === null ? "Try again" : cooldownTooltip(cooldown),
     };
   }
+  // Right after a switch the live numbers may still be the previous account's.
+  if (account.active && account.usagePending)
+    return {
+      ...plain("Checking…"),
+      tone: "muted",
+      refreshing: false,
+      tooltip: `Confirming this account's usage after the switch. ${
+        usage && usage.windows.length > 0 && age
+          ? `Showing its saved numbers from ${age === "Just now" ? "just now" : age}.`
+          : "No saved numbers yet."
+      }`,
+      canRefresh: cooldown === null && gatedUntil === null,
+      refreshTooltip:
+        gatedUntil !== null
+          ? `Checks resume in ${formatWait(gatedUntil - now)}`
+          : cooldown === null
+            ? "Refresh usage"
+            : cooldownTooltip(cooldown),
+    };
   // After a successful probe the server floor only disables the button; it is never a retry.
   // The server's time already includes its global probe budget.
   const blockedUntil = Math.max(gatedUntil ?? 0, cooldown ?? 0);

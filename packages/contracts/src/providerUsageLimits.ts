@@ -40,6 +40,8 @@ export const ServerProviderUsageLimits = Schema.Struct({
   checkedAt: IsoDateTime,
   windows: ForwardCompatibleArray(ServerProviderUsageWindow),
   credentialFingerprint: Schema.optional(TrimmedNonEmptyString),
+  // fork: distinguish identity-verified Claude probes from anonymous runtime limit events.
+  probeCheckedAt: Schema.optional(IsoDateTime),
   resetCredits: Schema.optional(ServerProviderResetCredits),
   externalUsage: Schema.optional(
     Schema.Struct({

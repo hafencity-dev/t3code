@@ -215,6 +215,54 @@ describe("provider account usage admission", () => {
     }),
   );
 
+  it.effect("keeps account backoff and one shared budget across active and inactive checks", () =>
+    Effect.gen(function* () {
+      let calls = 0;
+      const cache = makeAccountUsageCache({
+        allowActive: true,
+        probe: () =>
+          Effect.sync(() => {
+            calls++;
+          }).pipe(Effect.andThen(Effect.fail(new Error("429")))),
+      });
+      yield* cache.refresh({ id, active: false, force: true });
+      yield* cache.refresh({ id, active: true, force: true });
+      expect(calls).toBe(1);
+      for (let index = 1; index < 5; index++)
+        yield* cache.refresh({
+          id: ProviderAccountId.make(`mixed-${index}`),
+          active: index % 2 === 0,
+          force: true,
+        });
+      expect(calls).toBe(4);
+      expect(cache.nextAllowedAt(id, 0)).toBe(15 * minute);
+    }),
+  );
+
+  it.effect("honors Retry-After longer than the exponential backoff cap", () =>
+    Effect.gen(function* () {
+      const cache = makeAccountUsageCache({
+        probe: () => Effect.fail(new Error("429 Retry-After: 10800")),
+      });
+      const blocked = yield* cache.refresh(refresh);
+      expect(blocked?.nextAllowedAt).toBe(180 * minute);
+      expect(cache.canProbe(id, 120 * minute, blocked, true)).toBe(false);
+    }),
+  );
+
+  it.effect("a verified new measurement clears failure backoff but retains the manual floor", () =>
+    Effect.gen(function* () {
+      const cache = makeAccountUsageCache({
+        allowActive: true,
+        probe: () => Effect.fail(new Error("429")),
+      });
+      const blocked = yield* cache.refresh(refresh);
+      cache.observeMeasurement(id, good, blocked);
+      expect(cache.get(id)?.lastFailureKind).toBeUndefined();
+      expect(cache.nextAllowedAt(id, 0, blocked, true)).toBe(minute);
+    }),
+  );
+
   it.effect.each([
     [
       "SDK wrapped 429",
@@ -305,7 +353,7 @@ describe("provider account usage admission", () => {
       45 * minute,
     ],
     ["SDK message", new Error("429 Usage fetch failed. Retry-After: 1800 seconds"), 30 * minute],
-    ["retry cap", { status: 429, retryAfterSeconds: 10_000 }, 120 * minute],
+    ["explicit retry-after", { status: 429, retryAfterSeconds: 10_000 }, 10_000 * 1_000],
   ] as const)("honors %s", ([_label, error, delay]) =>
     Effect.gen(function* () {
       const cache = makeAccountUsageCache({ probe: () => Effect.fail(error) });
@@ -587,7 +635,14 @@ describe("provider account usage admission", () => {
             initializationResult: async () => ({
               account: { email: good.email, tokenSource: "oauth", subscriptionType: "pro" },
             }),
-            usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET: async () => {
+            usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET: async (
+              options: Parameters<
+                ReturnType<
+                  typeof ClaudeSdk.query
+                >["usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET"]
+              >[0],
+            ) => {
+              expect(options).toEqual({ skipBehaviors: true });
               throw new Error("Failed to fetch usage: 429 Too Many Requests; Retry-After: 1800");
             },
           } as unknown as ReturnType<typeof ClaudeSdk.query>;

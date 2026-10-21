@@ -122,3 +122,36 @@ describe("resolveUsageLimitsAfterProbe", () => {
     expect(resolveUsageLimitsAfterProbe({ published: undefined, probed: failed })).toBe(failed);
   });
 });
+
+describe("Claude probe provenance", () => {
+  it("retains old bars and their age while exposing repeated probe failures", () => {
+    const failed = {
+      checkedAt: "2026-09-03T12:10:00.000Z",
+      probeCheckedAt: "2026-09-03T12:10:00.000Z",
+      windows: [],
+      unavailable: {
+        reason: "probeFailed" as const,
+        message: "Claude usage request rate limited (429).",
+      },
+    };
+    const next = resolveUsageLimitsAfterProbe({ published, probed: failed });
+    expect(next).toEqual({
+      ...published,
+      probeCheckedAt: failed.probeCheckedAt,
+      unavailable: failed.unavailable,
+    });
+    expect(resolveUsageLimitsAfterProbe({ published: next, probed: failed })).toEqual(next);
+  });
+
+  it("does not attribute runtime changes or newer retained windows to a probe", () => {
+    const verified = { ...published, probeCheckedAt: checkedAt };
+    const runtime = applyUsageLimitsUpdate({
+      previous: verified,
+      checkedAt: "2026-09-03T12:01:00.000Z",
+      update: { windows: [{ ...session, usedPercent: 55 }] },
+    });
+    expect(runtime?.probeCheckedAt).toBeUndefined();
+    const retained = resolveUsageLimitsAfterProbe({ published: runtime, probed: verified });
+    expect(retained?.checkedAt).not.toBe(retained?.probeCheckedAt);
+  });
+});

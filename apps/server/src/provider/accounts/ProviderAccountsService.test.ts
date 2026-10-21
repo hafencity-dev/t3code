@@ -16,6 +16,7 @@ import {
 } from "@t3tools/contracts";
 import { Deferred, Effect, Fiber, Layer, PubSub, Queue, Schema, Scope, Stream } from "effect";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as Clock from "effect/Clock";
 import { TestClock } from "effect/testing";
 import { afterEach, beforeEach, vi } from "vite-plus/test";
 import { describe, expect, it } from "@effect/vitest";
@@ -331,6 +332,106 @@ describe("ProviderAccountsService", () => {
       Effect.provideService(HostProcess.Environment, { HOME: NodePath.join(root, "host-home") }),
     );
   }
+
+  it.effect(
+    "refreshes active Claude usage through a deduplicated gate and honors 429 backoff",
+    () => {
+      let calls = 0;
+      let invalidations = 0;
+      let limited = false;
+      let live = decodeProvider({
+        ...provider,
+        instanceId: "claudeAgent",
+        driver: "claudeAgent",
+        auth: { status: "authenticated", email: "active@example.test", label: "Claude Max" },
+        checkedAt: new Date(-60_000).toISOString(),
+        usageLimits: {
+          checkedAt: new Date(-60_000).toISOString(),
+          windows: [{ id: "five_hour", kind: "session", label: "Session", usedPercent: 10 }],
+        },
+      });
+      return run(
+        Effect.gen(function* () {
+          const service = yield* ProviderAccountsService;
+          const id = (yield* service.list()).groups.find(
+            (group) => group.driver === "claudeAgent",
+          )!.activeAccountId!;
+          const active = (snapshot: ProviderAccountsSnapshot) =>
+            snapshot.groups
+              .find((group) => group.driver === "claudeAgent")!
+              .accounts.find((account) => account.active)!;
+          const refresh = () => service.refreshUsage({ accountIds: [id], force: true });
+          const first = active(yield* refresh());
+          expect(first.usage?.windows[0]?.usedPercent).toBe(23);
+          expect(calls).toBe(1);
+          expect(invalidations).toBe(1);
+          yield* refresh();
+          expect(calls).toBe(1);
+          yield* TestClock.adjust("1 minute");
+          limited = true;
+          const blocked = active(yield* refresh());
+          expect(blocked.usage?.windows[0]?.usedPercent).toBe(23);
+          expect(blocked.usage?.unavailable?.reason).toBe("probeFailed");
+          expect(blocked.usageRefresh).toEqual({
+            nextAllowedAt: new Date(31 * 60_000).toISOString(),
+            rateLimited: true,
+          });
+          yield* refresh();
+          expect(calls).toBe(2);
+          expect(invalidations).toBe(2);
+          yield* TestClock.adjust("30 minutes");
+          limited = false;
+          const recovered = active(yield* refresh());
+          expect(recovered.usage?.windows[0]?.usedPercent).toBe(69);
+          expect(recovered.usage?.unavailable).toBeUndefined();
+          expect(recovered.usageRefresh?.rateLimited).toBe(false);
+          expect(calls).toBe(3);
+        }),
+        false,
+        {
+          providers: [live],
+          environment: [],
+          invalidateClaudeCaches: Effect.sync(() => {
+            invalidations++;
+          }),
+          providerRegistry: Effect.succeed({
+            getProviders: Effect.sync(() => [provider, live]),
+            refreshInstance: () =>
+              Effect.gen(function* () {
+                calls++;
+                const at = new Date(yield* Clock.currentTimeMillis).toISOString();
+                live = {
+                  ...live,
+                  checkedAt: at,
+                  usageLimits: limited
+                    ? {
+                        ...live.usageLimits!,
+                        probeCheckedAt: at,
+                        unavailable: {
+                          reason: "probeFailed",
+                          message: "Claude usage rate limited (429). Retry-After: 1800",
+                        },
+                      }
+                    : {
+                        checkedAt: at,
+                        probeCheckedAt: at,
+                        windows: [
+                          {
+                            id: "five_hour",
+                            kind: "session",
+                            label: "Session",
+                            usedPercent: calls * 23,
+                          },
+                        ],
+                      },
+                };
+                return [provider, live];
+              }),
+          }),
+        },
+      );
+    },
+  );
 
   const seedManaged = (low = false, pending = false, backoff = false) =>
     Effect.gen(function* () {
@@ -1371,7 +1472,7 @@ describe("ProviderAccountsService", () => {
     });
     // Fresh usage without a 5-hour window: nothing is running, so it can start.
     const probe: Probe = (() => {
-      const now = new Date().toISOString();
+      const now = new Date(0).toISOString();
       return Effect.succeed({
         checkedAt: now,
         status: "ready",
@@ -1480,9 +1581,6 @@ describe("ProviderAccountsService", () => {
           Effect.tap(() => Effect.sync(() => order.push("switched"))),
           Effect.forkScoped,
         );
-        // Only bounds how long a regression gets to finish the switch; passing never waits on it.
-        yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 200)));
-        expect(switching.pollUnsafe()).toBeUndefined();
         yield* Deferred.succeed(gate, undefined);
         yield* Fiber.join(refreshing);
         yield* Fiber.join(switching);
@@ -1899,6 +1997,57 @@ describe("ProviderAccountsService", () => {
     },
   );
 
+  it.effect("manual refresh after a hot switch never saves retained outgoing usage", () => {
+    let seeded: Awaited<ReturnType<typeof seedClaudeStores>>;
+    const usage = new Map([
+      ["default@example.test", accountLimits(100, 40, resetsOf.default)],
+      ["b@example.test", accountLimits(10, 20, resetsOf.b)],
+    ]);
+    const live = makeLiveClaudeRegistry(NodePath.join(root, "claude"), usage);
+    return run(
+      Effect.gen(function* () {
+        const service = yield* ProviderAccountsService;
+        yield* live.refreshClaude;
+        expect(yield* live.nextRefresh).toBe("default@example.test");
+        yield* live.failUsage(true);
+        const id = ProviderAccountId.make(seeded.ids.b!);
+        yield* service.switchAccount({ accountId: id });
+        expect(yield* live.nextRefresh).toBe("b@example.test");
+        yield* live.rateLimit(accountLimits(100, 41, resetsOf.default).windows);
+        const refreshed = claudeGroup(
+          yield* service.refreshUsage({ accountIds: [id], force: true }),
+        );
+        expect(yield* live.nextRefresh).toBe("b@example.test");
+        const account = refreshed.accounts.find((entry) => entry.id === id)!;
+        expect(account.usagePending).toBe(true);
+        expect(sessionUsed(account.usage)).toBe(10);
+        const registry = yield* Effect.promise(() =>
+          createProviderAccountRegistry({ stateDir: seeded.stateDir }),
+        );
+        const entry = yield* Effect.promise(() => registry.get(id));
+        expect(sessionUsed(entry.lastUsage?.usage)).toBe(10);
+      }),
+      false,
+      {
+        claudeHomePath: NodePath.join(root, "claude"),
+        providerRegistry: live.registry,
+        invalidateClaudeCaches: live.invalidate,
+        before: async () => {
+          seeded = await seedClaudeStores(["b"]);
+          const registry = await createProviderAccountRegistry({ stateDir: seeded.stateDir });
+          await registry.update(seeded.ids.b!, {
+            lastUsage: {
+              email: "b@example.test",
+              accountUuid: "uuid-b",
+              checkedAt,
+              usage: usage.get("b@example.test"),
+            },
+          });
+        },
+      },
+    );
+  });
+
   it.effect("drops a usage probe that reports another account's identity", () => {
     let seeded: Awaited<ReturnType<typeof seedClaudeStores>>;
     const probe: Probe = (() =>
@@ -2130,24 +2279,26 @@ describe("ProviderAccountsService", () => {
     ),
   );
 
-  it.effect("does not report probe backoff for the active account, whose usage is live", () =>
-    run(
-      Effect.gen(function* () {
-        const service = yield* ProviderAccountsService;
-        const codex = (snapshot: ProviderAccountsSnapshot) =>
-          snapshot.groups.find((group) => group.driver === "codex")!;
-        const inactive = codex(yield* service.list()).accounts.find(
-          (account) => account.id === seeded!.id,
-        );
-        expect(inactive?.usageRefresh?.rateLimited).toBe(true);
-        const switched = codex(yield* service.switchAccount({ accountId: seeded!.id }));
-        const active = switched.accounts.find((account) => account.id === seeded!.id)!;
-        expect(active.active).toBe(true);
-        expect(active.usageRefresh).toBeUndefined();
-      }),
-      true,
-      { backoff: true },
-    ),
+  it.effect(
+    "preserves account probe backoff when the account becomes active without a fresh verified snapshot",
+    () =>
+      run(
+        Effect.gen(function* () {
+          const service = yield* ProviderAccountsService;
+          const codex = (snapshot: ProviderAccountsSnapshot) =>
+            snapshot.groups.find((group) => group.driver === "codex")!;
+          const inactive = codex(yield* service.list()).accounts.find(
+            (account) => account.id === seeded!.id,
+          );
+          expect(inactive?.usageRefresh?.rateLimited).toBe(true);
+          const switched = codex(yield* service.switchAccount({ accountId: seeded!.id }));
+          const active = switched.accounts.find((account) => account.id === seeded!.id)!;
+          expect(active.active).toBe(true);
+          expect(active.usageRefresh).toEqual(inactive?.usageRefresh);
+        }),
+        true,
+        { backoff: true },
+      ),
   );
 
   it.effect(
@@ -2547,7 +2698,7 @@ describe("ProviderAccountsService", () => {
         attempted = resolve;
       });
       const probe: Probe = (() => {
-        const now = new Date().toISOString();
+        const now = new Date(0).toISOString();
         return Effect.succeed({
           checkedAt: now,
           status: "ready",

@@ -41,7 +41,11 @@ lines.on("line", (line) => {
       process.stdout.write(
         JSON.stringify({
           type: "control_response",
-          response: { subtype: "error", request_id: message.request_id, error: "usage failed" },
+          response: {
+            subtype: "error",
+            request_id: message.request_id,
+            error: process.env.T3_CLAUDE_USAGE_FAILURE ?? "usage failed",
+          },
         }) + "\n",
       );
       return;

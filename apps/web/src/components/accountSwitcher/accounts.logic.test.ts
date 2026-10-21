@@ -250,6 +250,19 @@ describe("account snapshot invalidation", () => {
       key,
     );
     expect(providerAccountsUsageKey([provider({ usageLimits: undefined })])).not.toBe(key);
+    expect(
+      providerAccountsUsageKey([
+        { ...live, usageLimits: { ...live.usageLimits!, unavailable: { reason: "probeFailed" } } },
+      ]),
+    ).not.toBe(key);
+    expect(
+      providerAccountsUsageKey([{ ...live, auth: { ...live.auth, status: "unauthenticated" } }]),
+    ).not.toBe(key);
+    expect(
+      providerAccountsUsageKey([
+        { ...live, usageLimits: { ...live.usageLimits!, probeCheckedAt: "2026-09-23T12:01:00Z" } },
+      ]),
+    ).not.toBe(key);
     expect(providerAccountsUsageKey([])).not.toBe(key);
   });
   it("ignores unrelated snapshot updates and custom instances", () => {
@@ -369,25 +382,49 @@ describe("freshness", () => {
       canRefresh: false,
     });
   });
-  it("never lets a leftover backoff contradict the active account's live numbers", () => {
+  it("shows active Claude backoff without presenting retained numbers as live", () => {
     const active = account("active", 40, {
+      driver: "claudeAgent",
       active: true,
-      usage: { checkedAt: "2026-09-23T12:34:30Z", windows: [window(40)] },
+      usage: { checkedAt: "2026-09-23T12:00:00Z", windows: [window(40)] },
       usageRefresh: { nextAllowedAt: "2026-09-23T12:47:00Z", rateLimited: true },
     });
     expect(accountFreshness(active, now, idle)).toMatchObject({
-      text: "Just now",
-      narrowText: "Checked just now",
-      tone: "muted",
-      tooltip: "Updated with every turn on the active account.",
+      text: "Retry in 12m",
+      tone: "warning",
+      tooltip: "Claude Code is rate-limiting usage checks. Showing numbers from 35m ago.",
+      canRefresh: false,
+    });
+    expect(accountFreshness({ ...active, usagePending: true }, now, idle)).toMatchObject({
+      text: "Retry in 12m",
+      canRefresh: false,
+    });
+    expect(accountFreshness(active, Date.parse("2026-09-23T12:48:00Z"), idle)).toMatchObject({
+      text: "48m ago",
+      canRefresh: true,
+    });
+  });
+  it("reports active probe failures and never promises every turn updates usage", () => {
+    const active = account("active", 40, {
+      active: true,
+      usage: {
+        checkedAt: "2026-09-23T12:00:00Z",
+        windows: [window(40)],
+        unavailable: { reason: "probeFailed" },
+      },
+    });
+    expect(accountFreshness(active, now, idle)).toMatchObject({
+      text: "Check failed",
+      tone: "warning",
+      tooltip: "The last check failed. Showing numbers from 35m ago.",
       canRefresh: true,
     });
     expect(
-      accountFreshness(active, now, { refreshing: false, cooldownUntil: now + 90_000 }),
-    ).toMatchObject({ canRefresh: false, refreshTooltip: "You can refresh again in 2m" });
-    expect(accountFreshness(account("active", undefined, { active: true }), now, idle)?.text).toBe(
-      "Not checked",
-    );
+      accountFreshness(account("active", undefined, { active: true }), now, idle),
+    ).toMatchObject({
+      text: "Not checked",
+      tooltip: "Usage hasn't been checked yet.",
+    });
   });
   it("says the active account's usage is being confirmed after a switch", () => {
     const pending = account("active", 40, {
@@ -1102,6 +1139,27 @@ describe("audit regressions", () => {
     expect(usageResetCheckWillRun(stale({ active: true }), now, new Set())).toBe(true);
     expect(usageResetCheckWillRun(stale({ active: true }), now, new Set([key!]))).toBe(false);
     expect(usageResetCheckWillRun(stale(), now, new Set())).toBe(true);
+    expect(
+      usageResetCheckWillRun(
+        stale({
+          active: true,
+          usageRefresh: { nextAllowedAt: "2026-09-23T12:40:00Z", rateLimited: true },
+        }),
+        now,
+        new Set(),
+      ),
+    ).toBe(false);
+    expect(
+      usageResetCheckWillRun(
+        stale({
+          active: true,
+          usageRefresh: { nextAllowedAt: "2026-09-23T12:40:00Z", rateLimited: true },
+        }),
+        Date.parse("2026-09-23T12:41:00Z"),
+        new Set(),
+      ),
+    ).toBe(true);
+
     expect(
       usageResetCheckWillRun(
         stale({ usageRefresh: { nextAllowedAt: "2026-09-23T12:40:00Z" } }),

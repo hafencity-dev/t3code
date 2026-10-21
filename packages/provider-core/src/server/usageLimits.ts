@@ -106,6 +106,10 @@ export function resolveUsageLimitsAfterProbe(input: {
   readonly probed: ServerProviderUsageLimits | undefined;
 }): ServerProviderUsageLimits | undefined {
   const { published, probed } = input;
+  // fork: retain stale bars, but expose the failed Claude probe so refresh admission sees its backoff.
+  if (probed?.probeCheckedAt && probed.unavailable?.reason === "probeFailed" && published) {
+    return { ...published, ...probed, checkedAt: published.checkedAt, windows: published.windows };
+  }
   if (probed?.unavailable?.reason === "probeFailed" && published && !published.unavailable) {
     return published;
   }

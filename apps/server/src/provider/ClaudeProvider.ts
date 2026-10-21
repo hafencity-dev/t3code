@@ -5,6 +5,7 @@ import {
   type ServerProviderSlashCommand,
   type ServerProviderResetCredits,
 } from "@t3tools/contracts";
+import { usageProbeFailureDetails } from "../fork/claudeUsageProbe.ts";
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -197,7 +198,7 @@ const CAPABILITIES_PROBE_TIMEOUT_MS = 25_000;
 // Native CLI startup on Windows can exceed the shared probe deadline.
 const CLAUDE_VERSION_CHECK_TIMEOUT_MS = 20_000;
 
-export const CLAUDE_CAPABILITIES_PROBE_SETTING_SOURCES = [
+const CLAUDE_CAPABILITIES_PROBE_SETTING_SOURCES = [
   "user",
   "project",
   "local",
@@ -266,6 +267,7 @@ export type ClaudeCapabilitiesProbe = {
    */
   readonly usage?: Pick<SDKControlGetUsageResponse, "rate_limits_available" | "rate_limits">;
   readonly usageCheckedAt?: string;
+  readonly usageFailure?: { readonly rateLimited: boolean; readonly retryAt: number };
 };
 
 function parseClaudeInitializationCommands(
@@ -415,7 +417,16 @@ const probeClaudeCapabilities = (
           apiKeySource: account?.apiKeySource,
           apiProvider: account?.apiProvider,
           slashCommands: parseClaudeInitializationCommands(init.commands),
-          ...(usage ? { usage, usageCheckedAt } : {}),
+          ...(includeUsage ? { usageCheckedAt } : {}),
+          ...(usage ? { usage } : {}),
+          ...(usageResult && Result.isFailure(usageResult)
+            ? {
+                usageFailure: usageProbeFailureDetails(
+                  usageResult.failure,
+                  Date.parse(usageCheckedAt),
+                ),
+              }
+            : {}),
         } satisfies ClaudeCapabilitiesProbe;
       }),
     ),
@@ -658,7 +669,15 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
     (customApiEndpoint ? { type: "customEndpoint", label: "Custom API endpoint" } : undefined);
   const usageCheckedAt = capabilities.usageCheckedAt ?? checkedAt;
   const usageLimits = !capabilities.usage
-    ? makeUnavailableUsageLimits({ checkedAt, reason: "probeFailed" })
+    ? makeUnavailableUsageLimits({
+        checkedAt,
+        reason: "probeFailed",
+        ...(capabilities.usageFailure?.rateLimited
+          ? {
+              message: `Claude usage request rate limited (429). Retry-After: ${Math.max(0, Math.ceil((capabilities.usageFailure.retryAt - Date.parse(usageCheckedAt)) / 1000))} seconds.`,
+            }
+          : {}),
+      })
     : scopedLimitNames
       ? yield* recordClaudeUsageResponse(scopedLimitNames, {
           response: capabilities.usage,
@@ -694,7 +713,12 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
         ...(authMetadata ? authMetadata : {}),
       },
       ...(versionUpgradeMessage ? { message: versionUpgradeMessage } : {}),
-      usageLimits: resetCredits ? { ...usageLimits, resetCredits } : usageLimits,
+      usageLimits: {
+        ...usageLimits,
+        // fork: cached probes retain their original measurement time; runtime events have no proof.
+        probeCheckedAt: usageCheckedAt,
+        ...(resetCredits ? { resetCredits } : {}),
+      },
     },
   });
 });

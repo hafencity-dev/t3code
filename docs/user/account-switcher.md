@@ -28,6 +28,11 @@ Rename an account, sign in to it again, or remove it from its **⋯** menu. Sign
 you repair an expired or signed-out login. The original login (**Default**) can't be removed. To
 remove the account in use, switch to another one first.
 
+Use **Refresh usage** to check either the active account or a saved account. If a check fails,
+the last measured values stay visible with their original age. Refreshes share a request budget,
+and a rate-limit response pauses further checks until the displayed retry time; repeated clicks
+or another connected client cannot bypass that pause.
+
 ## Switch
 
 Select **Switch** on an account. Each account shows its 5-hour and weekly usage and when they reset.
