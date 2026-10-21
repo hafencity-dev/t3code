@@ -15,6 +15,8 @@ describe("native task preference prompt", () => {
   it("discovers available native targets before requesting the configured model", () => {
     const prompt = buildManagedClaudeCodexRoutingPrompt("gpt-6-astra");
     expect(prompt).toContain("orchestrator_capabilities");
+    expect(prompt).toContain('orchestrator_capabilities({ search: "gpt-6-astra" })');
+    expect(prompt).toContain("before treating an omitted preferred model as unavailable");
     expect(prompt).toContain('driverKind: "codex"');
     expect(prompt).toContain("canRunChildTask: true");
     expect(prompt).toContain("delegate_task.target");

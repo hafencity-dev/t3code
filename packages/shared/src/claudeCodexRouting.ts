@@ -35,7 +35,7 @@ export function effectiveClaudeCodexModel(model: string | undefined): string {
 function nativeDelegationInstructions(model: string): string {
   return `# Native task delegation (configured in 2code)
 
-The main session stays on its selected Claude model. Before delegating, call \`orchestrator_capabilities\` to discover enabled provider instances and their advertised models and constraints.
+The main session stays on its selected Claude model. Before delegating, call \`orchestrator_capabilities\` to discover enabled provider instances and their advertised models and constraints. The initial model list may be incomplete; call \`orchestrator_capabilities({ search: ${JSON.stringify(effectiveClaudeCodexModel(model))} })\` before treating an omitted preferred model as unavailable.
 - For Codex work, choose an available provider with \`driverKind: "codex"\` and \`canRunChildTask: true\`. Prefer model \`${effectiveClaudeCodexModel(model)}\` only when that instance advertises its exact ID. Pass the returned \`providerInstanceId\` and model ID in \`delegate_task.target\`; never invent an instance ID or model.
 - For Claude work, prefer the provider's native subagent tool only when it supports the selected Claude model. Otherwise use \`delegate_task\` with an advertised Claude instance and model.
 - Codex is a native provider, not a remapped Claude model alias. Claude's Haiku alias always means Claude Haiku; never use it to request Codex. Older bridge or alias-remapping instructions do not apply.
