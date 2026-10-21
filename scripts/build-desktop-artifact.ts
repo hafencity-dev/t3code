@@ -43,6 +43,7 @@ import {
 import { loadRepoEnv } from "./lib/public-config.ts";
 import { selectDesktopRuntimeExternalDependencies } from "./lib/desktop-external-packages.ts";
 import { resolveCatalogDependencies } from "./lib/resolve-catalog.ts";
+import { retryAppleNetworkCommand } from "./fork/2code-release/apple-command-retry.ts"; // fork: retry transient Apple transport failures.
 // fork: keep the legacy 2code release identity isolated from upstream desktop defaults.
 import {
   DESKTOP_DISTRIBUTIONS,
@@ -4194,7 +4195,7 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
     "never",
   ];
   const builderCommand = yield* resolveSpawnCommand("vp", builderArgs, { env: buildEnv });
-  yield* runCommand(
+  const buildCommand = runCommand(
     ChildProcess.make(builderCommand.command, builderCommand.args, {
       cwd: repoRoot,
       env: buildEnv,
@@ -4205,6 +4206,12 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
       verbose: options.verbose,
     },
   );
+  // fork: keep app stapling inside electron-builder, before archive hashes are produced.
+  yield* options.signed &&
+  options.platform === "mac" &&
+  distributionProfile?.id === "2code-production"
+    ? buildCommand.pipe(retryAppleNetworkCommand("Build and notarize 2code"))
+    : buildCommand;
 
   const stageDistDir = path.join(stageAppDir, "dist");
   if (!(yield* fs.exists(stageDistDir))) {
