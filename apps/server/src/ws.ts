@@ -1,5 +1,6 @@
 import * as Cause from "effect/Cause";
 import { OrchestrationDispatchCommandError } from "@t3tools/contracts";
+import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as Orchestrator from "./orchestration-v2/Orchestrator.ts";
 
@@ -64,6 +65,7 @@ import {
   OrchestrationV2ThreadLaunchError,
   type OrchestrationProjectShell,
   type OrchestrationV2ShellSnapshot,
+  type ApplicationStoredEvent,
   type ProjectEntriesFailure,
   type ProjectFileFailure,
   type ProjectFileOperation,
@@ -108,7 +110,7 @@ import {
   HttpServerRespondable,
   HttpServerResponse,
 } from "effect/http";
-import { RpcSerialization, RpcServer } from "effect/rpc";
+import { RpcGroup, RpcSerialization, RpcServer } from "effect/rpc";
 
 import * as CheckpointDiffQuery from "./checkpointing/CheckpointDiffQuery.ts";
 import * as ServerConfig from "./config.ts";
@@ -137,6 +139,7 @@ import {
   shellStreamItemFromThreadShell,
   shellStreamItemsFromInitialSnapshot,
   shellStreamItemsFromResumeSnapshot,
+  shouldPublishShellApplicationEvent,
   skipUnchangedThreadShells,
   toShellApplicationEvent,
   type ShellApplicationEvent,
@@ -557,8 +560,26 @@ const PROVIDER_STATUS_DEBOUNCE_MS = 200;
 
 // Middleware added later wraps middleware added earlier, so instrumentation wraps authorization.
 const ServerWsRpcGroup = WsRpcGroup.middleware(RpcInstrumentation);
-const ServerCoreRpcGroup = WsCoreRpcGroup.middleware(RpcInstrumentation);
-const ServerForkRpcGroup = WsForkRpcGroup.middleware(RpcInstrumentation);
+const ServerCoreRpcGroup = WsCoreRpcGroup.middleware(RpcInstrumentation); // fork: core excludes extension RPCs
+const ServerForkRpcGroup = WsForkRpcGroup.middleware(RpcInstrumentation); // fork: provider accounts and source control
+
+// RpcGroup.toLayer derives each handler's requirements by scanning every RPC in
+// the group, so its type cost grows with handlers × RPCs. Near 200 methods that
+// crosses TypeScript's instantiation limit and the layer's requirements degrade to
+// `any`, so the handlers are registered as two disjoint, smaller groups.
+type ServerWsRpc = RpcGroup.Rpcs<typeof ServerCoreRpcGroup>;
+const SPLIT_WS_RPC_PREFIXES = ["server", "pullRequests", "provider", "orchestration"] as const;
+type SplitWsRpc = Extract<
+  ServerWsRpc,
+  { readonly _tag: `${(typeof SPLIT_WS_RPC_PREFIXES)[number]}.${string}` }
+>;
+const isSplitWsRpc = (rpc: ServerWsRpc): rpc is SplitWsRpc =>
+  SPLIT_WS_RPC_PREFIXES.some((prefix) => rpc._tag.startsWith(`${prefix}.`));
+const isOtherWsRpc = (rpc: ServerWsRpc): rpc is Exclude<ServerWsRpc, SplitWsRpc> =>
+  !isSplitWsRpc(rpc);
+const serverWsRpcs = Array.from(ServerCoreRpcGroup.requests.values());
+const SplitWsRpcGroup = RpcGroup.make(...serverWsRpcs.filter(isSplitWsRpc));
+const OtherWsRpcGroup = RpcGroup.make(...serverWsRpcs.filter(isOtherWsRpc));
 // Replaying each intervening event costs a shell refetch; past this gap a
 // single O(active-threads) snapshot is cheaper and bounded.
 const SHELL_RESUME_MAX_GAP = 1_000;
@@ -978,6 +999,9 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
     const projects = yield* ProjectStore.ProjectStoreV2;
     const projectService = yield* ProjectService.ProjectService;
     const projectEnrichment = yield* ProjectEnrichmentService.ProjectEnrichmentService;
+    let subagentThreadIds = new Set<string>();
+    const filterSubagentTranscript = (stored: ApplicationStoredEvent) =>
+      shouldPublishShellApplicationEvent(stored, subagentThreadIds);
 
     const enrichmentChanges = yield* projectEnrichment.subscribeChanges;
     const loadProjectMetadataSnapshot = Effect.fn("ws.orchestrationV2.loadProjectMetadataSnapshot")(
@@ -1003,6 +1027,11 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
           listProjects: projects.listShells(),
           latestSequence: applicationEvents.latestApplicationSequence,
         }),
+      );
+      subagentThreadIds = new Set(
+        base.threads
+          .filter((thread) => thread.lineage.relationshipToParent === "subagent")
+          .map((thread) => thread.id),
       );
       const enriched = yield* enrichProjectShells(base.projects);
       return {
@@ -1066,6 +1095,7 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
           applicationEvents.streamProjectedApplicationEvents({
             afterSequence,
             project: toShellApplicationEvent,
+            filter: filterSubagentTranscript,
           }),
         ),
       );
@@ -1156,16 +1186,25 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
         });
       }
 
+      const currentShell = yield* threadManagement.getShellSnapshot({ location: "active" });
+      subagentThreadIds = new Set(
+        currentShell.threads
+          .filter((thread) => thread.lineage.relationshipToParent === "subagent")
+          .map((thread) => thread.id),
+      );
+
       const loaded = yield* loadProjectMetadataSnapshot(highWater);
       const replay = toShellStream(
-        applicationEvents.readApplicationEvents({
-          afterSequence: input.afterSequence,
-          throughSequence: highWater,
-          // A row a newer build wrote (e.g. after a downgrade) must not fail
-          // every shell resubscribe. The live tail below resumes from
-          // highWater, so a dropped row never hides later events.
-          skipUnknownEventTypes: true,
-        }),
+        applicationEvents
+          .readApplicationEvents({
+            afterSequence: input.afterSequence,
+            throughSequence: highWater,
+            // A row a newer build wrote (e.g. after a downgrade) must not fail
+            // every shell resubscribe. The live tail below resumes from
+            // highWater, so a dropped row never hides later events.
+            skipUnknownEventTypes: true,
+          })
+          .pipe(Stream.filter(filterSubagentTranscript)),
       );
       return composeShellStreamWithEnrichment({
         initial: initialEnrichmentItems(loaded),
@@ -1202,7 +1241,7 @@ export const layerWsRpc = (
   previewAutomationBroker: PreviewAutomationBroker.PreviewAutomationBroker["Service"],
   serverBrowser: ServerBrowser.ServerBrowser["Service"],
 ) =>
-  Layer.unwrap(
+  Layer.effectContext(
     Effect.gen(function* () {
       const currentSessionId = currentSession.sessionId;
       const sql = yield* SqlClient.SqlClient;
@@ -1719,13 +1758,29 @@ export const layerWsRpc = (
           observability: {
             logsDirectoryPath: config.logsDir,
             localTracingEnabled: true,
-            ...(config.otlpTracesUrl !== undefined ? { otlpTracesUrl: config.otlpTracesUrl } : {}),
+            ...(config.otlpTracesUrl !== undefined
+              ? {
+                  otlpTracesUrl: config.otlpTracesUrl,
+                  otlpTracesSource: config.otlpTracesSource,
+                  otlpTracesVariable: config.otlpTracesVariable,
+                }
+              : {}),
             otlpTracesEnabled: config.otlpTracesUrl !== undefined,
             ...(config.otlpMetricsUrl !== undefined
-              ? { otlpMetricsUrl: config.otlpMetricsUrl }
+              ? {
+                  otlpMetricsUrl: config.otlpMetricsUrl,
+                  otlpMetricsSource: config.otlpMetricsSource,
+                  otlpMetricsVariable: config.otlpMetricsVariable,
+                }
               : {}),
             otlpMetricsEnabled: config.otlpMetricsUrl !== undefined,
-            ...(config.otlpLogsUrl !== undefined ? { otlpLogsUrl: config.otlpLogsUrl } : {}),
+            ...(config.otlpLogsUrl !== undefined
+              ? {
+                  otlpLogsUrl: config.otlpLogsUrl,
+                  otlpLogsSource: config.otlpLogsSource,
+                  otlpLogsVariable: config.otlpLogsVariable,
+                }
+              : {}),
             otlpLogsEnabled: config.otlpLogsUrl !== undefined,
           },
           settings,
@@ -3162,9 +3217,13 @@ export const layerWsRpc = (
             ),
           ),
       });
-      return Layer.merge(
-        ServerCoreRpcGroup.toLayer(handlers),
-        ServerForkRpcGroup.toLayer(forkHandlers),
+      const splitHandlers: Pick<typeof handlers, SplitWsRpc["_tag"]> = handlers;
+      const otherHandlers: Pick<typeof handlers, Exclude<ServerWsRpc, SplitWsRpc>["_tag"]> =
+        handlers;
+      return Context.mergeAll(
+        yield* SplitWsRpcGroup.toHandlers(splitHandlers),
+        yield* OtherWsRpcGroup.toHandlers(otherHandlers),
+        yield* ServerForkRpcGroup.toHandlers(forkHandlers), // fork: isolated extension requirements
       );
     }),
   );
