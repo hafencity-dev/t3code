@@ -4,23 +4,9 @@ import {
 } from "@t3tools/shared/projectSettings";
 import * as Option from "effect/Option";
 import * as Crypto from "effect/Crypto";
-/**
- * fork: f4 — the source-control panel's server facade.
- *
- * Two service-level behaviours carry the whole feature:
- *
- * 1. **cwd containment.** Every method validates the caller-supplied `cwd`,
- *    *and* the repository root git resolves it to, against the open project
- *    roots and thread worktrees. Denial throws. An RPC that runs arbitrary git
- *    in an arbitrary directory is a sandbox escape, and this is the only thing
- *    standing between a paired remote client and the host filesystem.
- * 2. **Per-repository mutation serialization.** One mutation at a time per
- *    repository (an Effect `Semaphore` keyed by the resolved root), on top of
- *    the `index.lock` retry in `WorkingCopyGit`. Reads are uncached and
- *    unserialized; the client drives refresh.
- *
- * Everything runs over `VcsDriver.execute`, so `VcsDriver.ts` is untouched.
- */
+// fork: restrict both requested cwd and resolved repository to open projects/worktrees.
+// Serialize mutations per repository; reads remain uncached and unserialized.
+
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -353,18 +339,9 @@ export const make = Effect.gen(function* () {
     return { modelSelection, style: settings.sourceControlWritingStyle };
   }, Effect.mapError(CommitMessage.settingsFailure));
 
-  /**
-   * The git reads run under the repository semaphore so the snapshot is
-   * consistent with the panel's own mutations; the **model call does not**. A
-   * generation takes tens of seconds, and holding the semaphore across it
-   * would freeze staging and committing in that repository for its duration.
-   *
-   * Settings are read before the containment guard because the guard's cost
-   * (`runMutating`) is what tells us whether we may run `git log` for the
-   * `repo_conventions` examples. That read is an in-memory settings lookup
-   * that returns nothing to the caller and spawns no process, so a denied cwd
-   * still reaches git and the model exactly zero times.
-   */
+  // Keep git reads under the repository lock, but release it before model generation.
+  // Settings are an in-memory lookup; a denied cwd still reaches neither git nor the model.
+
   const generateCommitMessage = Effect.fn("WorkingCopyService.generateCommitMessage")(function* (
     input: WorkingCopyGenerateCommitMessageInput,
   ): Effect.fn.Return<WorkingCopyGeneratedCommitMessage, WorkingCopyCommitMessageError> {
@@ -392,106 +369,128 @@ export const make = Effect.gen(function* () {
   });
 
   return WorkingCopyService.of({
-    status: (input) =>
+    status: Effect.fn("WorkingCopyService.status")((input) =>
       withRepository("workingCopy.status", input.cwd, (git) => readWorkingCopyStatus(git)).pipe(
-        // fork: f4 — `readWorkingCopyStatus` can only ever answer `isRepo: true`
-        // because `registry.resolve` fails first when the cwd is not a git
-        // repository, which left the panel's dedicated "not a git repository"
-        // empty state unreachable and its 15s poll re-asking a question that
-        // can never succeed. Status — and ONLY status — answers the shaped
-        // negative instead. The containment guard still runs first, so this
-        // does not weaken the security boundary: a denied cwd raises
-        // `WorkingCopyCwdDeniedError`, which is a different tag.
+        // A non-repository answers the panel's empty state; denied cwd errors still propagate.
         Effect.catchTags({ VcsUnsupportedOperationError: () => Effect.succeed(NOT_A_REPOSITORY) }),
       ),
-    diff: (input) =>
+    ),
+    diff: Effect.fn("WorkingCopyService.diff")((input) =>
       withRepository("workingCopy.diff", input.cwd, (git) => Diff.readDiff(git, input)),
-    fileAtRef: (input) =>
+    ),
+    fileAtRef: Effect.fn("WorkingCopyService.fileAtRef")((input) =>
       withRepository("workingCopy.fileAtRef", input.cwd, (git) => Diff.readFileAtRef(git, input)),
-    stagePaths: (input) =>
+    ),
+    stagePaths: Effect.fn("WorkingCopyService.stagePaths")((input) =>
       runMutating("workingCopy.stagePaths", input.cwd, (git) =>
         Staging.stagePaths(git, input.paths),
       ),
-    unstagePaths: (input) =>
+    ),
+    unstagePaths: Effect.fn("WorkingCopyService.unstagePaths")((input) =>
       runMutating("workingCopy.unstagePaths", input.cwd, (git) =>
         Staging.unstagePaths(git, input.paths),
       ),
-    applyPatch: (input) =>
+    ),
+    applyPatch: Effect.fn("WorkingCopyService.applyPatch")((input) =>
       runMutating("workingCopy.applyPatch", input.cwd, (git) => Staging.applyPatch(git, input)),
-    discardPaths: (input) =>
+    ),
+    discardPaths: Effect.fn("WorkingCopyService.discardPaths")((input) =>
       runMutating("workingCopy.discardPaths", input.cwd, (git) =>
         Discard.discardPaths(git, input).pipe(Effect.provideService(Crypto.Crypto, crypto)),
       ),
-    restoreDiscardBackup: (input) =>
+    ),
+    restoreDiscardBackup: Effect.fn("WorkingCopyService.restoreDiscardBackup")((input) =>
       runMutating("workingCopy.restoreDiscardBackup", input.cwd, (git) =>
         Discard.restoreDiscardBackup(git, input),
       ),
-    listDiscardBackups: (input) =>
+    ),
+    listDiscardBackups: Effect.fn("WorkingCopyService.listDiscardBackups")((input) =>
       withRepository("workingCopy.listDiscardBackups", input.cwd, (git) =>
         Discard.listDiscardBackups(git),
       ),
-    commitStaged: (input) =>
+    ),
+    commitStaged: Effect.fn("WorkingCopyService.commitStaged")((input) =>
       runMutating("workingCopy.commitStaged", input.cwd, (git) =>
         Commit.commitStaged(git, input.message),
       ),
-    amendCommit: (input) =>
+    ),
+    amendCommit: Effect.fn("WorkingCopyService.amendCommit")((input) =>
       runMutating("workingCopy.amendCommit", input.cwd, (git) =>
         Commit.amendCommit(git, input.message),
       ),
-    undoLastCommit: (input) =>
+    ),
+    undoLastCommit: Effect.fn("WorkingCopyService.undoLastCommit")((input) =>
       runMutating("workingCopy.undoLastCommit", input.cwd, (git) => Commit.undoLastCommit(git)),
-    lastCommitMessage: (input) =>
+    ),
+    lastCommitMessage: Effect.fn("WorkingCopyService.lastCommitMessage")((input) =>
       withRepository("workingCopy.lastCommitMessage", input.cwd, (git) =>
         Commit.lastCommitMessage(git),
       ),
+    ),
     generateCommitMessage, // fork: f4 AI commit message
-    log: (input) => withRepository("workingCopy.log", input.cwd, (git) => Log.readLog(git, input)),
-    commitDetail: (input) =>
+    log: Effect.fn("WorkingCopyService.log")((input) =>
+      withRepository("workingCopy.log", input.cwd, (git) => Log.readLog(git, input)),
+    ),
+    commitDetail: Effect.fn("WorkingCopyService.commitDetail")((input) =>
       withRepository("workingCopy.commitDetail", input.cwd, (git) =>
         CommitDetail.readCommitDetail(git, input.hash),
       ),
-    commitFileDiff: (input) =>
+    ),
+    commitFileDiff: Effect.fn("WorkingCopyService.commitFileDiff")((input) =>
       withRepository("workingCopy.commitFileDiff", input.cwd, (git) =>
         Diff.readCommitFileDiff(git, input),
       ),
-    stashList: (input) =>
+    ),
+    stashList: Effect.fn("WorkingCopyService.stashList")((input) =>
       withRepository("workingCopy.stashList", input.cwd, (git) => Stash.readStashList(git)),
-    stashPush: (input) =>
+    ),
+    stashPush: Effect.fn("WorkingCopyService.stashPush")((input) =>
       runMutating("workingCopy.stashPush", input.cwd, (git) => Stash.stashPush(git, input)),
-    stashApply: (input) =>
+    ),
+    stashApply: Effect.fn("WorkingCopyService.stashApply")((input) =>
       runMutating("workingCopy.stashApply", input.cwd, (git) => Stash.stashApply(git, input)),
-    stashPop: (input) =>
+    ),
+    stashPop: Effect.fn("WorkingCopyService.stashPop")((input) =>
       runMutating("workingCopy.stashPop", input.cwd, (git) => Stash.stashPop(git, input)),
-    stashDrop: (input) =>
+    ),
+    stashDrop: Effect.fn("WorkingCopyService.stashDrop")((input) =>
       runMutating("workingCopy.stashDrop", input.cwd, (git) => Stash.stashDrop(git, input)),
-    resolveConflict: (input) =>
+    ),
+    resolveConflict: Effect.fn("WorkingCopyService.resolveConflict")((input) =>
       runMutating("workingCopy.resolveConflict", input.cwd, (git) =>
         Conflicts.resolveConflict(git, input),
       ),
-    abortOperation: (input) =>
+    ),
+    abortOperation: Effect.fn("WorkingCopyService.abortOperation")((input) =>
       runMutating("workingCopy.abortOperation", input.cwd, (git) =>
         Conflicts.abortOperation(git, input.operation),
       ),
-    cherryPick: (input) =>
+    ),
+    cherryPick: Effect.fn("WorkingCopyService.cherryPick")((input) =>
       runMutating("workingCopy.cherryPick", input.cwd, (git) =>
         HistoryActions.cherryPick(git, input.hash),
       ),
-    revertCommit: (input) =>
+    ),
+    revertCommit: Effect.fn("WorkingCopyService.revertCommit")((input) =>
       runMutating("workingCopy.revertCommit", input.cwd, (git) =>
         HistoryActions.revertCommit(git, input),
       ),
-    checkoutCommit: (input) =>
+    ),
+    checkoutCommit: Effect.fn("WorkingCopyService.checkoutCommit")((input) =>
       runMutating("workingCopy.checkoutCommit", input.cwd, (git) =>
         HistoryActions.checkoutCommit(git, input.hash),
       ),
-    resetToCommit: (input) =>
+    ),
+    resetToCommit: Effect.fn("WorkingCopyService.resetToCommit")((input) =>
       runMutating("workingCopy.resetToCommit", input.cwd, (git) =>
         HistoryActions.resetToCommit(git, input),
       ),
-    tagCommit: (input) =>
+    ),
+    tagCommit: Effect.fn("WorkingCopyService.tagCommit")((input) =>
       runMutating("workingCopy.tagCommit", input.cwd, (git) =>
         HistoryActions.tagCommit(git, input),
       ),
+    ),
   });
 });
 

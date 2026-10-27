@@ -1,6 +1,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import {
+  ChatFileAttachment,
   MessageId,
   NodeId,
   ProjectId,
@@ -14,6 +15,7 @@ import { resolveSelfInvocation } from "@t3tools/shared/nodeRuntime";
 import { htmlRenderFromToolItem } from "@t3tools/shared/toolOutput";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
@@ -27,7 +29,9 @@ import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as TestProviderHost from "@t3tools/provider-testing/TestProviderHost";
 import type * as AcpSessionRuntime from "@t3tools/provider-acp/server/AcpSessionRuntime";
+import { writeAntigravityClientTextFile } from "../../provider/acp/AntigravityClientFiles.ts";
 import { makeAntigravityAcpRuntime } from "../../provider/acp/AntigravityAcpSupport.ts";
+import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { normalizeAntigravitySessionUpdate } from "../../provider/acp/AntigravityProtocol.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
@@ -45,6 +49,7 @@ const flavor = makeAntigravityAcpAdapterFlavor({
   selfInvocation: undefined as never,
   makeRuntime: () => Effect.die("not spawned in this test"),
   withProcess: (_stop, task) => task,
+  // @effect-diagnostics-next-line effectSucceedWithVoid:off - This optional result requires undefined, not the wider void type.
   defaultModel: Effect.succeed(undefined),
 });
 
@@ -123,6 +128,30 @@ const layerSession = Layer.mergeAll(
 );
 
 describe("AntigravityAdapterV2 client file system", () => {
+  it.effect("rejects new nested files beneath an escaping symlink ancestor", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const workspace = yield* fileSystem
+        .makeTempDirectoryScoped({ prefix: "t3-ag-containment-" })
+        .pipe(Effect.flatMap((directory) => fileSystem.realPath(directory)));
+      const outside = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-ag-outside-" });
+      yield* fileSystem.symlink(outside, path.join(workspace, "linked"));
+      const result = yield* writeAntigravityClientTextFile({
+        fileSystem,
+        path,
+        allowedRoots: [workspace],
+        request: {
+          sessionId: "test-session",
+          path: path.join(workspace, "linked", "missing", "nested", "created.txt"),
+          content: "must not escape",
+        },
+      }).pipe(Effect.exit);
+      assert.isTrue(Exit.isFailure(result));
+      assert.isFalse(yield* fileSystem.exists(path.join(outside, "missing")));
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
+
   it.effect("confines agent file requests to the workspace under full access", () =>
     Effect.gen(function* () {
       const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
@@ -166,6 +195,7 @@ describe("AntigravityAdapterV2 client file system", () => {
             })),
           ),
         withProcess: (_stop, task) => task,
+        // @effect-diagnostics-next-line effectSucceedWithVoid:off - This optional result requires undefined, not the wider void type.
         defaultModel: Effect.succeed(undefined),
       });
       const workspace = yield* fileSystem.makeTempDirectoryScoped({
@@ -277,6 +307,20 @@ describe("AntigravityAdapterV2 workspace changes", () => {
         new URL("../../../scripts/acp-mock-agent.ts", import.meta.url),
       );
       type RuntimeService = AcpSessionRuntime.AcpSessionRuntime["Service"];
+      const promptReceived = yield* Deferred.make<Parameters<RuntimeService["prompt"]>[0]>();
+      const host = yield* ProviderHost.ProviderHost;
+      const document = ChatFileAttachment.make({
+        type: "file",
+        id: "native-pdf",
+        name: "diagram.pdf",
+        mimeType: "application/pdf",
+        sizeBytes: 9,
+      });
+      const documentPath = resolveAttachmentPath({
+        attachmentsDir: host.paths.attachmentsDir,
+        attachment: document,
+      })!;
+      yield* fileSystem.writeFileString(documentPath, "%PDF-1.7");
       let readTextFile: Parameters<RuntimeService["handleReadTextFile"]>[0] | undefined;
       const instanceId = ProviderInstanceId.make("antigravity-workspace-change-test");
       const adapter = yield* makeAntigravityAdapterV2({
@@ -296,6 +340,23 @@ describe("AntigravityAdapterV2 workspace changes", () => {
             Effect.provideService(Crypto.Crypto, crypto),
             Effect.map((runtime): RuntimeService => ({
               ...runtime,
+              prompt: (request) =>
+                Deferred.succeed(promptReceived, request).pipe(
+                  Effect.andThen(runtime.prompt(request)),
+                ),
+              start: () =>
+                runtime.start().pipe(
+                  Effect.map((started) => ({
+                    ...started,
+                    initializeResult: {
+                      ...started.initializeResult,
+                      agentCapabilities: {
+                        ...started.initializeResult.agentCapabilities,
+                        promptCapabilities: { image: true, audio: true, embeddedContext: true },
+                      },
+                    },
+                  })),
+                ),
               handleReadTextFile: (handler) =>
                 Effect.sync(() => {
                   readTextFile = handler;
@@ -303,6 +364,7 @@ describe("AntigravityAdapterV2 workspace changes", () => {
             })),
           ),
         withProcess: (_stop, task) => task,
+        // @effect-diagnostics-next-line effectSucceedWithVoid:off - This optional result requires undefined, not the wider void type.
         defaultModel: Effect.succeed(undefined),
       });
       const workspaceA = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-ag-a-" });
@@ -366,7 +428,7 @@ describe("AntigravityAdapterV2 workspace changes", () => {
             creationSource: "web",
             messageId: MessageId.make("message-antigravity-workspace-change"),
             text: "read b.txt",
-            attachments: [],
+            attachments: [document],
           },
           modelSelection,
           runtimePolicy: policyFor(workspaceB),
@@ -376,6 +438,19 @@ describe("AntigravityAdapterV2 workspace changes", () => {
         Stream.filter((event) => event.type === "provider_turn.updated"),
         Stream.runHead,
       );
+      const sent = yield* Deferred.await(promptReceived);
+      assert.deepEqual(
+        sent.prompt.filter((block) => block.type === "resource_link"),
+        [
+          {
+            type: "resource_link",
+            uri: (yield* path.toFileUrl(documentPath)).href,
+            name: "diagram.pdf",
+            mimeType: "application/pdf",
+          },
+        ],
+      );
+      assert.include(JSON.stringify(sent.prompt), host.resolveAttachmentPath(document)!);
       if (readTextFile === undefined) {
         return yield* Effect.die("Antigravity sessions must serve client file requests");
       }
@@ -539,6 +614,7 @@ describe("AntigravityAdapterV2 html_render pages", () => {
             })),
           ),
         withProcess: (_stop, task) => task,
+        // @effect-diagnostics-next-line effectSucceedWithVoid:off - This optional result requires undefined, not the wider void type.
         defaultModel: Effect.succeed(undefined),
       });
       const runtimePolicy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({

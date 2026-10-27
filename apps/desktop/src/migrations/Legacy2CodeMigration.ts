@@ -231,7 +231,7 @@ const readOptionalFile = (
   operation: Legacy2CodeMigrationError["operation"],
 ) =>
   fileSystem.readFileString(filePath).pipe(
-    Effect.map(Option.some),
+    Effect.asSome,
     Effect.catch((cause) =>
       cause.reason._tag === "NotFound"
         ? Effect.succeed(Option.none<string>())

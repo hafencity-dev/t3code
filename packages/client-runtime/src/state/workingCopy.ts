@@ -1,25 +1,8 @@
-/**
- * Atom families and commands for the source-control panel's `workingCopy.*`
- * RPCs.
- *
- * Every method is unary (there is no `subscribeWorkingCopy` — see
- * `build-log-f4-server.md` deviation 1), so this file holds no stream wiring and
- * `rpc/client.ts` needs no tag-union edit.
- *
- * Two shapes on purpose:
- *
- *  - **Reactive query atoms** for the things the panel keeps on screen
- *    (status, stashes, backups, the amend prefill). Those are refreshed by
- *    `invalidateWorkingCopy` after every mutation.
- *  - **Imperative reads** (`log`, `commitDetail`, `diff`, …) executed through
- *    `useAtomQueryRunner`, because their results are folded into client-owned
- *    paging/merge state rather than rendered straight from the atom.
- *
- * fork: f4 source-control panel
- */
+// Fork source-control queries use atoms for visible state and imperative reads
+// for history/diff results that clients merge into their own paging state.
 import { type EnvironmentId, type VcsInvalidationDomain, WS_METHODS } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
-import type { Atom } from "effect/reactivity";
+import type { Atom, AtomRegistry } from "effect/reactivity";
 
 import {
   createAtomCommandScheduler,
@@ -57,14 +40,8 @@ export {
  */
 export const workingCopyCommandScheduler = createAtomCommandScheduler();
 
-/**
- * fork: f4 AI commit message — a SEPARATE lane from the mutation scheduler.
- *
- * Generation is a read that can take tens of seconds. Putting it on
- * `workingCopyCommandScheduler` would make a staging press queue behind a model
- * call in the same repository, which is exactly the freeze the server-side
- * semaphore split avoids.
- */
+// Fork AI commit generation is a slow read; sharing the mutation lane would
+// block staging behind a model call.
 export const workingCopyGenerationScheduler = createAtomCommandScheduler();
 
 export const workingCopyCommandConcurrency: AtomCommandConcurrency<{
@@ -162,16 +139,8 @@ export function createWorkingCopyEnvironmentAtoms<R, E>(
   // it through one narrow local assertion instead of widening the helper.
   const cwdOf = (input: unknown): string => (input as { readonly cwd: string }).cwd;
 
-  /**
-   * fork: f4 invalidation Gap B — the mutations that MOVE OR CREATE A REF also
-   * invalidate the cached ref list, exactly like every upstream `vcs.*` command
-   * does (`vcs.ts` passes `invalidateRefs` on all of them).
-   *
-   * Without it, a tag created from the History context menu, a commit, an amend
-   * or a checkout landed on disk but the branch/tag pickers elsewhere in the
-   * app kept showing the pre-mutation list until something else happened to
-   * refresh it.
-   */
+  // Fork mutations that move or create refs must also refresh cached branch/tag
+  // pickers, matching upstream vcs commands.
   const mutation = <TTag extends EnvironmentUnaryRpcTag>(
     label: string,
     tag: TTag,
@@ -190,33 +159,36 @@ export function createWorkingCopyEnvironmentAtoms<R, E>(
           readonly input: EnvironmentRpcInput<TTag>;
         }) => JSON.stringify([environmentId, cwdOf(input)]),
       },
-      execute: (input: EnvironmentRpcInput<TTag>, registry, environmentId) =>
-        Effect.gen(function* () {
-          const scope = { environmentId, cwd: cwdOf(input) };
-          const observedBefore = registry.get(repositoryObservationAtom(scope));
-          return yield* requestGuarded(tag, input).pipe(
-            Effect.ensuring(
-              Effect.suspend(() => {
-                // A revision-aware server pushes for every settled mutation, so
-                // the client never re-reads on its own. The fallback stays for
-                // old servers, unless one of their frames already carried a
-                // revision for this exact target while the RPC was in flight.
-                if (serverPushesRevisions(options.capabilities, registry, environmentId)) {
-                  return Effect.void;
-                }
-                const observedAfter = registry.get(repositoryObservationAtom(scope));
-                if (observedAfter !== observedBefore && observedAfter?.token !== undefined) {
-                  return Effect.void;
-                }
-                return invalidateRepository(
-                  registry,
-                  scope,
-                  mutationOptions?.movesRefs ? ALL_REPOSITORY_DOMAINS : ["worktree", "stashes"],
-                );
-              }),
-            ),
-          );
-        }),
+      execute: Effect.fn("workingCopy.mutate")(function* (
+        input: EnvironmentRpcInput<TTag>,
+        registry: AtomRegistry.AtomRegistry,
+        environmentId: EnvironmentId,
+      ) {
+        const scope = { environmentId, cwd: cwdOf(input) };
+        const observedBefore = registry.get(repositoryObservationAtom(scope));
+        return yield* requestGuarded(tag, input).pipe(
+          Effect.ensuring(
+            Effect.suspend(() => {
+              // A revision-aware server pushes for every settled mutation, so
+              // the client never re-reads on its own. The fallback stays for
+              // old servers, unless one of their frames already carried a
+              // revision for this exact target while the RPC was in flight.
+              if (serverPushesRevisions(options.capabilities, registry, environmentId)) {
+                return Effect.void;
+              }
+              const observedAfter = registry.get(repositoryObservationAtom(scope));
+              if (observedAfter !== observedBefore && observedAfter?.token !== undefined) {
+                return Effect.void;
+              }
+              return invalidateRepository(
+                registry,
+                scope,
+                mutationOptions?.movesRefs ? ALL_REPOSITORY_DOMAINS : ["worktree", "stashes"],
+              );
+            }),
+          ),
+        );
+      }),
     });
 
   /**

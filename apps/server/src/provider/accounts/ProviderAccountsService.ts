@@ -1034,9 +1034,7 @@ const make = Effect.fn("ProviderAccountsService.make")(function* (
     const candidate = refreshed.find((provider) => provider.instanceId === instanceId);
     const snapshot = ownSnapshot(entry, candidate);
     if (!snapshot || snapshot.auth.status !== "authenticated" || !snapshot.usageLimits)
-      return yield* Effect.fail(
-        new ProviderAccountError({ message: "Could not verify active account usage." }),
-      );
+      return yield* new ProviderAccountError({ message: "Could not verify active account usage." });
     if (
       entry.driver === "claudeAgent" &&
       !snapshot.usageLimits.unavailable &&
@@ -1418,7 +1416,14 @@ const make = Effect.fn("ProviderAccountsService.make")(function* (
   const startLogin = (owner: string, input: ProviderAccountsStartLoginInput) =>
     Stream.callback<ProviderAccountLoginEvent, ProviderAccountError>((queue) =>
       Effect.gen(function* () {
-        const abort = new AbortController();
+        let pendingLogin: Promise<void> | undefined;
+        // Scope finalizers run in reverse order: abort first, then await native cleanup.
+        yield* Effect.addFinalizer(() =>
+          Effect.promise(async () => {
+            await pendingLogin?.catch(() => {});
+          }),
+        );
+        const signal = yield* Effect.abortSignal;
         const callbackContext = yield* Effect.context<never>();
         const runFork = Effect.runForkWith(callbackContext);
         const promise = login.start(
@@ -1431,14 +1436,9 @@ const make = Effect.fn("ProviderAccountsService.make")(function* (
                 : event;
             runFork(Queue.offer(queue, typed));
           },
-          abort.signal,
+          signal,
         );
-        yield* Effect.addFinalizer(() =>
-          Effect.promise(async () => {
-            abort.abort();
-            await promise.catch(() => {});
-          }),
-        );
+        pendingLogin = promise;
         yield* interruptibleIo(() => promise).pipe(
           Effect.catch(() =>
             Queue.offer(queue, {

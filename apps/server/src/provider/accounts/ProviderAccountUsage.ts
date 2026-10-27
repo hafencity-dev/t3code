@@ -59,32 +59,40 @@ export const probeAccountUsage = Effect.fn("providerAccounts.probeUsage")(functi
       environment,
     );
     const managedMcpConfig = yield* hasClaudeManagedMcpConfig();
-    const abort = new AbortController();
-    const result = yield* Effect.tryPromise(async () => {
-      const q = claudeQuery({
-        // oxlint-disable-next-line require-yield -- Keep the SDK input open without sending a user message during the usage probe.
-        prompt: (async function* (): AsyncGenerator<SDKUserMessage> {
-          await new Promise<void>((resolve) => {
-            if (abort.signal.aborted) resolve();
-            else abort.signal.addEventListener("abort", () => resolve(), { once: true });
-          });
-        })(),
-        options: buildClaudeCapabilitiesProbeQueryOptions({
-          executablePath,
-          abortController: abort,
-          environment,
-          cwd: input.cwd,
-          managedMcpConfig,
-        }),
-      });
-      const init = await q.initializationResult();
-      const account = init.account;
-      if (!account?.email && !account?.tokenSource && !account?.subscriptionType) return undefined;
-      const usage = await q.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET({
-        skipBehaviors: true,
-      });
-      return { ...account, usage };
-    }).pipe(Effect.ensuring(Effect.sync(() => abort.abort())));
+    const result = yield* Effect.tryPromise(async (signal) => {
+      const abort = new AbortController();
+      const cancel = () => abort.abort();
+      signal.addEventListener("abort", cancel, { once: true });
+      try {
+        const q = claudeQuery({
+          // oxlint-disable-next-line require-yield -- Keep the SDK input open without sending a user message during the usage probe.
+          prompt: (async function* (): AsyncGenerator<SDKUserMessage> {
+            await new Promise<void>((resolve) => {
+              if (abort.signal.aborted) resolve();
+              else abort.signal.addEventListener("abort", () => resolve(), { once: true });
+            });
+          })(),
+          options: buildClaudeCapabilitiesProbeQueryOptions({
+            executablePath,
+            abortController: abort,
+            environment,
+            cwd: input.cwd,
+            managedMcpConfig,
+          }),
+        });
+        const init = await q.initializationResult();
+        const account = init.account;
+        if (!account?.email && !account?.tokenSource && !account?.subscriptionType)
+          return undefined;
+        const usage = await q.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET({
+          skipBehaviors: true,
+        });
+        return { ...account, usage };
+      } finally {
+        signal.removeEventListener("abort", cancel);
+        abort.abort();
+      }
+    });
     if (!result) return { checkedAt, status: "signedOut" } satisfies AccountUsage;
     const plan = claudeAuthMetadata({
       subscriptionType: result.subscriptionType,
@@ -252,14 +260,12 @@ export const makeAccountUsageCache = <E, R>(dependencies: {
           return yield* dependencies.probe(input.id).pipe(Effect.timeout(20_000));
         }).pipe(
           permits.withPermit,
-          Effect.flatMap((value) =>
-            value.usage?.unavailable?.reason === "probeFailed"
-              ? Effect.fail(
-                  new ProviderAccountError({
-                    message: value.usage.unavailable.message ?? "Usage probe failed",
-                  }),
-                )
-              : Effect.succeed(value),
+          Effect.filterOrFail(
+            (value) => value.usage?.unavailable?.reason !== "probeFailed",
+            (value) =>
+              new ProviderAccountError({
+                message: value.usage?.unavailable?.message ?? "Usage probe failed",
+              }),
           ),
           Effect.map((value): AccountUsage => {
             const { lastFailureKind: _discard, ...measurement } = value;

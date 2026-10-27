@@ -221,7 +221,10 @@ export class VcsStatusBroadcaster extends Context.Service<
       cwd: string,
       domains?: ReadonlyArray<VcsInvalidationDomain>,
     ) => Effect.Effect<void>;
-    readonly refreshStatus: (cwd: string) => Effect.Effect<VcsStatusResult, GitManagerServiceError>;
+    readonly refreshStatus: (
+      cwd: string,
+      options?: { readonly localOnly?: boolean },
+    ) => Effect.Effect<VcsStatusResult, GitManagerServiceError>;
     readonly refreshPullRequestStatus: (
       cwd: string,
     ) => Effect.Effect<VcsStatusRemoteResult | null, GitManagerServiceError>;
@@ -256,7 +259,7 @@ const normalizeCwd = (cwd: string) =>
   resolveRepositoryInvalidationScope(cwd).pipe(Effect.map((scope) => scope.root));
 const ALL_REPOSITORY_DOMAINS = ["worktree", "refs", "stashes"] as const;
 
-/** @public Service construction is part of the canonical Effect module API. */
+/** @public */
 export const make = Effect.gen(function* () {
   const automaticFetchInterval = yield* VcsAutomaticFetchInterval;
   const autoPullPolicy = yield* VcsAutoPullPolicy;
@@ -280,7 +283,7 @@ export const make = Effect.gen(function* () {
     return revision(cwd);
   };
   // One permit per cwd for remote reads that write the cache. Without it a
-  // periodic poll that started before `gh pr create` can finish after the
+  // periodic poll that started before an agent creates a PR can finish after the
   // turn-end refresh and overwrite the fresh PR with its stale `pr: null`.
   const remoteWriteLocks = yield* KeyedLock.make<string>();
   const withRemoteWriteLock = <A, E, R>(cwd: string, effect: Effect.Effect<A, E, R>) =>
@@ -524,7 +527,7 @@ export const make = Effect.gen(function* () {
                 const cached = yield* getCachedStatus(cwd);
                 if (mutationDomains !== undefined && cached?.local) return cached.local.value;
                 if (mutationDomains !== undefined) advanceRevision(cwd);
-                return yield* Effect.fail(error);
+                return yield* error;
               }),
             ),
           );
@@ -647,8 +650,7 @@ export const make = Effect.gen(function* () {
             errorTag: error._tag,
           });
           if (!pullAttempted) return null;
-          // A pull or its follow-up reads can fail after local state has changed.
-          // Let a failed reconciliation reach the caller instead of publishing old status.
+          // Pull can change local state before failing; propagate reconciliation failures instead of publishing stale status.
           const expectedCounter = revision(cwd).counter;
           yield* workflow.invalidateLocalStatus(cwd);
           const local = yield* workflow.localStatus({ cwd });
@@ -701,10 +703,30 @@ export const make = Effect.gen(function* () {
 
   const refreshStatus: VcsStatusBroadcaster["Service"]["refreshStatus"] = Effect.fn(
     "VcsStatusBroadcaster.refreshStatus",
-  )(function* (rawCwd) {
+  )(function* (rawCwd, options) {
     const cwd = yield* withFileSystem(normalizeCwd(rawCwd));
-    // invalidateStatus (not the two partial invalidations) so an explicit
-    // refresh also bypasses GitManager's slow PR-lookup cache.
+    if (options?.localOnly) {
+      return yield* withRemoteWriteLock(
+        cwd,
+        Effect.gen(function* () {
+          const expectedCounter = revision(cwd).counter;
+          yield* workflow.invalidateLocalStatus(cwd);
+          const local = yield* workflow.localStatus({ cwd });
+          const previous = yield* getCachedStatus(cwd);
+          // fork: preserve the mutation's newer frame when this local read raced it.
+          if (revision(cwd).counter !== expectedCounter && previous?.local) {
+            return mergeGitStatusParts(previous.local.value, previous.remote?.value ?? null);
+          }
+          if (previous?.local?.value.refName !== local.refName) {
+            yield* workflow.invalidateRemoteStatus(cwd);
+            return yield* updateCachedStatus(cwd, local, null, { publish: true, expectedCounter });
+          }
+          yield* updateCachedLocalStatus(cwd, local, { publish: true });
+          return mergeGitStatusParts(local, previous?.remote?.value ?? null);
+        }),
+      );
+    }
+    // Full invalidation also bypasses GitManager's slow PR cache.
     return yield* withRemoteWriteLock(
       cwd,
       Effect.gen(function* () {
@@ -739,8 +761,7 @@ export const make = Effect.gen(function* () {
             { concurrency: "unbounded" },
           )).some(Boolean);
           if (!shouldRefresh) return null;
-          // Resolve the checked-out branch again. A cached PR can belong to
-          // the previous branch after an agent checks out another branch.
+          // Re-resolve the branch; cached PRs may belong to a checkout's previous branch.
           const remote = yield* workflow.remoteStatus(
             { cwd },
             { refreshUpstream: false, refreshMissingPullRequest: true },
@@ -768,9 +789,9 @@ export const make = Effect.gen(function* () {
           ? DEFAULT_AUTOMATIC_GIT_FETCH_INTERVAL
           : configuredInterval;
         const nextDelay = (yield* Ref.get(nextDelayRef)) ?? activeInterval;
-        const refreshRequested = yield* Effect.raceFirst(
-          Effect.sleep(nextDelay).pipe(Effect.as(false)),
-          Queue.take(refreshRequests).pipe(Effect.as(true)),
+        const refreshRequested = yield* Queue.take(refreshRequests).pipe(
+          Effect.as(true),
+          Effect.timeoutOrElse({ duration: nextDelay, orElse: () => Effect.succeed(false) }),
         );
         const refreshRequired = refreshRequested || (yield* Ref.get(refreshRequiredRef));
 

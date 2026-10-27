@@ -1058,6 +1058,36 @@ describe("ProviderAccountsService", () => {
     );
   });
 
+  it.effect("closing a login stream aborts and awaits native login cleanup", () => {
+    let cleaned = false;
+    return run(
+      Effect.gen(function* () {
+        const service = yield* ProviderAccountsService;
+        const events = yield* service
+          .startLogin("test-owner", { driver: "codex" })
+          .pipe(Stream.take(1), Stream.runCollect, Effect.scoped);
+        expect(events[0]?._tag).toBe("verifying");
+        expect(cleaned).toBe(true);
+      }),
+      false,
+      {
+        login: (options) => {
+          const login = new ProviderAccountLogin(options);
+          vi.spyOn(login, "start").mockImplementation(async (_owner, _input, emit, signal) => {
+            emit({ _tag: "verifying" });
+            await new Promise<void>((resolve) => {
+              if (signal?.aborted) resolve();
+              else signal?.addEventListener("abort", () => resolve(), { once: true });
+            });
+            await Promise.resolve();
+            cleaned = true;
+          });
+          return login;
+        },
+      },
+    );
+  });
+
   it.effect("cancelling a pending managed re-login removes its home and registry entry", () => {
     let callbacks: ProviderAccountLoginOptions;
     return run(

@@ -444,7 +444,7 @@ export const makeProviderAccountAutoSwitch = Effect.fn("makeProviderAccountAutoS
       // skipped (gated, stale) measured nothing, so its retained data must not look fresh.
       const measured = yield* deps
         .refresh(ids)
-        .pipe(Effect.catch(() => Effect.succeed<ReadonlyArray<ProviderAccountId>>([])));
+        .pipe(Effect.orElseSucceed((): ReadonlyArray<ProviderAccountId> => []));
       for (const id of ids) if (!measured.includes(id)) failed.add(id);
     }
   });
