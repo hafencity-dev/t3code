@@ -9,7 +9,10 @@ import * as NodeChildProcess from "node:child_process";
 import * as NodeCrypto from "node:crypto";
 
 import { PNG } from "pngjs";
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as Effect from "effect/Effect";
 
+import { verifyPackagedBundleIsSelfContained } from "../../build-desktop-artifact.ts";
 import { TWO_CODE_PRODUCTION_PROFILE } from "../2code-desktop-distribution.ts";
 import { withAppleNetworkRetry } from "./apple-network-retry.ts";
 import { verifyAppUpdateConfiguration } from "./app-update-config.ts";
@@ -287,6 +290,12 @@ async function main(): Promise<void> {
     const metadataDirectory = NodePath.join(temporaryDirectory, "asar-metadata");
     await NodeFSP.mkdir(metadataDirectory);
     const asarArchive = NodePath.join(appPath, "Contents", "Resources", "app.asar");
+    await Effect.runPromise(
+      verifyPackagedBundleIsSelfContained({ asarPath: asarArchive, verbose: false }).pipe(
+        Effect.scoped,
+        Effect.provide(NodeServices.layer),
+      ),
+    );
     const asarResult = NodeChildProcess.spawnSync(
       process.execPath,
       [asarCli, "extract-file", asarArchive, "package.json"],

@@ -6,6 +6,10 @@ import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as Effect from "effect/Effect";
+
+import { verifyPackagedBundleIsSelfContained } from "../../build-desktop-artifact.ts";
 import { verifyAppUpdateConfiguration } from "./app-update-config.ts";
 import {
   digestFile,
@@ -154,7 +158,12 @@ async function main(): Promise<void> {
       config,
       await NodeFSP.readFile(NodePath.join(root, "resources", "app-update.yml"), "utf8"),
     );
-    await NodeFSP.access(NodePath.join(root, "resources", "app.asar"));
+    await Effect.runPromise(
+      verifyPackagedBundleIsSelfContained({
+        asarPath: NodePath.join(root, "resources", "app.asar"),
+        verbose: false,
+      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+    );
     verifyPngSignature(
       await readFileHeader(NodePath.join(root, `${config.productName}.png`), 8),
       `${config.productName}.png`,

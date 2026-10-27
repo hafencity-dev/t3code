@@ -73,6 +73,22 @@ const decodePackageVersion = Schema.decodeUnknownEffect(
   Schema.fromJsonString(Schema.Struct({ version: Schema.String })),
 );
 
+const decodeRuntimeServerManifest = Schema.decodeEffect(
+  Schema.fromJsonString(
+    Schema.Struct({ dependencies: Schema.Record(Schema.String, Schema.String) }),
+  ),
+);
+const decodeRuntimeCursorManifest = Schema.decodeEffect(
+  Schema.fromJsonString(
+    Schema.Struct({
+      peerDependencies: Schema.Record(Schema.String, Schema.String),
+      peerDependenciesMeta: Schema.optional(
+        Schema.Record(Schema.String, Schema.Struct({ optional: Schema.optional(Schema.Boolean) })),
+      ),
+    }),
+  ),
+);
+
 // Keeps pnpm from auto-installing TypeScript, a types-only peer, into the app.
 
 const makeLinuxCliArchiveFixture = Effect.fn("test.makeLinuxCliArchiveFixture")(function* (input: {
@@ -588,6 +604,32 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       },
     );
   });
+
+  it.effect("keeps Cursor's required runtime peers in the packaged dependency roots", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const serverRoot = path.join(import.meta.dirname, "../apps/server");
+      const server = yield* decodeRuntimeServerManifest(
+        yield* fs.readFileString(path.join(serverRoot, "package.json")),
+      );
+      const cursor = yield* decodeRuntimeCursorManifest(
+        yield* fs.readFileString(path.join(serverRoot, "node_modules/@cursor/sdk/package.json")),
+      );
+      const staged = resolveMergedStageDependencies({
+        platform: "mac",
+        serverDependencies: server.dependencies,
+        desktopDependencies: {},
+        arch: "arm64",
+        fffNodeVersion: server.dependencies["@ff-labs/fff-node"]!,
+      });
+      for (const peer of Object.keys(cursor.peerDependencies)) {
+        if (cursor.peerDependenciesMeta?.[peer]?.optional) continue;
+        // electron-builder does not include pnpm's auto-installed peers unless they are package roots.
+        assert.property(staged, peer, `Cursor requires the packaged runtime peer ${peer}`);
+      }
+    }),
+  );
 
   it.effect("ships Cursor platform assets outside asar for spawning and native loading", () =>
     Effect.scoped(
