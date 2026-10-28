@@ -1,20 +1,4 @@
-/**
- * `name` + its directory, on one line, with the directory truncated from the
- * LEFT.
- *
- * fork: f4 redesign (audit §8 / M21) — every path label in the panel used to
- * truncate from the right, so
- * `apps/web/src/components/sourceControl/ChangeRow.tsx` in a 360px panel read
- * `ChangeRow.tsx apps/web/src/comp…`: the tail of the directory — the only part
- * that tells two `index.ts`s apart — was exactly what got cut.
- *
- * The mechanism: the clipping box is `direction: rtl` so the ellipsis lands at
- * the start, and the text itself is wrapped in a `<bdi dir="ltr">` so the bidi
- * algorithm keeps the path in reading order inside it. Both halves are needed —
- * rtl alone reorders the leading/trailing slashes.
- *
- * fork: f4 source-control panel
- */
+// RTL clipping preserves the directory tail; inner LTR isolation keeps slashes in reading order.
 import { cn } from "~/lib/utils";
 
 export function PathLabel(props: {

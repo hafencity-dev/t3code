@@ -1,20 +1,4 @@
-/**
- * The virtualized changes list.
- *
- * Three invariants, all of which exist because they are cheap to state and
- * expensive to rediscover:
- *
- *  1. `buildChangesRows` is the ONLY row order. The virtualizer, the keyboard,
- *     shift-range selection and the sticky header all index that one array.
- *  2. `changesRowHeight` is the ONLY height source, and it is handed to the
- *     virtualizer as a fixed size rather than measured — the rendered rows set
- *     the same constant explicitly, so the two cannot drift.
- *  3. The sticky group header is an always-mounted overlay, never
- *     `position: sticky`: a windowed row unmounts as it leaves the viewport and
- *     takes its sticky positioning with it.
- *
- * fork: f4 source-control panel
- */
+// Virtualization, keyboard selection, and sticky headers share one row order and fixed height table.
 import { LegendList, type LegendListRef } from "@legendapp/list/react";
 import { ChevronDown, ChevronRight, Folder, Loader2, Minus, Plus, Undo2 } from "lucide-react";
 import { useRef, useState } from "react";
@@ -193,13 +177,7 @@ export function ChangesList(props: ChangesListProps) {
       ? null
       : (rows.find((row) => row.kind === "header" && row.group === pinnedGroup) ?? null);
 
-  /**
-   * fork: f4 focus model — DOM focus must actually be inside the listbox, or
-   * `s`/`j`/`u`/`x` land in whatever had focus before (the chat composer) and
-   * type themselves into it. Selecting a row is therefore always accompanied by
-   * a real `focus()` on the container, and the container carries
-   * `aria-activedescendant` so the focused row is announced.
-   */
+  // Keep DOM focus in the list so selection shortcuts cannot type into the chat composer.
   const takeFocus = () => {
     const container = containerRef.current;
     if (container === null) return;
@@ -615,7 +593,7 @@ function HeaderAction(props: {
       />
       {/* fork: f4 redesign (M18) — one tooltip system in the list, not a mix of
           `title=` on headers and `Tooltip` on rows. */}
-      <TooltipPopup>{props.busy === true ? `${props.label} — working…` : props.label}</TooltipPopup>
+      <TooltipPopup>{props.busy === true ? `${props.label}: working…` : props.label}</TooltipPopup>
     </Tooltip>
   );
 }

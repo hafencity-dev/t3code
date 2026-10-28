@@ -44,6 +44,7 @@ function AutoSwitchSubscription({
   onEvent: (environmentId: EnvironmentId, event: ProviderAccountAutoSwitchEvent) => void;
 }) {
   const registry = useContext(RegistryContext);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Subscribe to the server auto-switch stream only while this device is connected.
   useEffect(
     () =>
       // No `immediate`: replaying the cached last event on remount would toast it again.

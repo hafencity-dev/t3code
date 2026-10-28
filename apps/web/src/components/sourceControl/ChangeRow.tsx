@@ -1,24 +1,4 @@
-/**
- * One file row in the changes list.
- *
- * The row's pitch is NOT decided here: it is `CHANGES_ROW_HEIGHT.file` (plus
- * the conflict bar when present), applied as an explicit height so the rendered
- * pitch and the pitch the virtualizer assumed cannot drift. A wrong pitch
- * drifts the window silently, which is the worst kind of layout bug.
- *
- * fork: f4 redesign — three structural changes here:
- *
- *  1. ONE gutter. The left inset is `changesRowIndent(depth)`, the same
- *     12 + 12·depth every other row, header and band in the panel uses.
- *  2. Actions overlay the trailing metadata instead of permanently taxing
- *     every filename by 24–48px. The overlay is always mounted and only changes
- *     opacity, so hover never shifts the row.
- *  3. House primitives. `Button size="icon-xs"` brings the focus ring, the 44px
- *     `pointer-coarse` target and `disabled:opacity-64`; `DiffStatLabel` brings
- *     the fixed `4ch_4ch` grid that stops the right edge from jittering.
- *
- * fork: f4 source-control panel
- */
+// Explicit row heights must match the virtualizer to prevent scroll-window drift.
 import { FileIcon, Loader2, Minus, Plus, Undo2 } from "lucide-react";
 
 import { CHANGES_ROW_HEIGHT, CONFLICT_ACTIONS_HEIGHT } from "~/lib/sourceControl/changesRows";
@@ -264,7 +244,7 @@ function RowAction(props: {
           </Button>
         }
       />
-      <TooltipPopup>{props.busy ? `${props.label} — working…` : props.label}</TooltipPopup>
+      <TooltipPopup>{props.busy ? `${props.label}: working…` : props.label}</TooltipPopup>
     </Tooltip>
   );
 }

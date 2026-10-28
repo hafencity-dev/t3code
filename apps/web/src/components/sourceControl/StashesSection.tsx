@@ -1,21 +1,4 @@
-/**
- * Stashes + the panel's own discard backups.
- *
- * fork: f4 redesign (audit §8) — this used to be a permanently mounted 32px
- * strip pinned under the changes list, taxing every session with chrome for a
- * recovery surface used a few times a month, and competing for the bottom edge
- * the composer now owns. It is content only: the panel mounts it inside a
- * `Dialog` opened from the header's overflow menu.
- *
- * The list itself is still load-on-expand for backups and never polled: a stash
- * list costs a subprocess and nothing about it changes while the dialog is shut.
- *
- * The "Recent backups" group is what makes discard undoable after the toast has
- * gone — it is the same `stash@{n}` list filtered to the fork's own prefixed
- * entries (`isDiscardBackup`).
- *
- * fork: f4 source-control panel
- */
+// Backups load only while expanded; listing them starts a Git subprocess.
 import type { WorkingCopyStashEntry } from "@t3tools/contracts";
 import { Archive } from "lucide-react";
 

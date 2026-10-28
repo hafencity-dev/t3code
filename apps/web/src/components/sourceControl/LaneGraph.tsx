@@ -1,13 +1,4 @@
-/**
- * The per-row slice of the commit lane graph.
- *
- * The graph itself is folded once, over the FULL contiguous newest-first entry
- * array, by `buildLaneGraph`; this component only draws the node it is handed.
- * Folding per visible window would silently produce a different — wrong — graph,
- * which is why the node arrives as a prop rather than being derived here.
- *
- * fork: f4 source-control panel
- */
+// Nodes come from the full contiguous history; folding only visible rows would change the graph.
 
 import type { LaneNode } from "~/lib/sourceControl/laneGraph";
 

@@ -16,7 +16,6 @@ import {
   createEnvironmentRpcCommand,
   createEnvironmentRpcQueryAtomFamily,
   createEnvironmentSubscriptionAtomFamily,
-  environmentRpcKey,
   runStreamInEnvironment,
 } from "./runtime.ts";
 
@@ -144,7 +143,7 @@ export function createProviderAccountsEnvironmentAtoms<R, E>(
     loginEvents: (target: {
       readonly environmentId: EnvironmentId;
       readonly input: ProviderAccountLoginRequest;
-    }) => loginEventsFamily(environmentRpcKey(target)),
+    }) => loginEventsFamily(JSON.stringify([target.environmentId, target.input])),
     refreshUsage: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:provider-accounts:refresh-usage",
       tag: WS_METHODS.providerAccountsRefreshUsage,

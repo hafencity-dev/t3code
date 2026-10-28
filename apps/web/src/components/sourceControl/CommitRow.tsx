@@ -1,17 +1,4 @@
-/**
- * One commit in the history list.
- *
- * The lane node is a prop, not a derivation — see `LaneGraph.tsx`. The row's
- * height comes from `historyCommitRowHeight(density, width)` and is applied
- * explicitly so the rendered pitch equals the pitch the virtualizer assumed.
- *
- * fork: f4 redesign (audit §8 E) — the `⋯` menu used to be `hidden
- * group-hover:flex`, i.e. absent from the DOM and from the a11y tree until a
- * mouse arrived, which on a touch device meant the entire per-commit action set
- * did not exist. It is mounted always now and only its opacity changes.
- *
- * fork: f4 source-control panel
- */
+// Explicit row height must match virtualization; mounted menu controls remain accessible on touch.
 import type { WorkingCopyLogEntry } from "@t3tools/contracts";
 
 import {

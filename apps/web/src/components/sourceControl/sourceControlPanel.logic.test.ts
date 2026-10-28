@@ -186,7 +186,7 @@ describe("sourceControlPrimarySlot", () => {
     expect(sourceControlPrimarySlot({ ...base, syncEmphasis: true })).toBe("sync");
   });
 
-  it("gives the slot to Commit over Sync — Publish and Commit were both primary", () => {
+  it("gives the slot to Commit over Sync: Publish and Commit were both primary", () => {
     expect(sourceControlPrimarySlot({ ...base, commitEnabled: true, syncEmphasis: true })).toBe(
       "commit",
     );
@@ -514,7 +514,7 @@ describe("isNothingStagedError", () => {
 // mapped `[]` onto `actions.discard(null)` — discard the ENTIRE working copy.
 
 describe("changesListActionPaths (F-08)", () => {
-  it("resolves an empty selection to null — do nothing", () => {
+  it("resolves an empty selection to null: do nothing", () => {
     expect(changesListActionPaths([])).toBeNull();
   });
 

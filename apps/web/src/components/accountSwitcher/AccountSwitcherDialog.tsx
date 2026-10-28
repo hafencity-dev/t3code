@@ -147,6 +147,7 @@ export function AccountSwitcherDialog({
           .filter((account) => !account.active && account.status === "ready" && !account.usage)
           .map((account) => account.id)
           .join();
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Refresh remote usage when the dialog mounts or an unmeasured account becomes ready.
   useEffect(() => {
     if (openTrigger !== null) autoRefresh(Date.now());
   }, [openTrigger]);
@@ -172,6 +173,7 @@ export function AccountSwitcherDialog({
       }).finally(() => track(account.id, false));
     }
   });
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Request a new server measurement when an active quota window resets.
   useEffect(() => {
     if (activeResetTrigger) refreshActiveResets();
   }, [activeResetTrigger]);
@@ -180,6 +182,7 @@ export function AccountSwitcherDialog({
     .map((account) => account.usageRefresh?.nextAllowedAt)
     .filter((at): at is string => at !== undefined)
     .join();
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Maintain the timer for quota labels, server backoff expiry, and remote usage refreshes while open.
   useEffect(() => {
     // One clock timer: minute ticks drive labels and the background refresh; an earlier
     // tick is inserted only when a manual refresh cooldown expires.

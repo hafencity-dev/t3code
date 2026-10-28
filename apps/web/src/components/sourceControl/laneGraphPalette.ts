@@ -1,18 +1,4 @@
-/**
- * The lane palette for the history graph.
- *
- * `laneGraph.ts` deliberately emits a `colorIndex` rather than a colour: a pure
- * module has no business owning design tokens. This file is the other half of
- * that contract and the ONLY place a lane colour is decided.
- *
- * t3 has no chart-token scale, so the eight hues are declared here as OKLCH at
- * one lightness/chroma pair chosen to stay legible on both the light and the
- * dark background — a lane graph that needs a theme-conditional palette would
- * need a theme-conditional `colorIndex`, and the fold that produces it runs
- * nowhere near the theme.
- *
- * fork: f4 source-control panel
- */
+// The theme-independent graph emits color indices; these hues must remain legible in both themes.
 import { LANE_COLOR_COUNT, LANE_COLOR_INDEX_NONE } from "~/lib/sourceControl/laneGraph";
 
 /**

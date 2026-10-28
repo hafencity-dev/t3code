@@ -117,7 +117,7 @@ export function operationGuidance(operation: WorkingCopyOperation): OperationGui
     title: `${label} in progress`,
     continueLabel: "Continue",
     canContinueInPanel: false,
-    terminalHint: `Conflicts resolved — stage them, then run \`git ${operation} --continue\` in the terminal.`,
+    terminalHint: `Conflicts resolved: stage them, then run \`git ${operation} --continue\` in the terminal.`,
   };
 }
 
@@ -135,16 +135,6 @@ export function historyWidthBucket(width: number): HistoryWidth {
   return "xl";
 }
 
-/**
- * fork: f4 redesign (audit §8 / M15) — every field here is something the commit
- * row can actually draw.
- *
- * The table used to promise `diffstat` and `refBadges`, and `WorkingCopyLogEntry`
- * carries neither insertions/deletions nor refs, so widening the panel from
- * 380px to 560px bought the author name and nothing else while the table
- * claimed otherwise. The date rung replaces them: it is real, it is the thing a
- * wider row genuinely has room for, and it keeps the ladder monotonic.
- */
 export type HistoryRowDate = "none" | "relative" | "day" | "dayTime";
 
 export interface HistoryRowElements {
@@ -191,20 +181,7 @@ export function historyRowElements(width: HistoryWidth): HistoryRowElements {
 
 // ─── One primary action per state ───────────────────────────────────────────
 
-/**
- * fork: f4 redesign (audit §8 / live-findings) — which control owns the panel's
- * single full-strength primary slot.
- *
- * The live session found `Publish` (header) and `Commit` (composer) both
- * rendering `variant="default"` in one 540px panel, with `Continue` in the
- * conflicts band able to make a third. A panel that shouts three times says
- * nothing, so exactly one control is `default` at a time and the others step
- * down — without ever disappearing, because a control that vanishes moves the
- * next one under the cursor mid-click.
- *
- * The order is the order of obligation: finish the blocked merge, then commit
- * what is staged, then get it to the remote.
- */
+// One primary action: resolve a blocked operation, then commit, then publish.
 export type SourceControlPrimarySlot = "continue" | "commit" | "sync" | "none";
 
 export interface SourceControlPrimaryInput {
@@ -250,13 +227,7 @@ export function sourceControlPrimaryVariant(
 
 // ─── Staging selections ─────────────────────────────────────────────────────
 
-/**
- * fork: f4 — the wire spelling of "stage/unstage everything".
- * `WorkingCopyPathsInput` documents an empty `paths` array as "everything", and
- * the server runs one pathless `add -A` / `reset HEAD` for it. Named so the
- * commit-all rung cannot be mistaken for an accidental no-op call and "fixed"
- * into one.
- */
+// The wire contract uses an empty paths array for an explicit whole-worktree mutation.
 export const STAGE_ALL_PATHS: ReadonlyArray<string> = [];
 
 /**
@@ -268,18 +239,7 @@ export function isEmptyPathSelection(paths: ReadonlyArray<string>): boolean {
   return paths.length === 0;
 }
 
-/**
- * fork: f4 — the ONE gate between the changes list and a mutation.
- *
- * Every path set the changes list produces (row, folder, group header, keyboard
- * selection) comes through here, and an empty set resolves to `null` = "do
- * nothing". It can never resolve to "everything".
- *
- * This is the fix for the group header's "Discard all", which used to hand the
- * panel `[]` and have it expanded onto `discard(null)` — the whole-working-copy
- * rung. The whole-worktree discard has exactly one entry point now: the
- * header overflow menu's "Discard all changes", which calls the action directly.
- */
+// An empty list selection must never become the wire contract's whole-worktree mutation.
 export function changesListActionPaths(paths: ReadonlyArray<string>): ReadonlyArray<string> | null {
   if (paths.length === 0) {
     return null;
@@ -306,14 +266,6 @@ export function actionBusyKey(action: string, scope?: string): string {
  */
 export const BUSY_KEY_SEPARATOR = "\0";
 
-/**
- * fork: f4 F-06 — the busy keys the CONTROLS need to read.
- *
- * `useWorkingCopyActions` builds the same keys when it runs an action; naming
- * them once is what keeps a button's disabled state and the guard that would
- * otherwise drop its press from drifting apart. Every entry here has at least
- * one call site — that was the whole failure of the previous round.
- */
 /**
  * fork: remote Git — busy state follows the entry, not its position. A
  * renumbering mid-flight must not move the spinner onto a different stash.
@@ -388,15 +340,7 @@ export function anyPathBusy(busyPaths: ReadonlySet<string>, paths: ReadonlyArray
   return paths.some((path) => busyPaths.has(path));
 }
 
-/**
- * fork: f4 F-30 — the fields a `subscribeVcsStatus` push must actually change
- * before the panel pays for a `workingCopy.status` read.
- *
- * The subscription atom yields a fresh `AsyncResult` per stream frame, so
- * keying the re-read off object identity turned a chatty status stream into one
- * RPC per frame. Anything else on that payload (PR metadata, provider info,
- * per-file line counts) does not move a single control in this panel.
- */
+// Stream frames have fresh identities; compare relevant fields to avoid redundant status RPCs.
 export function vcsStatusPushSignature(
   status: {
     readonly refName?: string | null;
@@ -420,14 +364,7 @@ export function vcsStatusPushSignature(
   ].join("|");
 }
 
-/**
- * fork: f4 — the toast a genuinely dropped press raises.
- *
- * Every control that maps to a busy key renders disabled while that key is in
- * flight, so this should be unreachable from the mouse. It stays reachable from
- * the keyboard (a key press cannot be greyed out), and "silent and enabled" is
- * the one outcome the panel must never have.
- */
+// Keyboard presses can reach a busy action even while its button is disabled.
 export const BUSY_DROPPED_PRESS_TITLE = "Still finishing the last action";
 
 export function withBusyKey(
@@ -490,17 +427,7 @@ export function isNothingStagedError(error: unknown): boolean {
 
 // ─── Text generation availability ───────────────────────────────────────────
 
-/**
- * fork: f4 AI commit message — can this environment generate at all?
- *
- * `null` is the honest answer while the server config is still in flight, and
- * the composer treats it as "let the server decide". Answering `false` there
- * would disable the button for the first second of every session.
- *
- * The resolution mirrors the server's exactly: the source-control writer model
- * when it is set AND its provider instance is enabled and available, otherwise
- * the global text generation model.
- */
+// Unknown configuration leaves the server in charge rather than disabling generation during loading.
 export function isTextGenerationConfigured(
   config: {
     readonly settings: ServerSettings;

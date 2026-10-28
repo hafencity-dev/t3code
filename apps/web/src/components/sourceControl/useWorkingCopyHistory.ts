@@ -1,18 +1,4 @@
-/**
- * History paging + hybrid search.
- *
- * Paging is client-owned (`logPaging.ts`) rather than atom-owned, because a
- * page is appended to a list the lane graph folds over: the graph must see the
- * full contiguous newest-first array, so the array has to live somewhere that
- * survives a page boundary.
- *
- * Search is hybrid: an instant client-side filter over what is already loaded,
- * plus a debounced server `workingCopy.log`. Every server answer is tagged with
- * the filter key it was issued for and dropped if the filter has moved on, so a
- * stale response can never be shown.
- *
- * fork: f4 source-control panel
- */
+// Paging retains contiguous history for the graph; search replies are scoped to their request filter.
 import {
   HISTORY_SEARCH_DEBOUNCE_MS,
   HISTORY_SEARCH_SERVER_LIMIT,
@@ -107,6 +93,7 @@ export function useWorkingCopyHistory(
   }
   const liveSearchKeyRef = useRef(searchKey);
   const liveScopeKeyRef = useRef(scopeKey);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- invalidate in-flight Git replies when the committed repository or filter changes
   useLayoutEffect(() => {
     liveSearchKeyRef.current = searchKey;
     liveScopeKeyRef.current = scopeKey;
@@ -147,6 +134,7 @@ export function useWorkingCopyHistory(
 
   // Head reload on mount, on repo change, and on every mutation (the revision
   // atom is bumped by the commands' `onSettled`).
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- own and cancel the paginated Git history request across repository revisions
   useEffect(() => {
     if (!options.enabled) return;
     void loadHead();
@@ -183,6 +171,7 @@ export function useWorkingCopyHistory(
 
   // Debounced server search. The response is discarded unless the filter it was
   // issued for is still the live one.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- own the debounced Git search timer and cancel stale requests on filter changes
   useEffect(() => {
     if (!options.enabled || environmentId === null || cwd === null) return;
     if (!filterActive) return;

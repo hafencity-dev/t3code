@@ -47,7 +47,7 @@ export function AccountUsageCell({
                 {label}
               </span>
               {remaining === null ? (
-                <span className="text-muted-foreground">—</span>
+                <span className="text-muted-foreground">N/A</span>
               ) : (
                 <span className={cn("font-medium", VALUE_TONE[tone])}>{remaining}% left</span>
               )}

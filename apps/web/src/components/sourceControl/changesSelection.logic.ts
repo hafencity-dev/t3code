@@ -1,13 +1,4 @@
-/**
- * Focus and multi-selection over the changes list.
- *
- * Every function here indexes the SAME array `buildChangesRows` produced. That
- * is the whole point: the virtualizer, the keyboard, shift-range selection and
- * the sticky header must agree on display order, and the only way to guarantee
- * that is for none of them to compute an order of their own.
- *
- * fork: f4 source-control panel
- */
+// Keyboard navigation, range selection, and virtualization must share the same row order.
 import {
   changesRowHeight,
   isChangesFileRow,
@@ -213,15 +204,7 @@ export function changesRowOffsets(
   return offsets;
 }
 
-/**
- * Which group header to pin, given a scroll offset.
- *
- * The header is an always-mounted overlay rather than `position: sticky`,
- * because a windowed row unmounts as it leaves the viewport and takes its
- * sticky positioning with it. The pin only engages once that group's own
- * header has scrolled out of view — otherwise the real header and the overlay
- * would double up.
- */
+// A virtualized header unmounts offscreen, so the pinned header needs a separate overlay.
 export function stickyChangesGroup(
   rows: ReadonlyArray<ChangesRow>,
   options: ChangesRowHeightOptions,

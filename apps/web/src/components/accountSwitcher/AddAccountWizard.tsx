@@ -186,7 +186,7 @@ export function AddAccountWizard({
   const cancelLogin = useAtomCommand(providerAccountsEnvironment.cancelLogin, {
     reportFailure: false,
   });
-  // Capture the login id and prompt from the subscription, not a render that may batch events.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Subscribe to every server login event so render batching cannot drop its ID or prompt.
   useEffect(() => {
     if (!eventAtom) return;
     return registry.subscribe(

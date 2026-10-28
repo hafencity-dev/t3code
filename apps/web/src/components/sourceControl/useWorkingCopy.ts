@@ -1,19 +1,4 @@
-/**
- * The panel's data + action layer.
- *
- * Liveness contract (there is no `subscribeWorkingCopy` — see
- * `build-log-f4-server.md` deviation 1):
- *
- *   1. the shared working-copy revision drives every mutable query atom. It is
- *      bumped by the per-thread `subscribeVcsStatus` push (which carries the
- *      server's revision after every mutation, agent write or reconnect), by a
- *      mutation's old-server fallback, and by manual/focus refreshes,
- *   2. a slow interval is the floor for external git on servers without
- *      revisions, and it runs ONLY while the panel is visible and idle. No
- *      timer survives the panel being hidden.
- *
- * fork: f4 source-control panel
- */
+// Shared repository revisions invalidate mutable queries; idle polling covers older servers.
 import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
@@ -157,11 +142,7 @@ export function useWorkingCopyStatus(
           input: { cwd: scope.cwd },
         }),
   );
-  // The existing per-thread VCS status subscription is the push channel: while
-  // it is mounted, every server-side repository change (including a
-  // stage/unstage that leaves the summary unchanged) bumps the shared
-  // working-copy revision that the status, diff, stash, backup and history
-  // atoms depend on. Nothing here reads its value.
+  // Mount the VCS stream to invalidate working-copy queries even when summary fields stay unchanged.
   useEnvironmentQuery(
     scope === null
       ? null
@@ -205,6 +186,7 @@ export function useWorkingCopyStatus(
   const [failureStreak, setFailureStreak] = useState(0);
   const [dismissed, setDismissed] = useState(false);
   const refreshPendingRef = useRef(query.isPending);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- keep timer-driven refresh admission aligned with the committed query state
   useLayoutEffect(() => {
     refreshPendingRef.current = query.isPending;
   }, [query.isPending]);
@@ -219,6 +201,7 @@ export function useWorkingCopyStatus(
   };
 
   const refreshQuery = query.refresh;
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- drain a queued external refresh after the active RPC settles
   useEffect(() => {
     if (query.isPending || scopeKey === null || queuedRefreshRef.current !== scopeKey) return;
     queuedRefreshRef.current = null;
@@ -248,6 +231,7 @@ export function useWorkingCopyStatus(
   // Coming back to the tab re-reads every active view once. `focus` and
   // `visibilitychange` fire together, so one short window collapses the pair.
   const lastRestoreRef = useRef(0);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- subscribe to browser focus and visibility to refresh external Git state
   useEffect(() => {
     if (scope === null || !options.visible || typeof window === "undefined") return;
     const restore = () => {
@@ -272,10 +256,12 @@ export function useWorkingCopyStatus(
    * fire. Busy is read through a ref inside the tick instead.
    */
   const pollBusyRef = useRef(options.busy);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- keep the persistent polling timer aligned with mutation activity
   useLayoutEffect(() => {
     pollBusyRef.current = options.busy;
   }, [options.busy]);
   const isRepo = status?.isRepo ?? null;
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- own the Git polling timer while the panel is visible and stop it on unmount
   useEffect(() => {
     if (
       !shouldPollWorkingCopy({
@@ -408,17 +394,7 @@ export function useWorkingCopyActions(
     setBusy(next);
   };
 
-  /**
-   * Re-entrant press on a key already in flight is a no-op. Doubling `discard`
-   * would leave two backup stashes and two undo toasts pointing at different
-   * states.
-   *
-   * fork: f4 F-04/F-06 — the drop is no longer SILENT. Every control that maps
-   * to a busy key now renders disabled + pending while that key is in flight
-   * (`isBusy`, `busyPaths`), so a dropped press should only be reachable from
-   * the keyboard, where nothing can be greyed out. When it does happen it says
-   * so, because "accepted and discarded with no feedback" is the defect.
-   */
+  // Reject duplicate mutation keys with feedback; repeated discard could create conflicting backups.
   const run = async <A>(
     key: string,
     title: string,
@@ -536,15 +512,7 @@ export function useWorkingCopyActions(
         );
       },
 
-      /**
-       * `null` means "everything" (the discard-all rung); the wire spells that
-       * as an empty `paths` array.
-       *
-       * Every scope asks before reaching Git. After confirmation the server
-       * takes a pathspec-stash backup when possible and the client offers Undo;
-       * `confirmedDestructive` also authorizes the old-Git fallback when no
-       * backup can be created.
-       */
+      // Null explicitly discards everything. Confirmation also authorizes old-Git fallback without backup.
       discard: async (paths) => {
         const key = actionBusyKey("discard", paths === null ? "*" : paths.join(BUSY_KEY_SEPARATOR));
         const outcome = await confirmWith(confirmDiscardChanges(paths));

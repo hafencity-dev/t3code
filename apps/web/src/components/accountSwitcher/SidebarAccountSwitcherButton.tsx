@@ -53,6 +53,7 @@ export function SidebarAccountSwitcherButton() {
   const usageKey = providerAccountsUsageKey(providers);
   const observedUsage = useRef<{ environmentId: EnvironmentId | null; key: string } | null>(null);
   const refreshAccounts = query.refresh;
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Debounce account-list RPC refreshes after provider usage events and cancel the timer on unmount.
   useEffect(() => {
     const previous = observedUsage.current;
     observedUsage.current = { environmentId, key: usageKey };

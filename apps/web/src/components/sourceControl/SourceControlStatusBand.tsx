@@ -1,27 +1,4 @@
-/**
- * The panel's ONE status slot, directly above the list.
- *
- * fork: f4 redesign (audit §8 D) — "something is wrong" used to appear in two
- * unrelated places with two hand-built treatments: a `bg-destructive/8` read
- * error above the tab bar, and a `bg-amber-500/5` conflicts band below the
- * composer (amber with no dark pair, so in dark mode it was a ~2% lift and lost
- * its warning identity entirely). Both are now one `Alert` in one place.
- *
- * Precedence, when both could show: the read error wins. A failed
- * `workingCopy.status` means the list underneath may be stale or wrong, and
- * that has to be said before anything derived from it.
- *
- * The conflicted FILES are not repeated here — they are rows in the list below,
- * in their own non-collapsible group, with per-path Ours/Theirs/Mark-resolved
- * rungs on the row itself. The band carries only what is true of the operation
- * as a whole.
- *
- * Detect and surface, do NOT automate: for anything other than a merge the
- * panel tells the user to run `git <op> --continue` in the terminal — which t3
- * has inline — rather than driving it through a non-interactive subprocess.
- *
- * fork: f4 source-control panel
- */
+// Read errors take precedence because operation status derived from stale data may be wrong.
 import type { WorkingCopyOperation } from "@t3tools/contracts";
 import { AlertCircle, AlertTriangle, X } from "lucide-react";
 

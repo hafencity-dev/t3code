@@ -1,28 +1,5 @@
 import { observeResize } from "~/lib/observeResize";
-/**
- * The History tab: lane graph, virtualized rows, drawer, load-more.
- *
- * The lane graph is folded ONCE over the full contiguous newest-first page —
- * `history.page.entries`, never `history.entries` (the filtered/merged view)
- * and never the visible window. When the list is filtered, sorted oldest-first
- * or grouped by day the graph is *suppressed* with a visible notice and a
- * one-click restore, because a graph folded over a non-contiguous sequence is
- * silently wrong, which is worse than no graph.
- *
- * fork: f4 redesign (audit §8) — three changes here:
- *
- *  1. The toolbar is gone. Search, author and the view options moved into the
- *     panel's ONE filter row and ONE View menu, so History and Changes stop
- *     having two different toolbars at two different insets.
- *  2. Keyboard. History had no arrow keys at all while Changes had a full
- *     model, in the same panel (M9). It now runs the same roving-focus model:
- *     the listbox owns the tab stop and points `aria-activedescendant` at the
- *     focused row.
- *  3. Designed empty / loading states. An empty or filtered-to-nothing history
- *     used to render a blank rectangle (M7).
- *
- * fork: f4 source-control panel
- */
+// Fold the graph over contiguous newest-first history; suppress it for filtered or reordered views.
 import { LegendList, type LegendListRef } from "@legendapp/list/react";
 import type { HistoryFilter } from "@t3tools/client-runtime/state/working-copy-logic";
 import type { WorkingCopyCommitDetail, WorkingCopyLogEntry } from "@t3tools/contracts";
@@ -123,6 +100,7 @@ export function HistoryList(props: HistoryListProps) {
 
   // Bucketed off the timeline element, not the window: the panel can be narrow
   // inside a wide window and vice versa.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- observe the panel DOM width to select the virtualized row layout
   useEffect(() => {
     const element = rootRef.current;
     if (!element || typeof ResizeObserver === "undefined") return;

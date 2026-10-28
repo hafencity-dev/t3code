@@ -1,26 +1,9 @@
-/**
- * Promise-shaped access to the safety ladder's confirm rungs.
- *
- * The ladder descriptors are pure (`safetyLadder.ts`); this turns one into a
- * dialog and back into a boolean so an action reads as a straight line rather
- * than as a callback tree. Actions that are undoable must never come through
- * here — they raise an undo toast instead.
- *
- * fork: f4 source-control panel
- */
+// Undoable actions use recovery toasts rather than this destructive-action confirmation path.
 import { useEffect, useRef, useState } from "react";
 
 import type { SourceControlConfirmOptions } from "~/lib/sourceControl/safetyLadder";
 
-/**
- * fork: f4 F-13 — a free-text rung.
- *
- * "Create tag here…" used `window.prompt`, which an Electron renderer does not
- * implement (it returns `undefined` and logs "prompt() is and will not be
- * supported"), so the menu item did nothing at all in the desktop app. The
- * dialog already renders a typed-confirmation input; this is that input with a
- * value the caller keeps.
- */
+// Electron does not implement window.prompt; text requests use the existing dialog host.
 export interface SourceControlPromptOptions {
   readonly title: string;
   /** Plain English: what the value is for. Required, same as a confirm rung. */
@@ -69,6 +52,7 @@ export function useSourceControlConfirm(): SourceControlConfirmController {
    * dialog and is `lazy` + unmounted whenever the right-panel surface changes,
    * so an awaiting `discard` used to hang forever with its busy key held.
    */
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- settle pending confirmation promises when their dialog host unmounts
   useEffect(
     () => () => {
       const resolver = resolverRef.current;

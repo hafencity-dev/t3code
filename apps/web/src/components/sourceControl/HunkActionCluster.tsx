@@ -1,13 +1,4 @@
-/**
- * The per-hunk Stage / Unstage / Discard cluster rendered inside the existing
- * diff view.
- *
- * It is deliberately dumb: no data, no atoms, no busy bookkeeping of its own.
- * Everything it needs arrives as props so the diff can re-render it without
- * re-rendering (or re-laying out) a single line of code.
- *
- * fork: f4 hunk staging
- */
+// Action state arrives through the annotation portal without relaying out code lines.
 import { CheckIcon, Loader2Icon, Trash2Icon, UndoIcon } from "lucide-react";
 
 import { cn } from "~/lib/utils";

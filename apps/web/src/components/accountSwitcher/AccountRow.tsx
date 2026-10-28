@@ -122,6 +122,7 @@ function RenameInput({
   // Blur only counts once the input owns focus: the closing menu may briefly hold it.
   const armed = useRef(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Focus and select the mounted DOM input after the menu releases focus.
   useEffect(() => {
     const id = requestAnimationFrame(() => {
       inputRef.current?.focus();

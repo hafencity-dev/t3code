@@ -1,25 +1,5 @@
-/**
- * Hunk staging inside the EXISTING diff view (§5.5).
- *
- * t3's diff stack is materially better than a second, panel-local viewer, so
- * selecting a file in the changes list opens it in the diff right-panel surface
- * and this hook adds the per-hunk actions there. Everything the surface needs
- * lives behind one hook so `DiffPanel.tsx` — upstream, and used well outside
- * this feature — keeps a handful of lines rather than a feature.
- *
- * Two invariants worth stating:
- *
- *  1. **The rendered patch is the patch we cut hunks from.** The diff comes from
- *     `workingCopy.diff` for exactly one file and one side of the index, so
- *     cluster index N is rendered hunk N. The panel's other scopes cannot be
- *     used for this: "Working tree" is `git diff HEAD`, which mixes the staged
- *     and unstaged sides, and a hunk cut from it would not apply `--cached`.
- *  2. **Nothing here re-lays-out the diff.** The action cluster rides an
- *     annotation whose id is derived from the file key and the hunk index, so
- *     busy state and results move through the React portal only.
- *
- * fork: f4 hunk staging
- */
+// Render and stage the same single-file patch from one index side; mixed HEAD diffs cannot stage safely.
+// Hunk actions use annotation portals so busy-state changes do not relayout code.
 import type { EnvironmentId } from "@t3tools/contracts";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 
@@ -41,14 +21,7 @@ import { SourceControlConfirmDialog } from "./SourceControlConfirmDialog";
 import { useSourceControlConfirm } from "./useSourceControlConfirm";
 import { useWorkingCopyActions } from "./useWorkingCopy";
 
-/**
- * fork: f4 - two file-scoped diff sources share this hook.
- *
- * `working-copy` is the stageable one (one file, one side of the index) and is
- * the only one that grows hunk clusters. `commit` is the History drawer's
- * per-file diff: same single-file surface, `workingCopy.commitFileDiff` as the
- * source, and NO actions - a landed commit has no index side to stage to.
- */
+// Only working-copy selections can stage hunks; historical commit diffs are read-only.
 export type DiffHunkStagingSelection =
   | {
       readonly kind: "working-copy";
@@ -75,15 +48,7 @@ export interface DiffHunkStagingView {
   readonly label: string;
   readonly sectionId: string;
   readonly clusters: ReadonlyArray<HunkCluster>;
-  /**
-   * fork: f4 F-19 — the in-flight state, as a string the caller can feed into
-   * the annotation entry so the viewer's `version` hash actually changes.
-   *
-   * The clusters ride the annotation channel, whose items are memoised on a
-   * hash of `id:rangeLabel:text`. For a hunk entry all three were constant by
-   * construction, so the pending spinner and the disabled state could never
-   * reach the DOM: the buttons looked completely dead for the whole action.
-   */
+  // Annotation hashes must include pending state or memoized portals retain stale action buttons.
   readonly pendingKey: string;
   /** Rendered into the diff view's annotation slot for one hunk. */
   readonly renderCluster: (fileKey: string, hunkIndex: number) => ReactNode;
@@ -183,9 +148,11 @@ export function useDiffHunkStaging(target: {
   const flippedRef = useRef<string | null>(null);
   const onSideExhausted = target.onSideExhausted;
   const selectionKey = `${stageable ? side : "commit"}:${filePath}`;
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- reset the action acknowledgement when the viewed repository diff changes
   useEffect(() => {
     if (selectionKey !== null) actedRef.current = false;
   }, [selectionKey]);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- reconcile the external diff selection after a successful mutation empties its selected side
   useEffect(() => {
     if (!stageable) return;
     if (!actedRef.current || diffQuery.isPending || patch === undefined) return;

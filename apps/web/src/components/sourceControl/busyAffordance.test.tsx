@@ -1,23 +1,4 @@
-/**
- * F-04 / F-06 — the busy contract, pinned in rendered markup.
- *
- * The defect these exist for: `useWorkingCopyActions.run` drops any press whose
- * busy key is already in flight and returns `null`, and NOT ONE of the ~25
- * controls it governs rendered a disabled state. `actions.isBusy` was exported
- * with zero call sites and `busyPaths` was plumbed into `ChangeRow` and used
- * only to lower opacity. So the panel was full of enabled, hover-highlighted
- * buttons that silently discarded the press.
- *
- * The rule these pin: a control governed by a busy key renders `disabled` while
- * that key is in flight. "Accepted and dropped" is never allowed to look
- * identical to "accepted and running".
- *
- * The §8 re-layout moved two of these surfaces — the conflicts band became the
- * panel's one status slot (`SourceControlStatusBand`) and the stash strip
- * became dialog content (`StashesPanel`) — so the assertions moved with them.
- * The per-path Ours/Theirs rungs now live on the conflicted ROW, which is where
- * `ChangeRow`'s conflict cases below cover them.
- */
+// Busy controls must visibly reject presses while their shared action guard is occupied.
 import type { WorkingCopyFile, WorkingCopyStashEntry } from "@t3tools/contracts";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vite-plus/test";
@@ -75,7 +56,7 @@ describe("StashesPanel busy affordance (F-06/F-09)", () => {
     expect(disabledCount(markup)).toBe(0);
   });
 
-  it("disables Pop — and only Pop — while the latest stash is popping", () => {
+  it("disables Pop: and only Pop: while the latest stash is popping", () => {
     const markup = renderStashes({
       isBusy: (key) => key === workingCopyBusyKey.stashPop(stashBusyId(stash(0, "stash@{0}"))),
     });

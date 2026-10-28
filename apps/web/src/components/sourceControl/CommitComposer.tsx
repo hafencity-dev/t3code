@@ -1,25 +1,4 @@
-/**
- * The commit composer at the top of the Changes view, matching VS Code's SCM
- * flow: write the message, choose options, then commit the groups below.
- *
- * fork: f4 redesign (audit §8 F) — it used to be a fixed ~110px block above the
- * list. It now uses a compact two-line input and a full-width primary action,
- * while still auto-growing for longer messages.
- *
- * Two behaviours are load-bearing rather than cosmetic:
- *
- *  - the primary action **morphs and never disappears** (commit / commit all /
- *    amend / push N). A button that vanishes when the tree goes clean makes the
- *    composer jump under the cursor mid-click.
- *  - it owns the panel's single full-strength primary only when
- *    `sourceControlPrimarySlot` says so; while a merge is stopped on conflicts
- *    the status band's Continue owns it, and the composer steps to `secondary`.
- *
- * The draft itself is stored per **cwd** by `sourceControlStore`, never per
- * thread — see the note there.
- *
- * fork: f4 source-control panel
- */
+// Keep the primary action mounted as its purpose changes to prevent controls moving mid-click.
 import { ChevronDown, Loader2, Sparkles } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef } from "react";
 import {
@@ -127,19 +106,15 @@ export function CommitComposer(props: CommitComposerProps) {
     modelConfigured: props.textGenerationConfigured ?? null,
   });
 
-  // Turning amend on with an empty draft prefills the last commit message —
-  // amending and retyping the message from memory is how subjects drift.
-  //
-  // fork: f4 F-03 — this is a prefill on the off→on TRANSITION, not a render
-  // invariant. With `message` in the dependency list and no edge guard the
-  // effect refilled the box the instant it went empty, so the draft could never
-  // be cleared or edited down while Amend was ticked.
+  // Prefill only once per amend transition so clearing an existing draft remains possible.
   const { amend, message, onMessageChange, lastCommitMessage } = props;
   const messageRef = useRef(message);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- keep the amend transition callback aligned with the latest editable draft
   useLayoutEffect(() => {
     messageRef.current = message;
   }, [message]);
   const prefilledForRef = useRef<string | null>(null);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- prefill the repository draft store once when amend is enabled, including an arriving commit message
   useEffect(() => {
     if (!amend) {
       // Re-arm, so toggling amend off and on again prefills once more.
@@ -230,7 +205,7 @@ export function CommitComposer(props: CommitComposerProps) {
               }
             />
             <TooltipPopup>
-              {`Subject length — soft limit ${COMMIT_SUBJECT_SOFT_LIMIT}, hard limit ${COMMIT_SUBJECT_HARD_LIMIT}. Neither blocks the commit.`}
+              {`Subject length: soft limit ${COMMIT_SUBJECT_SOFT_LIMIT}, hard limit ${COMMIT_SUBJECT_HARD_LIMIT}. Neither blocks the commit.`}
             </TooltipPopup>
           </Tooltip>
         ) : null}

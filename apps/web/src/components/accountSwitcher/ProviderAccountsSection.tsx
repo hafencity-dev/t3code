@@ -80,6 +80,7 @@ export function ProviderAccountsSection({
   const signingInId = wizard?.account?.id;
   // After removal, focus the next row's menu, or Add account once the row is gone.
   const serverAccounts = group?.accounts;
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Restore DOM focus only after the server-confirmed removal unmounts the row.
   useEffect(() => {
     const pending = focusAfterRemoval.current;
     if (!pending || serverAccounts?.some((account) => account.id === pending.removedId)) return;

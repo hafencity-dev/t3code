@@ -1,17 +1,4 @@
-/**
- * Renders one rung of the safety ladder.
- *
- * The descriptors are pure data (`safetyLadder.ts`), so this component owns no
- * copy: whatever the ladder says is what the user reads, in the context menu,
- * the overflow menu and the keyboard path alike.
- *
- * Two rungs need behaviour beyond a yes/no:
- *  - `requireTyped` — the top rung only. Below it, typing a word is theatre,
- *    and theatre trains people to type through dialogs without reading them.
- *  - `repeatConfirm` — deleting an unmerged branch asks a second time.
- *
- * fork: f4 source-control panel
- */
+// fork: safety-ladder descriptors supply the same confirmation copy to every entry point.
 import { useState } from "react";
 
 import {
@@ -158,7 +145,7 @@ export function SourceControlConfirmDialog(props: {
               onResolve("confirmed");
             }}
           >
-            {needsRepeat ? `${options.confirmLabel} — are you sure?` : options.confirmLabel}
+            {needsRepeat ? `${options.confirmLabel}: are you sure?` : options.confirmLabel}
           </Button>
         </AlertDialogFooter>
       </AlertDialogPopup>

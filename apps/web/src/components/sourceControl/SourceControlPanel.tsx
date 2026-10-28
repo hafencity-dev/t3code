@@ -1,28 +1,4 @@
-/**
- * The source-control right-panel surface.
- *
- * Layout: compact VS Code-style source control, top to bottom —
- *
- *   A  repository toolbar — repo, branch, filter, graph, refresh, sync, more
- *   B  commit composer — message, options, full-width primary action
- *   C  optional filter row — hidden until requested or filtering is active
- *   D  one status slot — read error or operation in progress
- *   E  staged / conflicts / changes groups using all remaining height
- *
- * The panel used to stack six different left insets down its own height, put a
- * spread "something is wrong" across two places. The panel now keeps its
- * repository chrome stable while reads refresh in the background.
- *
- * Scoping: visibility is global, while the mounted panel receives the active
- * chat's environment and worktree. Switching chats keeps the panel open and
- * rebinds every query to the new project. Preferences and commit drafts are
- * repository-scoped so one project's state never leaks into another.
- *
- * Refresh: server push + post-mutation re-read + a slow visible-only poll. No
- * timer runs while the panel is hidden, and nothing here animates continuously.
- *
- * fork: f4 source-control panel
- */
+// fork: source-control panel with repository-scoped drafts and shared mutation permissions.
 import type {
   EnvironmentId,
   ProjectId,
@@ -155,6 +131,7 @@ export function SourceControlPanel(props: SourceControlPanelProps) {
   const setCollapsedFolders = useSourceControlStore((state) => state.setCollapsedFolders);
   const draftKey = scope === null ? null : sourceControlDraftKey(scope.environmentId, scope.cwd);
   const activeDraftKey = useRef(draftKey);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- invalidate pending draft-generation replies when the committed repository changes or unmounts
   useLayoutEffect(() => {
     activeDraftKey.current = draftKey;
     return () => {
@@ -194,13 +171,7 @@ export function SourceControlPanel(props: SourceControlPanelProps) {
   const operation = status.status?.operationInProgress ?? null;
   const onChanges = prefs.activeSection === "changes";
 
-  // Stashes and backups load on expand and are never polled.
-  //
-  // fork: f4 F-10 — the stash list is mounted whenever the panel is, not only
-  // while the section is open: the collapsed header renders the count, and a
-  // collapsed section that permanently reads "STASHES 0" is a lying state. One
-  // `git stash list` with a 5 s stale time and a 60 s idle TTL is cheap. The
-  // *backup* list stays load-on-expand — nothing outside the section reads it.
+  // Keep stash counts live while collapsed; backups alone remain load-on-expand.
   const stashQuery = useEnvironmentQuery(
     scope
       ? workingCopyEnvironment.stashList({
@@ -296,7 +267,7 @@ export function SourceControlPanel(props: SourceControlPanelProps) {
             // Saying only "could not pull" here would leave the user waiting
             // for a push that was deliberately skipped.
             reportSourceControlFailure(
-              "Sync stopped — the pull failed, so nothing was pushed",
+              "Sync stopped: the pull failed, so nothing was pushed",
               pulled,
             );
             return false;
@@ -387,16 +358,7 @@ export function SourceControlPanel(props: SourceControlPanelProps) {
     await actions.revertCommit(entry.hash);
   };
 
-  /**
-   * fork: f4 AI commit message.
-   *
-   * The result **fills the editable draft** — it never commits, and it never
-   * silently overwrites text the user wrote. Three outcomes, decided purely by
-   * `commitMessageGenerationApply`:
-   *   - empty draft → filled,
-   *   - draft edited while the model was thinking → result dropped on the floor,
-   *   - non-empty and untouched → one confirm before replacing.
-   */
+  // Generation only fills the draft; concurrent edits win and replacing existing text requires consent.
   const handleGenerateMessage = () => {
     if (draftKey === null) return;
     void generateSourceControlDraft(
@@ -491,6 +453,7 @@ export function SourceControlPanel(props: SourceControlPanelProps) {
     setFilterOpen(true);
   };
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- focus the newly mounted filter input after it becomes visible
   useEffect(() => {
     if (!filterOpen) return;
     const input = filterInputRef.current;
@@ -840,7 +803,7 @@ export function SourceControlPanel(props: SourceControlPanelProps) {
             onEmptyKeyboardTarget={(action) =>
               sourceControlInfoToast(
                 action === "stage"
-                  ? "Select a file to stage — click a row, or press j / k."
+                  ? "Select a file to stage: click a row, or press j / k."
                   : action === "unstage"
                     ? "Select a staged file to unstage."
                     : "Select an unstaged file to discard.",
@@ -872,7 +835,7 @@ export function SourceControlPanel(props: SourceControlPanelProps) {
               void (async () => {
                 const name = await confirm.promptText({
                   title: `Tag ${entry.shortHash}`,
-                  consequence: `Creates a lightweight tag pointing at ${entry.shortHash} — "${entry.subject}".`,
+                  consequence: `Creates a lightweight tag pointing at ${entry.shortHash}: "${entry.subject}".`,
                   inputLabel: "Tag name",
                   placeholder: "v1.2.3",
                   confirmLabel: "Create tag",
@@ -992,17 +955,7 @@ function SourceControlInitialLoading() {
 
 const EMPTY_STASHES: ReadonlyArray<never> = [];
 
-/**
- * "Include untracked" defaults ON, contrary to git: a stash that silently
- * leaves new files behind is the single most surprising thing `git stash` does.
- *
- * fork: f4 redesign (audit §8 / C3) — this was a hand-rolled `absolute inset-0`
- * overlay with no portal, no focus trap, no Escape handler, no restore-focus,
- * a raw OS checkbox and two sub-Button-sized buttons — inside a panel whose
- * root is not `relative`, so the overlay resolved against whatever ancestor
- * happened to be positioned. It is the repo's `Dialog` now, like the confirm
- * dialog that already shipped in the same feature.
- */
+// Include untracked files by default so a stash does not silently leave new work behind.
 function StashDialog(props: {
   onClose: () => void;
   onSubmit: (message: string, includeUntracked: boolean) => void;

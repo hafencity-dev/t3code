@@ -273,13 +273,7 @@ export function isUsageRefreshCoolingDown(lastRefreshedAt: number | null | undef
   return lastRefreshedAt != null && now - lastRefreshedAt < USAGE_REFRESH_COOLDOWN_MS;
 }
 
-/**
- * Picks at most one inactive account for the dialog's automatic refresh, so it never
- * bulk-probes. Uses the server's staleness rule: a ready account that was never measured
- * first, then one with a window that reset after it was measured, otherwise the stalest
- * measurement past the freshness limit (30 minutes). Accounts the server is backing off are
- * skipped.
- */
+// Limit each automatic refresh to one account to respect the shared server probe budget.
 export function autoRefreshAccountId(
   accounts: readonly ProviderAccount[],
   now: number,
@@ -350,7 +344,7 @@ export function accountFreshness(
       : null;
   if (usage?.unavailable?.reason === "unsupported")
     return {
-      ...plain("—"),
+      ...plain("N/A"),
       tone: "muted",
       refreshing: false,
       tooltip: "This login doesn't report usage limits.",

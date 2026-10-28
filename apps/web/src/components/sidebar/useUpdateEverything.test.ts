@@ -63,15 +63,19 @@ describe("2code update everything", () => {
   it("plans remote runtime updates separately from the desktop release", () => {
     const update = useUpdateEverything("1.0.163");
     expect(update.hasUpdates).toBe(true);
-    expect(update.lines.join("\n")).toContain("0.0.50");
-    expect(update.lines.join("\n")).toContain("1.0.163");
-    expect(update.skipped).toEqual([]);
+    expect(update.runtimeVersion).toBe("0.0.50");
+    expect(update.version).toBe("1.0.163");
+    expect(update.rows.find((row) => row.environmentId === "remote")).toMatchObject({
+      app: "server",
+      skipped: null,
+    });
   });
 
   it("does not update a current runtime just because the desktop release is newer", () => {
     fixtures.machines[0]!.serverConfig.environment.serverVersion = "0.0.50";
     const update = useUpdateEverything("1.0.163");
     expect(update.hasUpdates).toBe(false);
-    expect(update.lines.join("\n")).not.toContain("Remote server");
+    expect(update.runtimeVersion).toBeNull();
+    expect(update.rows.some((row) => row.environmentId === "remote")).toBe(false);
   });
 });

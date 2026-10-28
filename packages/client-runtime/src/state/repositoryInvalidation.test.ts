@@ -201,6 +201,7 @@ const makeClient = Effect.fn("makeClient")(function* (options: {
     subscribeServerConfig: (input) => client.subscribeServerConfig(input),
     ready: Effect.void,
     probe: Effect.void,
+    inboundFrames: Effect.succeed(0),
     closed: Effect.never,
   });
   const session = yield* SubscriptionRef.make(Option.some(makeSession()));

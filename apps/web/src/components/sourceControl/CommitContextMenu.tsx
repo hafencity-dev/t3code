@@ -1,14 +1,4 @@
-/**
- * The per-commit context menu.
- *
- * The reset submenu is gated twice — on being on a branch at all, and on a
- * clean tree — with the reason stated on the disabled item rather than left for
- * the user to work out. `--hard` additionally goes through the top rung of the
- * safety ladder (typed confirmation); the other two modes are recoverable via
- * the reflog and do not.
- *
- * fork: f4 source-control panel
- */
+// Hard reset requires typed confirmation; recoverable reset modes do not.
 import type { WorkingCopyLogEntry } from "@t3tools/contracts";
 import {
   Menu,
@@ -98,17 +88,7 @@ export function CommitContextMenu(props: CommitContextMenuProps) {
           {busy.checkout ? "Checking out…" : "Checkout (detached)"}
         </MenuItem>
         <MenuSeparator />
-        {/*
-          fork: f4 redesign (M16 / m7) — all three modes always exist, with
-          short labels inside a submenu.
-
-          What this replaces: the soft item rendered `{reason ?? label}`, so a
-          dirty tree turned three reset options into the single sentence
-          "Commit or stash your changes first" and dropped the other two items
-          entirely — the user could not see what had been there. The reason now
-          sits above the group as a `MenuGroupLabel` and the items keep their
-          labels and take `data-disabled:opacity-64`.
-        */}
+        {/* Keep reset modes visible when disabled so their purpose remains discoverable. */}
         <MenuSub>
           <MenuSubTrigger disabled={resetDisabledReason !== null || busy.reset}>
             Reset branch here
@@ -121,20 +101,20 @@ export function CommitContextMenu(props: CommitContextMenuProps) {
               disabled={resetDisabledReason !== null || busy.reset}
               onClick={() => props.onReset(entry, "soft")}
             >
-              Soft — keep staged + working
+              Soft: keep staged + working
             </MenuItem>
             <MenuItem
               disabled={resetDisabledReason !== null || busy.reset}
               onClick={() => props.onReset(entry, "mixed")}
             >
-              Mixed — keep working, unstage
+              Mixed: keep working, unstage
             </MenuItem>
             <MenuItem
               variant="destructive"
               disabled={resetDisabledReason !== null || busy.reset}
               onClick={() => props.onReset(entry, "hard")}
             >
-              Hard — discard all changes
+              Hard: discard all changes
             </MenuItem>
           </MenuSubPopup>
         </MenuSub>

@@ -1,25 +1,5 @@
 import { observeResize } from "~/lib/observeResize";
-/**
- * The expanded commit detail.
- *
- * It is a SIBLING row in the virtualized list, never nested inside the commit
- * row: every row must have a height the virtualizer knows before it mounts, and
- * a nested expander does not.
- *
- * fork: f4 redesign (audit §8 / M6) — that height is now MEASURED. It used to
- * be a hard-coded 280px whose own comment said "used until the open drawer has
- * been measured", and nothing ever measured it: a one-file commit opened 280px
- * of empty panel, and a sixty-file commit opened a nested scroller inside the
- * already-scrolling virtual list (a scroll trap — the wheel stops working when
- * the pointer crosses into the drawer).
- *
- * The measurement cannot loop: the outer box is the fixed row height, the
- * scroller inside it is `size-full`, and the measured element is the CONTENT,
- * whose natural height does not depend on either. `clampHistoryDrawerHeight`
- * bounds the result so one pathological commit cannot eat the list.
- *
- * fork: f4 source-control panel
- */
+// The drawer is a measured sibling row so its height stays consistent with the virtualizer.
 import type { WorkingCopyCommitDetail } from "@t3tools/contracts";
 import { Copy } from "lucide-react";
 import { useEffect, useRef } from "react";
@@ -47,6 +27,7 @@ export function CommitDrawer(props: {
   const lastReported = useRef<number>(-1);
   const { onMeasure } = props;
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- observe drawer DOM height so virtualization matches the mounted content
   useEffect(() => {
     const element = contentRef.current;
     if (element === null) return;

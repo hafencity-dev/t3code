@@ -10,6 +10,8 @@ import { IPAD_HOME_TITLE_OFFSET } from "../lib/layoutMetrics";
 import { resolveMobileStageLabel } from "../lib/mobileBranding";
 import { useAndroidControlSizing } from "./ui/useAndroidControlSizing";
 
+const BRAND_MAX_FONT_SCALE = 1.4;
+
 export function brandTitleOffset(): number {
   if (Platform.OS !== "ios") return 0;
   return Platform.isPad && !NATIVE_WORKSPACE_COLUMNS_SUPPORTED ? IPAD_HOME_TITLE_OFFSET : 0;
@@ -51,6 +53,7 @@ export function CompactBrandTitle(
       <Brand2codeMark color="#b0fe93" size={Math.round(18 * scale)} />
       <Text
         allowFontScaling={props.allowFontScaling}
+        maxFontSizeMultiplier={BRAND_MAX_FONT_SCALE}
         className="font-t3-medium text-foreground-muted"
         style={{ fontSize: 21 * scale, letterSpacing: -0.5 * scale }}
       >
@@ -67,6 +70,7 @@ export function CompactBrandTitle(
         >
           <Text
             allowFontScaling={props.allowFontScaling}
+            maxFontSizeMultiplier={BRAND_MAX_FONT_SCALE}
             className="font-t3-bold text-foreground-muted uppercase"
             style={{ fontSize: 9 * scale, letterSpacing: 0.9 * scale }}
           >
@@ -89,7 +93,7 @@ export function CompactBrandTitle(
   );
 }
 
-export function renderCompactBrandTitle() {
+function renderCompactBrandTitle() {
   return <CompactBrandTitle allowFontScaling={Platform.OS === "ios"} />;
 }
 

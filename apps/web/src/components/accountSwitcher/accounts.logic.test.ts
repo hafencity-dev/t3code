@@ -370,7 +370,7 @@ describe("freshness", () => {
       },
     });
     expect(accountFreshness(unsupported, now, { refreshing: true })).toMatchObject({
-      text: "—",
+      text: "N/A",
       canRefresh: false,
       refreshTooltip: "Usage isn't reported for this login",
     });
