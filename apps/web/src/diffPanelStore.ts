@@ -32,13 +32,14 @@ export type DiffPanelSelection =
   // same diff surface as `working-copy` but reads `workingCopy.commitFileDiff`
   // and offers no hunk actions (a landed commit has no index side to stage to).
   | {
-      kind: "commit";
+      kind: "commit-file";
       hash: string;
       shortHash: string;
       filePath: string;
       oldPath: string | null;
       revealRequestId: number;
     }
+  | { kind: "commit"; sha: string; baseRef: string | null }
   | { kind: "turn"; turnId: RunId; filePath: string | null; revealRequestId: number };
 
 const DEFAULT_SELECTION: DiffPanelSelection = { kind: "branch", baseRef: null };
@@ -46,6 +47,8 @@ const DEFAULT_SELECTION: DiffPanelSelection = { kind: "branch", baseRef: null };
 interface DiffPanelStoreState {
   byThreadKey: Record<string, DiffPanelSelection>;
   branchBaseRefByThreadKey: Record<string, string | null>;
+  /** A link that selected a commit before opening the closed pane; opening keeps that selection. */
+  keepSelectionOnOpenThreadKey: string | null;
   selectGitScope: (ref: ScopedThreadRef, scope: "branch" | "unstaged") => void;
   selectBranchBaseRef: (ref: ScopedThreadRef, baseRef: string | null) => void;
   selectToolCall: (ref: ScopedThreadRef, target: ToolCallDiffTarget) => void;
@@ -65,8 +68,32 @@ interface DiffPanelStoreState {
       oldPath?: string | undefined;
     },
   ) => void;
-  reconcileTurnSelection: (ref: ScopedThreadRef, availableRunIds: ReadonlyArray<RunId>) => void;
+  selectCommit: (ref: ScopedThreadRef, sha: string, keepOnOpen?: boolean) => void;
+  consumeKeepSelectionOnOpen: (ref: ScopedThreadRef) => boolean;
+  reconcileTurnSelection: (ref: ScopedThreadRef, availableTurnIds: ReadonlyArray<RunId>) => void;
   removeThread: (ref: ScopedThreadRef) => void;
+}
+
+// fork: the upstream whole-commit scope replaced the old single-file discriminator.
+export function migrateDiffPanelState(persisted: unknown) {
+  type LegacyCommitFile = Omit<Extract<DiffPanelSelection, { kind: "commit-file" }>, "kind"> & {
+    kind: "commit";
+  };
+  const state = persisted as {
+    byThreadKey?: Record<string, DiffPanelSelection | LegacyCommitFile>;
+    branchBaseRefByThreadKey?: Record<string, string | null>;
+  } | null;
+  return {
+    byThreadKey: Object.fromEntries(
+      Object.entries(state?.byThreadKey ?? {}).map(([key, selection]) => [
+        key,
+        selection.kind === "commit" && "hash" in selection
+          ? { ...selection, kind: "commit-file" as const }
+          : selection,
+      ]),
+    ),
+    branchBaseRefByThreadKey: state?.branchBaseRefByThreadKey ?? {},
+  };
 }
 
 function normalizeBaseRef(baseRef: string | null): string | null {
@@ -74,19 +101,27 @@ function normalizeBaseRef(baseRef: string | null): string | null {
   return normalized ? normalized : null;
 }
 
+function branchBaseRef(
+  state: Pick<DiffPanelStoreState, "byThreadKey" | "branchBaseRefByThreadKey">,
+  threadKey: string,
+): string | null {
+  const previous = state.byThreadKey[threadKey];
+  return previous?.kind === "branch" || previous?.kind === "commit"
+    ? previous.baseRef
+    : (state.branchBaseRefByThreadKey[threadKey] ?? null);
+}
+
 export const useDiffPanelStore = create<DiffPanelStoreState>()(
   persist(
-    (set) => ({
+    (set, get) => ({
       byThreadKey: {},
       branchBaseRefByThreadKey: {},
+      keepSelectionOnOpenThreadKey: null,
       selectGitScope: (ref, scope) =>
         set((state) => {
           const threadKey = scopedThreadKey(ref);
           const previous = state.byThreadKey[threadKey];
-          const previousBaseRef =
-            previous?.kind === "branch"
-              ? previous.baseRef
-              : (state.branchBaseRefByThreadKey[threadKey] ?? null);
+          const previousBaseRef = branchBaseRef(state, threadKey);
           return {
             byThreadKey: {
               ...state.byThreadKey,
@@ -96,7 +131,7 @@ export const useDiffPanelStore = create<DiffPanelStoreState>()(
                   : { kind: "unstaged" },
             },
             branchBaseRefByThreadKey:
-              previous?.kind === "branch"
+              previous?.kind === "branch" || previous?.kind === "commit"
                 ? { ...state.branchBaseRefByThreadKey, [threadKey]: previous.baseRef }
                 : state.branchBaseRefByThreadKey,
           };
@@ -169,18 +204,39 @@ export const useDiffPanelStore = create<DiffPanelStoreState>()(
             byThreadKey: {
               ...state.byThreadKey,
               [threadKey]: {
-                kind: "commit",
+                kind: "commit-file",
                 hash: file.hash,
                 shortHash: file.shortHash,
                 filePath: file.filePath,
                 oldPath: file.oldPath?.trim() || null,
                 // Same reveal-token rule as `working-copy`: re-picking the same
                 // row must still scroll the viewer back to it.
-                revealRequestId: previous?.kind === "commit" ? previous.revealRequestId + 1 : 1,
+                revealRequestId:
+                  previous?.kind === "commit-file" ? previous.revealRequestId + 1 : 1,
               },
             },
           };
         }),
+      selectCommit: (ref, sha, keepOnOpen = false) =>
+        set((state) => {
+          const threadKey = scopedThreadKey(ref);
+          const baseRef = branchBaseRef(state, threadKey);
+          return {
+            byThreadKey: {
+              ...state.byThreadKey,
+              [threadKey]: { kind: "commit", sha, baseRef },
+            },
+            branchBaseRefByThreadKey: { ...state.branchBaseRefByThreadKey, [threadKey]: baseRef },
+            keepSelectionOnOpenThreadKey: keepOnOpen
+              ? threadKey
+              : state.keepSelectionOnOpenThreadKey,
+          };
+        }),
+      consumeKeepSelectionOnOpen: (ref) => {
+        if (get().keepSelectionOnOpenThreadKey !== scopedThreadKey(ref)) return false;
+        set({ keepSelectionOnOpenThreadKey: null });
+        return true;
+      },
       reconcileTurnSelection: (ref, availableTurnIds) =>
         set((state) => {
           const threadKey = scopedThreadKey(ref);
@@ -214,7 +270,8 @@ export const useDiffPanelStore = create<DiffPanelStoreState>()(
     }),
     {
       name: "t3code:diff-panel-state:v1",
-      version: 2,
+      version: 3,
+      migrate: migrateDiffPanelState,
       storage: createJSONStorage(() =>
         resolveStorage(typeof window !== "undefined" ? window.localStorage : undefined),
       ),
@@ -255,6 +312,13 @@ export function selectThreadDiffPanelSelection(
 ): DiffPanelSelection {
   if (!ref) return DEFAULT_SELECTION;
   return byThreadKey[scopedThreadKey(ref)] ?? DEFAULT_SELECTION;
+}
+
+export function selectThreadBranchBaseRef(
+  state: Pick<DiffPanelStoreState, "byThreadKey" | "branchBaseRefByThreadKey">,
+  ref: ScopedThreadRef | null | undefined,
+): string | null {
+  return ref ? branchBaseRef(state, scopedThreadKey(ref)) : null;
 }
 
 export function resolveToolCallDiffTarget(

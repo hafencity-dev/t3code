@@ -13,8 +13,11 @@ import {
   ServerProvider,
   WS_METHODS,
   type ProviderAccountsSnapshot,
+  type ProviderInstanceEnvironment,
+  SecretProviderId,
 } from "@t3tools/contracts";
 import { Deferred, Effect, Fiber, Layer, PubSub, Queue, Schema, Scope, Stream } from "effect";
+import * as SecretResolver from "@t3tools/secret-provider-core/server/SecretResolver";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Clock from "effect/Clock";
 import { TestClock } from "effect/testing";
@@ -190,7 +193,8 @@ describe("ProviderAccountsService", () => {
       pending?: boolean;
       backoff?: boolean;
       runningClaude?: boolean;
-      environment?: ReadonlyArray<{ name: string; value: string; sensitive: boolean }>;
+      environment?: ProviderInstanceEnvironment;
+      secretValues?: ReadonlyArray<string | undefined>;
       probe?: Probe;
       runPrime?: typeof runClaudeWindowPrime;
       refreshInstance?: ProviderRegistry["Service"]["refreshInstance"];
@@ -216,6 +220,10 @@ describe("ProviderAccountsService", () => {
           ).pipe(Layer.provide(ProviderRegistryMock.layer(snapshots)))
         : ProviderRegistryMock.layer(snapshots);
     const dependencies = Layer.mergeAll(
+      Layer.succeed(SecretResolver.SecretResolver, {
+        read: () => Effect.succeed(options.secretValues ?? []),
+        invalidate: () => Effect.void,
+      }),
       ServerConfig.layerTest(root, NodePath.join(root, "state")),
       ServerSettings.layerTest({
         providerInstances: {
@@ -1236,31 +1244,47 @@ describe("ProviderAccountsService", () => {
     );
   });
 
-  it.effect("expands provider environment home variables consistently for login", () => {
-    let callbacks: ProviderAccountLoginOptions;
-    return run(
-      Effect.gen(function* () {
-        const prepared = yield* Effect.promise(() =>
-          callbacks.prepare({ driver: "codex", accountId: seeded!.id }),
-        );
-        expect(prepared.environment?.CODEX_HOME).toBe(
-          NodePath.join(root, "host-home", "probe-home"),
-        );
-        expect(prepared.environment?.LITERAL).toBe("~/literal");
-      }),
-      true,
-      {
-        environment: [
-          { name: "CODEX_HOME", value: "~/probe-home", sensitive: false },
-          { name: "LITERAL", value: "~/literal", sensitive: false },
-        ],
-        login: (options) => {
-          callbacks = options;
-          return new ProviderAccountLogin(options);
+  it.effect.each([true, false])(
+    "resolves secret-backed login environments without falling back to the host (readable: %s)",
+    (readable) => {
+      let callbacks: ProviderAccountLoginOptions;
+      return run(
+        Effect.gen(function* () {
+          if (!readable) {
+            yield* Effect.promise(() =>
+              expect(callbacks.prepare({ driver: "codex", accountId: seeded!.id })).rejects.toThrow(
+                "Could not resolve provider environment secrets.",
+              ),
+            );
+            return;
+          }
+          const prepared = yield* Effect.promise(() =>
+            callbacks.prepare({ driver: "codex", accountId: seeded!.id }),
+          );
+          expect(prepared.environment?.CODEX_HOME).toBe(
+            NodePath.join(root, "host-home", "probe-home"),
+          );
+          expect(prepared.environment?.LITERAL).toBe("~/literal");
+        }),
+        true,
+        {
+          environment: [
+            {
+              name: "CODEX_HOME",
+              value: { provider: SecretProviderId.make("vault"), reference: "test-home" },
+              sensitive: true,
+            },
+            { name: "LITERAL", value: "~/literal", sensitive: false },
+          ],
+          secretValues: readable ? ["~/probe-home"] : [undefined],
+          login: (options) => {
+            callbacks = options;
+            return new ProviderAccountLogin(options);
+          },
         },
-      },
-    );
-  });
+      );
+    },
+  );
 
   it.effect("retries registry loading after a transient invalid file is repaired", () =>
     run(

@@ -52,6 +52,7 @@ const configuredDesktopUpdateRepository =
 // fork: distribution releases can use tags independent of the runtime version.
 const configuredDesktopUpdateTagPrefix =
   process.env.T3CODE_DESKTOP_UPDATE_TAG_PREFIX?.trim() || "v";
+const configuredFeatureSecrets = process.env.T3CODE_FEATURE_SECRETS?.trim() || "";
 const configuredHostedAppUrl = (() => {
   const explicitHostedAppUrl = process.env.VITE_HOSTED_APP_URL?.trim();
   if (explicitHostedAppUrl) {
@@ -322,6 +323,7 @@ export default defineConfig(() => {
       "import.meta.env.T3CODE_DESKTOP_UPDATE_TAG_PREFIX": JSON.stringify(
         configuredDesktopUpdateTagPrefix,
       ),
+      "import.meta.env.T3CODE_FEATURE_SECRETS": JSON.stringify(configuredFeatureSecrets),
       "import.meta.env.VITE_RELEASE_CHANNEL": JSON.stringify(configuredReleaseChannel),
       "import.meta.env.APP_VERSION": JSON.stringify(configuredAppVersion),
     },

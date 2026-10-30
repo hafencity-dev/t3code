@@ -117,6 +117,7 @@ import * as VcsProvisioningService from "./vcs/VcsProvisioningService.ts";
 import * as VcsStatusBroadcaster from "./vcs/VcsStatusBroadcaster.ts";
 import * as ProjectCloneTracker from "./project/ProjectCloneTracker.ts";
 import * as WorkingCopyService from "./vcs/workingCopy/WorkingCopyService.ts"; // fork: f4 source-control panel
+import * as SecretResolver from "./secrets/SecretResolver.ts"; // fork: account environment secrets
 import { ProviderAccountsService } from "./provider/accounts/ProviderAccountsService.ts"; // fork: provider accounts
 import * as GitWorkflowService from "./git/GitWorkflowService.ts";
 import * as ReviewService from "./review/ReviewService.ts";
@@ -773,7 +774,12 @@ const layerMakeRoutes = Layer.mergeAll(
     ),
   ),
   Layer.provide(PreviewBrowser.layer),
-  Layer.provide(ProviderAccountsService.layer.pipe(Layer.provide(ProjectionStoreV2.layer))), // fork: provider accounts
+  Layer.provide(
+    ProviderAccountsService.layer.pipe(
+      Layer.provide(ProjectionStoreV2.layer),
+      Layer.provide(SecretResolver.layer),
+    ),
+  ), // fork: provider accounts
   // Links to other environments, shared by Settings (WebSocket) and agents (/mcp).
   Layer.provide(
     PeerForwarding.layer.pipe(

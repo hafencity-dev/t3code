@@ -62,6 +62,8 @@ import { resolveClaudeHomePath } from "../Drivers/ClaudeHome.ts";
 import { resolveCodexHomeLayout } from "../Drivers/CodexHomeLayout.ts";
 import { ProviderRegistry } from "../ProviderRegistry.ts";
 import { ProviderInstanceRegistry } from "../ProviderInstanceRegistry.ts";
+import * as SecretResolver from "@t3tools/secret-provider-core/server/SecretResolver";
+import type { ResolvedProviderInstanceEnvironment } from "@t3tools/contracts";
 import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
 import { materializeCodexAccountHome } from "./CodexAccountHome.ts";
 import { inactiveClaudeProbeEnvironment } from "./ClaudeAccountHome.ts";
@@ -176,18 +178,6 @@ const interruptibleIo = <A>(operation: () => Promise<A>) =>
  * still runs underneath.
  */
 const io = <A>(operation: () => Promise<A>) => Effect.uninterruptible(interruptibleIo(operation));
-
-function effectiveEnvironment(
-  settings: ServerSettings,
-  driver: ProviderAccountDriver,
-  environment: NodeJS.ProcessEnv,
-) {
-  return mergeProviderInstanceEnvironment(
-    settings.providerInstances[defaultInstanceIdForDriver(ProviderDriverKind.make(driver))]
-      ?.environment,
-    environment,
-  );
-}
 
 /** The live snapshot, when it describes this entry; otherwise the entry's stored numbers apply. */
 function ownSnapshot(entry: ProviderAccountEntry, provider: ServerProvider | undefined) {
@@ -344,6 +334,7 @@ const make = Effect.fn("ProviderAccountsService.make")(function* (
   const homeDirectory = yield* HostProcess.HomeDirectory;
   const hostEnvironment = yield* HostProcess.Environment;
   const settings = yield* ServerSettingsService;
+  const secrets = yield* SecretResolver.SecretResolver;
   const providers = yield* ProviderRegistry;
   const instances = yield* ProviderInstanceRegistry;
   const threads = yield* ThreadManagement.ThreadManagementService;
@@ -559,6 +550,30 @@ const make = Effect.fn("ProviderAccountsService.make")(function* (
       Effect.asVoid,
     );
 
+  const effectiveEnvironment = Effect.fn("providerAccounts.effectiveEnvironment")(function* (
+    current: ServerSettings,
+    driver: ProviderAccountDriver,
+  ) {
+    const configured =
+      current.providerInstances[defaultInstanceIdForDriver(ProviderDriverKind.make(driver))]
+        ?.environment ?? [];
+    const references = configured.flatMap(({ value }) =>
+      typeof value === "string" ? [] : [value],
+    );
+    const values = references.length === 0 ? [] : yield* secrets.read(references);
+    const resolved: Array<ResolvedProviderInstanceEnvironment[number]> = [];
+    let secretIndex = 0;
+    for (const variable of configured) {
+      const value = typeof variable.value === "string" ? variable.value : values[secretIndex++];
+      if (value === undefined)
+        return yield* new ProviderAccountError({
+          message: "Could not resolve provider environment secrets.",
+        });
+      resolved.push({ ...variable, value });
+    }
+    return yield* mergeProviderInstanceEnvironment(resolved, hostEnvironment);
+  });
+
   const configuration = Effect.fn("providerAccounts.configuration")(function* (
     driver: ProviderAccountDriver,
   ) {
@@ -567,7 +582,7 @@ const make = Effect.fn("ProviderAccountsService.make")(function* (
         () => new ProviderAccountError({ message: "Could not read provider settings." }),
       ),
     );
-    const environment = yield* effectiveEnvironment(current, driver, hostEnvironment);
+    const environment = yield* effectiveEnvironment(current, driver);
     if (driver === "claudeAgent") {
       const providerSettings = yield* resolveProviderAccountConfig(current, driver);
       const home = yield* resolveClaudeHomePath(providerSettings, environment).pipe(

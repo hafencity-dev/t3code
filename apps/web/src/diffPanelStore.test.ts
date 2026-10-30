@@ -4,6 +4,7 @@ import { scopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environ
 import { beforeEach, describe, expect, it } from "vite-plus/test";
 
 import {
+  migrateDiffPanelState,
   resolveToolCallDiffTarget,
   selectThreadDiffPanelSelection,
   useDiffPanelSessionStore,
@@ -19,6 +20,36 @@ describe("diffPanelStore", () => {
       branchBaseRefByThreadKey: {},
     });
     useDiffPanelSessionStore.setState({ collapsedFileKeysByScopeKey: {} });
+  });
+
+  it("preserves single-file commit selections when upgrading to the whole-commit picker", () => {
+    const legacy = {
+      kind: "commit",
+      hash: "abc123",
+      shortHash: "abc123",
+      filePath: "src/main.ts",
+      oldPath: null,
+      revealRequestId: 2,
+    };
+    const migrated = migrateDiffPanelState({
+      byThreadKey: { [scopedThreadKey(THREAD_REF)]: legacy },
+    });
+    useDiffPanelStore.setState(migrated);
+    expect(
+      selectThreadDiffPanelSelection(useDiffPanelStore.getState().byThreadKey, THREAD_REF),
+    ).toEqual({ ...legacy, kind: "commit-file" });
+    useDiffPanelStore.getState().selectCommit(THREAD_REF, "def456");
+    expect(
+      selectThreadDiffPanelSelection(useDiffPanelStore.getState().byThreadKey, THREAD_REF),
+    ).toEqual({ kind: "commit", sha: "def456", baseRef: null });
+    useDiffPanelStore.getState().selectCommitFile(THREAD_REF, {
+      hash: legacy.hash,
+      shortHash: legacy.shortHash,
+      filePath: legacy.filePath,
+    });
+    expect(
+      selectThreadDiffPanelSelection(useDiffPanelStore.getState().byThreadKey, THREAD_REF),
+    ).toEqual({ ...legacy, kind: "commit-file", revealRequestId: 1 });
   });
 
   it("keeps a tool call selection independent of checkpoints and allows returning to Git changes", () => {
