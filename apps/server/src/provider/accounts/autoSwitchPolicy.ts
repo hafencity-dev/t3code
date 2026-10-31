@@ -7,6 +7,7 @@ import type {
 } from "@t3tools/contracts";
 import {
   accountGatingWindows,
+  hasNoSessionLimit,
   inactiveUsageStaleness,
 } from "@t3tools/shared/fork/accountUsageWindows";
 
@@ -35,6 +36,7 @@ const endgameTargetMarginPercent = 1;
 export interface AutoSwitchAccountView {
   readonly id: ProviderAccountId;
   readonly label: string;
+  readonly driver?: ProviderAccount["driver"];
   readonly status: ProviderAccount["status"];
   readonly loginInProgress: boolean;
   /** A second saved copy of another account's login shares its quota, so it is never a target. */
@@ -145,11 +147,16 @@ function summarize(
   return {
     account,
     known:
+      usable &&
+      (account.driver !== "claudeAgent" ||
+        sessions.length > 0 ||
+        hasNoSessionLimit(account.usage)) &&
       (account.usage?.windows.length ?? 0) > 0 &&
       account.usage?.unavailable?.reason !== "unsupported",
     fresh: usable && (probed.has(account.id) || !inactiveUsageStaleness(account.usage, now).stale),
     confirmed: usable && (probed.has(account.id) || usageConfirmed(account.usage, now)),
     hasSession: sessions.length > 0,
+    noSessionLimit: hasNoSessionLimit(account.usage),
     sessionLeft,
     longLeft,
     sessionResetAt,
@@ -288,13 +295,7 @@ export interface NextAutoSwitchInput {
   readonly accounts: ReadonlyArray<AutoSwitchAccountView>;
 }
 
-/**
- * The account auto-switch would move to next, by the same eligibility and ranking a threshold
- * or proactive switch uses. Ignores freshness, dwell, and the breaker: it answers "who is next",
- * so the account switcher's "Best option" can never disagree with auto-switch. `due` says a
- * switch to it is due now (the active account is low, or it resets sooner) rather than once the
- * active account runs low.
- */
+// Share auto-switch ranking with "Best option"; freshness, dwell, and the breaker do not rank targets.
 export function nextAutoSwitchTarget(
   input: NextAutoSwitchInput,
 ): { readonly accountId: ProviderAccountId; readonly due: boolean } | undefined {
@@ -433,7 +434,7 @@ export function chooseNextAccount(input: AutoSwitchInput): AutoSwitchDecision {
       : `${target.account.label} has ${target.longLeft}% weekly left`;
   const switchSummaries = {
     session: (target: Summary) =>
-      `5-hour limit at ${current.sessionLeft}% · ${target.account.label} has ${target.sessionLeft}% left`,
+      `5-hour limit at ${current.sessionLeft}% · ${target.account.label} has ${target.noSessionLimit ? "no 5-hour limit" : `${target.sessionLeft}% left`}`,
     weekly: (target: Summary) => `Weekly limit at ${current.longLeft}% · ${targetResets(target)}`,
     signedOut: (target: Summary) =>
       `${active.label} is signed out or unavailable · ${targetResets(target)}`,
@@ -454,7 +455,7 @@ export function chooseNextAccount(input: AutoSwitchInput): AutoSwitchDecision {
         ? `${active.label} is at ${current.longLeft}% of its weekly limit; switching to ${target.account.label} (${target.longLeft}% left, resets in ${remainingText(target.deadline - now)}).`
         : trigger === "expiring"
           ? `${target.account.label}'s weekly limit resets in ${duration(target.deadline)}, sooner than ${active.label}'s (${Number.isFinite(current.deadline) ? duration(current.deadline) : "no known reset"}). Using ${target.account.label} first so its quota doesn't expire unused.`
-          : `${active.label} ${trigger === "signedOut" ? "is signed out or unavailable" : trigger === "session" ? `has ${current.sessionLeft}% of its 5-hour limit left` : `has ${current.longLeft}% of its weekly limit left`}; switching to ${target.account.label} (${trigger === "weekly" ? "" : `5-hour ${target.sessionLeft}% left; `}weekly resets in ${duration(target.deadline)}, ${target.longLeft}% left).`,
+          : `${active.label} ${trigger === "signedOut" ? "is signed out or unavailable" : trigger === "session" ? `has ${current.sessionLeft}% of its 5-hour limit left` : `has ${current.longLeft}% of its weekly limit left`}; switching to ${target.account.label} (${trigger === "weekly" ? "" : target.noSessionLimit ? "no 5-hour limit; " : `5-hour ${target.sessionLeft}% left; `}weekly resets in ${duration(target.deadline)}, ${target.longLeft}% left).`,
   });
   // At or below the threshold, any healthy candidate wins; the target margin prevents flapping.
   if (need !== undefined) {
@@ -580,7 +581,7 @@ export function chooseNextAccount(input: AutoSwitchInput): AutoSwitchDecision {
         ? `Endgame: using ${active.label} down to ${endgameFloorPercent}% before switching (all accounts are low).`
         : skipped !== undefined
           ? `Keeping ${active.label}. ${skipped.account.label} resets sooner but only has ${skipped.longLeft}% weekly left.`
-          : `${active.label} has ${current.sessionLeft}% 5-hour and ${current.longLeft}% weekly quota left; no switch needed.`,
+          : `${active.label} has ${current.noSessionLimit ? "no 5-hour limit" : `${current.sessionLeft}% 5-hour`} and ${current.longLeft}% weekly quota left; no switch needed.`,
     Math.min(sessionWakeAt, weeklyWakeAt),
   );
 }

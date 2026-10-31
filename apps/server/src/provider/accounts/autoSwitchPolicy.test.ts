@@ -391,6 +391,38 @@ describe("chooseNextAccount 32-scenario policy table", () => {
     );
   });
 
+  it("does not invent session headroom for an unmeasured Claude bucket", () => {
+    const active = {
+      ...personal,
+      driver: "claudeAgent" as const,
+      usage: {
+        checkedAt: iso(0),
+        windows: [{ ...window("weekly", 80, 72 * hour), id: "seven_day" }],
+      },
+    };
+    expect(chooseNextAccount(input({ active, candidates: [] })).reason).toContain(
+      "Waiting for usage",
+    );
+    expect(
+      chooseNextAccount(input({ active: low, candidates: [{ ...active, id: id("Unknown") }] })),
+    ).toMatchObject({ kind: "probe" });
+  });
+
+  it("keeps a confirmed session-exempt account on its weekly quota", () => {
+    const active = {
+      ...personal,
+      usage: {
+        checkedAt: iso(0),
+        sessionLimit: "none" as const,
+        windows: [{ ...window("weekly", 80, 72 * hour), id: "seven_day" }],
+      },
+    };
+    const result = chooseNextAccount(input({ active, candidates: [] }));
+    expect(result).toMatchObject({ kind: "stay", code: "healthy" });
+    expect(result.reason).toContain("no 5-hour limit");
+    expect(result.reason).not.toContain("100% 5-hour");
+  });
+
   it("explains a proactive switch by the sooner weekly reset", () => {
     const decision = chooseNextAccount(
       input({
@@ -462,7 +494,14 @@ describe("chooseNextAccount 32-scenario policy table", () => {
       trigger: "signedOut",
     },
     {
-      active: { ...personal, usage: { checkedAt: iso(0), windows: [window("weekly", 2)] } },
+      active: {
+        ...personal,
+        usage: {
+          checkedAt: iso(0),
+          sessionLimit: "none" as const,
+          windows: [{ ...window("weekly", 2), id: "seven_day" }],
+        },
+      },
       trigger: "weekly",
     },
   ])(

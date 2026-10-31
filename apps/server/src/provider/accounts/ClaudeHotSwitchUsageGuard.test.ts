@@ -110,36 +110,56 @@ describe("makeClaudeHotSwitchUsageGuard", () => {
     ).toEqual({ live: true });
   });
 
-  it("verifies an explicitly measured probe even when capability and snapshot clocks differ", () => {
-    const guard = switched();
-    const measuredAt = "2026-09-27T11:21:09.000Z";
-    const usage = { ...stored, checkedAt: measuredAt, probeCheckedAt: measuredAt };
-    expect(
-      guard.resolve(
-        "b",
-        snapshot({
-          checkedAt: "2026-09-27T11:21:07.100Z",
-          email: "b@example.test",
-          usage,
-        }),
-      ),
-    ).toEqual({ live: true });
-    expect(
-      guard.resolve(
-        "b",
-        snapshot({
-          checkedAt: "2026-09-27T11:25:00.000Z",
-          email: "b@example.test",
-          usage,
-        }),
-      ),
-    ).toEqual({ live: true });
-  });
+  it.each([false, true])(
+    "verifies a measured probe across clocks (session exempt: %s)",
+    (sessionExempt) => {
+      const guard = switched();
+      const measuredAt = "2026-09-27T11:21:09.000Z";
+      const usage: ServerProviderUsageLimits = {
+        ...stored,
+        checkedAt: measuredAt,
+        probeCheckedAt: measuredAt,
+        ...(sessionExempt
+          ? {
+              sessionLimit: "none",
+              windows: stored.windows.filter((window) => window.kind !== "session"),
+            }
+          : {}),
+      };
+      expect(
+        guard.resolve(
+          "b",
+          snapshot({
+            checkedAt: "2026-09-27T11:21:07.100Z",
+            email: "b@example.test",
+            usage,
+          }),
+        ),
+      ).toEqual({ live: true });
+      expect(
+        guard.resolve(
+          "b",
+          snapshot({
+            checkedAt: "2026-09-27T11:25:00.000Z",
+            email: "b@example.test",
+            usage,
+          }),
+        ),
+      ).toEqual({ live: true });
+    },
+  );
 
   it("does not verify retained usage from a failed probe or a later runtime update", () => {
     const measuredAt = "2026-09-27T11:21:09.000Z";
     for (const usage of [
       { ...stored, probeCheckedAt: measuredAt, unavailable: { reason: "probeFailed" as const } },
+      {
+        ...stored,
+        sessionLimit: "none" as const,
+        windows: stored.windows.filter((window) => window.kind !== "session"),
+        probeCheckedAt: measuredAt,
+        unavailable: { reason: "probeFailed" as const },
+      },
       { ...stored, checkedAt: "2026-09-27T11:22:00.000Z", probeCheckedAt: measuredAt },
     ]) {
       expect(

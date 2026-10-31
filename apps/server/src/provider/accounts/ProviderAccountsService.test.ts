@@ -1524,7 +1524,7 @@ describe("ProviderAccountsService", () => {
     const primed = new Promise<void>((resolve) => {
       started = resolve;
     });
-    // Fresh usage without a 5-hour window: nothing is running, so it can start.
+    // Only an explicitly unused session authorizes starting a paid window.
     const probe: Probe = (() => {
       const now = new Date(0).toISOString();
       return Effect.succeed({
@@ -1532,7 +1532,10 @@ describe("ProviderAccountsService", () => {
         status: "ready",
         usage: {
           checkedAt: now,
-          windows: [{ id: "seven_day", label: "Weekly", kind: "weekly", usedPercent: 10 }],
+          windows: [
+            { id: "five_hour", label: "Session", kind: "session", usedPercent: 0 },
+            { id: "seven_day", label: "Weekly", kind: "weekly", usedPercent: 10 },
+          ],
         },
       } satisfies AccountUsage);
     }) as unknown as Probe;
@@ -2758,7 +2761,10 @@ describe("ProviderAccountsService", () => {
           status: "ready",
           usage: {
             checkedAt: now,
-            windows: [{ id: "seven_day", label: "Weekly", kind: "weekly", usedPercent: 10 }],
+            windows: [
+              { id: "five_hour", label: "Session", kind: "session", usedPercent: 0 },
+              { id: "seven_day", label: "Weekly", kind: "weekly", usedPercent: 10 },
+            ],
           },
         } satisfies AccountUsage);
       }) as unknown as Probe;

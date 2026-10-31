@@ -12,11 +12,15 @@ import * as Effect from "effect/Effect";
 import { usageProbeFailureDetails } from "../../fork/claudeUsageProbe.ts";
 import { query as claudeQuery, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import { hasClaudeManagedMcpConfig, makeClaudeEnvironment } from "../Drivers/ClaudeHome.ts";
+import { readClaudeSettingsBaseUrl } from "../Drivers/ClaudeSkills.ts";
 import { resolveClaudeSdkExecutablePath } from "../Drivers/ClaudeExecutable.ts";
 import * as Semaphore from "effect/Semaphore";
 import { claudeAuthMetadata, buildClaudeCapabilitiesProbeQueryOptions } from "../ClaudeProvider.ts";
 import { codexPlanLabel, withCodexAppServerClient } from "../CodexProvider.ts";
-import { claudeUsageResponseToLimits } from "../claudeUsageLimits.ts";
+import {
+  claudeUsageResponseToLimits,
+  resolveClaudeUsageSubscriptionType,
+} from "../claudeUsageLimits.ts";
 import { codexRateLimitsToLimits } from "../codexUsageLimits.ts";
 import { makeUnavailableUsageLimits } from "@t3tools/provider-core/server/usageLimits";
 import { inactiveUsageStaleness } from "@t3tools/shared/fork/accountUsageWindows";
@@ -94,17 +98,41 @@ export const probeAccountUsage = Effect.fn("providerAccounts.probeUsage")(functi
       }
     });
     if (!result) return { checkedAt, status: "signedOut" } satisfies AccountUsage;
-    const plan = claudeAuthMetadata({
-      subscriptionType: result.subscriptionType,
-      authMethod: result.tokenSource,
-    })?.label;
+    const subscriptionType = resolveClaudeUsageSubscriptionType(
+      result.subscriptionType,
+      result.usage.subscription_type,
+    );
+    const auth = claudeAuthMetadata({ subscriptionType, authMethod: result.tokenSource });
+    const plan = auth?.label;
+    const baseUrl =
+      (yield* readClaudeSettingsBaseUrl(
+        { ...input.settings, homePath: input.homePath },
+        input.cwd,
+        environment,
+      )) ?? environment.ANTHROPIC_BASE_URL;
+    const endpoint = URL.parse(baseUrl?.trim() ?? "");
+    const customEndpoint =
+      endpoint !== null &&
+      (endpoint.protocol === "http:" || endpoint.protocol === "https:") &&
+      endpoint.hostname !== "api.anthropic.com";
+    const apiProvider = (result as { readonly apiProvider?: string }).apiProvider;
+    const usageSubscriptionType =
+      !customEndpoint &&
+      (apiProvider === undefined || apiProvider === "firstParty") &&
+      auth?.type !== "apiKey"
+        ? subscriptionType
+        : undefined;
     return {
       checkedAt,
       status: "ready",
       ...(result.email ? { email: result.email } : {}),
       ...(plan ? { plan } : {}),
       usage: result.usage
-        ? claudeUsageResponseToLimits({ response: result.usage, checkedAt }).limits
+        ? claudeUsageResponseToLimits({
+            response: result.usage,
+            checkedAt,
+            subscriptionType: usageSubscriptionType,
+          }).limits
         : makeUnavailableUsageLimits({ checkedAt, reason: "probeFailed" }),
     } satisfies AccountUsage;
   }

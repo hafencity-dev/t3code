@@ -153,3 +153,31 @@ describe("Claude probe provenance", () => {
     expect(retained?.checkedAt).not.toBe(retained?.probeCheckedAt);
   });
 });
+
+describe("explicit session-limit absence", () => {
+  it("keeps probe evidence through weekly updates but clears it when a session appears", () => {
+    const noSession = { checkedAt, windows: [weekly], sessionLimit: "none" as const };
+    const next = applyUsageLimitsUpdate({
+      previous: noSession,
+      checkedAt,
+      update: { windows: [{ ...weekly, usedPercent: 30 }] },
+    });
+    expect(next?.sessionLimit).toBe("none");
+    const withSession = applyUsageLimitsUpdate({
+      previous: next,
+      checkedAt,
+      update: { windows: [session] },
+    });
+    expect(withSession?.sessionLimit).toBeUndefined();
+    expect(withSession?.windows).toContainEqual(session);
+    expect(resolveUsageLimitsAfterProbe({ published, probed: noSession })).toEqual(noSession);
+    const newer = { ...published, checkedAt: "2026-09-03T12:01:00.000Z" };
+    expect(
+      resolveUsageLimitsAfterProbe({ published: newer, probed: noSession })?.sessionLimit,
+    ).toBeUndefined();
+    const failure = { checkedAt, windows: [], unavailable: { reason: "probeFailed" as const } };
+    expect(
+      resolveUsageLimitsAfterProbe({ published: noSession, probed: failure })?.unavailable,
+    ).toEqual(failure.unavailable);
+  });
+});

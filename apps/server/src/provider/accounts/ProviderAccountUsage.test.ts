@@ -622,9 +622,16 @@ describe("provider account usage admission", () => {
       }),
   );
 
-  it.effect.each([false, true])(
-    "observes SDK usage rejection with managed MCP config %s",
-    (managedMcpConfig) =>
+  it.effect.each([
+    { name: "rate limit", managedMcpConfig: false, limited: true },
+    { name: "rate limit with managed MCP", managedMcpConfig: true, limited: true },
+    { name: "verified Ultra", managedMcpConfig: false, expected: "none" },
+    { name: "custom endpoint", managedMcpConfig: false, baseUrl: "https://proxy.example.test" },
+    { name: "third-party backend", managedMcpConfig: false, apiProvider: "bedrock" },
+    { name: "API key", managedMcpConfig: false, tokenSource: "apiKey" },
+  ])(
+    "keeps account usage provenance through the SDK: $name",
+    ({ managedMcpConfig, limited, expected, baseUrl, apiProvider, tokenSource }) =>
       Effect.gen(function* () {
         const abort = vi.fn();
         const query = vi.mocked(ClaudeSdk.query);
@@ -633,7 +640,12 @@ describe("provider account usage admission", () => {
           input.options?.abortController?.signal.addEventListener("abort", abort);
           return {
             initializationResult: async () => ({
-              account: { email: good.email, tokenSource: "oauth", subscriptionType: "pro" },
+              account: {
+                email: good.email,
+                tokenSource: tokenSource ?? "oauth",
+                subscriptionType: "max",
+                ...(apiProvider ? { apiProvider } : {}),
+              },
             }),
             usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET: async (
               options: Parameters<
@@ -643,7 +655,16 @@ describe("provider account usage admission", () => {
               >[0],
             ) => {
               expect(options).toEqual({ skipBehaviors: true });
-              throw new Error("Failed to fetch usage: 429 Too Many Requests; Retry-After: 1800");
+              if (limited)
+                throw new Error("Failed to fetch usage: 429 Too Many Requests; Retry-After: 1800");
+              return {
+                subscription_type: "ultra",
+                rate_limits_available: true,
+                rate_limits: {
+                  five_hour: null,
+                  seven_day: { utilization: 25, resets_at: "1970-01-07T00:00:00.000Z" },
+                },
+              };
             },
           } as unknown as ReturnType<typeof ClaudeSdk.query>;
         });
@@ -653,17 +674,23 @@ describe("provider account usage admission", () => {
               driver: "claudeAgent",
               settings: decodeClaudeSettings({}),
               homePath: "",
-              environment: {},
+              environment: baseUrl ? { ANTHROPIC_BASE_URL: baseUrl } : {},
               cwd: "/tmp",
             }),
         });
         const result = yield* cache.refresh({ ...refresh, previous: good });
-        expect(result).toMatchObject({
-          consecutiveFailures: 1,
-          lastFailureKind: "rateLimited",
-          nextAllowedAt: 30 * minute,
-          checkedAt: good.checkedAt,
-        });
+        if (limited)
+          expect(result).toMatchObject({
+            consecutiveFailures: 1,
+            lastFailureKind: "rateLimited",
+            nextAllowedAt: 30 * minute,
+            checkedAt: good.checkedAt,
+          });
+        else {
+          expect(result?.usage?.sessionLimit).toBe(expected);
+          expect(result?.usage?.windows[0]?.id).toBe("seven_day");
+          if (expected) expect(result?.plan).toBe("Claude Ultra Subscription");
+        }
         expect(abort).toHaveBeenCalledOnce();
       }).pipe(
         Effect.provideService(

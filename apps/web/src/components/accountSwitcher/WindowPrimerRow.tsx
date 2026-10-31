@@ -72,7 +72,8 @@ export function WindowPrimerRow({
           </TooltipTrigger>
           <TooltipPopup>
             Sends a short message with Claude Haiku when an account's 5-hour window can start, so
-            its clock begins right away. Uses a tiny amount of usage.
+            its clock begins right away. Uses a tiny amount of usage. Accounts without a 5-hour
+            limit are skipped.
           </TooltipPopup>
         </Tooltip>
       </div>

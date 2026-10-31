@@ -38,13 +38,14 @@ import {
 } from "@t3tools/provider-core/server/snapshotProbe";
 import { resolveClaudeSdkExecutablePath } from "./Drivers/ClaudeExecutable.ts";
 import { hasClaudeManagedMcpConfig, makeClaudeEnvironment } from "./Drivers/ClaudeHome.ts";
-import { discoverClaudeSkills } from "./Drivers/ClaudeSkills.ts";
+import { discoverClaudeSkills, readClaudeSettingsBaseUrl } from "./Drivers/ClaudeSkills.ts";
 import type { ProviderWorkspaceSnapshot } from "@t3tools/provider-core/server/driver";
 import { makeUnavailableUsageLimits } from "@t3tools/provider-core/server/usageLimits";
 import {
   type ClaudeScopedLimitNames,
   claudeUsageResponseToLimits,
   recordClaudeUsageResponse,
+  resolveClaudeUsageSubscriptionType,
 } from "./claudeUsageLimits.ts";
 import {
   BUNDLED_CLAUDE_MODEL_CATALOG,
@@ -79,11 +80,12 @@ function claudeSubscriptionLabel(subscriptionType: string | undefined): string |
 
   switch (normalized) {
     case "claudemaxsubscription":
-      return "Max";
     case "claudemax5xsubscription":
-      return "Max 5x";
+      return "Max";
+    case "ultra":
+    case "claudeultrasubscription":
     case "claudemax20xsubscription":
-      return "Max 20x";
+      return "Ultra";
     case "claudeenterprisesubscription":
       return "Enterprise";
     case "claudeteamsubscription":
@@ -94,11 +96,10 @@ function claudeSubscriptionLabel(subscriptionType: string | undefined): string |
       return "Free";
     case "max":
     case "maxplan":
-      return "Max";
     case "max5":
-      return "Max 5x";
+      return "Max";
     case "max20":
-      return "Max 20x";
+      return "Ultra";
     case "enterprise":
       return "Enterprise";
     case "team":
@@ -245,7 +246,8 @@ export type ClaudeCapabilitiesProbe = {
   readonly apiProvider: string | undefined;
   readonly slashCommands: ReadonlyArray<ServerProviderSlashCommand>;
   /** Undefined means get_usage failed; absent windows on success mean no subscription windows, as with API keys. */
-  readonly usage?: Pick<SDKControlGetUsageResponse, "rate_limits_available" | "rate_limits">;
+  readonly usage?: Pick<SDKControlGetUsageResponse, "rate_limits_available" | "rate_limits"> &
+    Partial<Pick<SDKControlGetUsageResponse, "subscription_type">>;
   readonly usageCheckedAt?: string;
   readonly usageFailure?: { readonly rateLimited: boolean; readonly retryAt: number };
 };
@@ -370,6 +372,7 @@ const probeClaudeCapabilities = (
         const usage =
           usageResult && Result.isSuccess(usageResult)
             ? {
+                subscription_type: usageResult.success.subscription_type,
                 rate_limits_available: usageResult.success.rate_limits_available,
                 rate_limits: usageResult.success.rate_limits,
               }
@@ -613,7 +616,10 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
   }
 
   // First-party account fields cannot verify custom endpoint credentials.
-  const endpoint = URL.parse(resolvedEnvironment.ANTHROPIC_BASE_URL?.trim() ?? "");
+  const baseUrl =
+    (yield* readClaudeSettingsBaseUrl(claudeSettings, cwd, resolvedEnvironment)) ??
+    resolvedEnvironment.ANTHROPIC_BASE_URL;
+  const endpoint = URL.parse(baseUrl?.trim() ?? "");
   const customApiEndpoint =
     endpoint !== null &&
     (endpoint.protocol === "http:" || endpoint.protocol === "https:") &&
@@ -625,6 +631,7 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
       enabled: claudeSettings.enabled,
       checkedAt,
       models,
+      updateRequiredModels,
       slashCommands: dedupedSlashCommands,
       skills,
       probe: {
@@ -637,13 +644,24 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
     });
   }
 
+  const subscriptionType = resolveClaudeUsageSubscriptionType(
+    capabilities.subscriptionType,
+    capabilities.usage?.subscription_type,
+  );
+  // A proxy's ANTHROPIC_AUTH_TOKEN reads as an API key; the endpoint is what the token is for.
   const authMetadata =
-    claudeAuthMetadata({
-      subscriptionType: capabilities.subscriptionType,
-      authMethod: capabilities.tokenSource,
-    }) ??
     apiProviderAuthMetadata(capabilities.apiProvider) ??
-    (customApiEndpoint ? { type: "customEndpoint", label: "Custom API endpoint" } : undefined);
+    (customApiEndpoint ? { type: "customEndpoint", label: "Custom API endpoint" } : undefined) ??
+    claudeAuthMetadata({
+      subscriptionType,
+      authMethod: capabilities.tokenSource,
+    });
+  const usageSubscriptionType =
+    !customApiEndpoint &&
+    (capabilities.apiProvider === undefined || capabilities.apiProvider === "firstParty") &&
+    authMetadata?.type !== "apiKey"
+      ? subscriptionType
+      : undefined;
   const usageCheckedAt = capabilities.usageCheckedAt ?? checkedAt;
   const usageLimits = !capabilities.usage
     ? makeUnavailableUsageLimits({
@@ -659,10 +677,12 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
       ? yield* recordClaudeUsageResponse(scopedLimitNames, {
           response: capabilities.usage,
           checkedAt: usageCheckedAt,
+          subscriptionType: usageSubscriptionType,
         })
       : claudeUsageResponseToLimits({
           response: capabilities.usage,
           checkedAt: usageCheckedAt,
+          subscriptionType: usageSubscriptionType,
         }).limits;
   const resetCredits =
     resolveResetCredits &&

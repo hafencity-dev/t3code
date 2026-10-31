@@ -128,6 +128,31 @@ describe("account choices", () => {
       driver: "claudeAgent",
       usage: { checkedAt: "2026-09-23T12:00:00Z", windows: [session, fable, weekly] },
     });
+    const ultraUsage = {
+      checkedAt: "2026-09-23T12:00:00Z",
+      windows: [weekly],
+      sessionLimit: "none" as const,
+    };
+    expect(accountUsageCellView([weekly], "session", now, false, ultraUsage)).toMatchObject({
+      noLimit: true,
+      remaining: null,
+      reset: null,
+    });
+    expect(accountUsageCellView([weekly], "session", now, false).noLimit).toBe(false);
+    expect(accountUsageCellView([weekly], "weekly", now, false, ultraUsage)).toMatchObject({
+      noLimit: false,
+      remaining: 60,
+      reset: "in 3d 0h",
+    });
+    const ultra = { ...claude, usage: ultraUsage };
+    expect(remainingPercent(ultra, now)).toBe(60);
+    expect(accountTone(ultra, now)).toBe("secondary");
+    expect(
+      accountTone(
+        { ...ultra, usage: { ...ultraUsage, windows: [{ ...weekly, usedPercent: 99 }] } },
+        now,
+      ),
+    ).toBe("error");
     expect(remainingPercent(claude, now)).toBe(60);
     expect(accountTone(claude, now)).toBe("secondary");
     // Without the all-model weekly, the model-scoped one fills the column.
@@ -261,6 +286,11 @@ describe("account snapshot invalidation", () => {
     expect(
       providerAccountsUsageKey([
         { ...live, usageLimits: { ...live.usageLimits!, probeCheckedAt: "2026-09-23T12:01:00Z" } },
+      ]),
+    ).not.toBe(key);
+    expect(
+      providerAccountsUsageKey([
+        { ...live, usageLimits: { ...live.usageLimits!, sessionLimit: "none" } },
       ]),
     ).not.toBe(key);
     expect(providerAccountsUsageKey([])).not.toBe(key);
@@ -966,7 +996,18 @@ describe("windowPrimerStatus", () => {
 
   it("describes the feature while off and shows errors first", () => {
     expect(windowPrimerStatus({ enabled: false }, accounts, now)).toBe(
-      "Starts each account's 5-hour window as soon as it can.",
+      "Starts each eligible account's 5-hour window as soon as it can.",
+    );
+    const ultraAccounts = accounts.map((entry) => ({
+      ...entry,
+      usage: {
+        checkedAt: at(0),
+        sessionLimit: "none" as const,
+        windows: [{ ...window(40), id: "seven_day", kind: "weekly" as const }],
+      },
+    }));
+    expect(windowPrimerStatus({ enabled: true }, ultraAccounts, now)).toBe(
+      "These accounts have no 5-hour windows to start.",
     );
     expect(
       windowPrimerStatus(

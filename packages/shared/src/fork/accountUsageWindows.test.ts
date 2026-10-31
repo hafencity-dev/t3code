@@ -4,6 +4,7 @@ import type { ServerProviderUsageWindow } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 import {
   accountGatingWindows,
+  hasNoSessionLimit,
   inactiveUsageStaleness,
   isModelScopedWeeklyWindow,
 } from "./accountUsageWindows.ts";
@@ -32,6 +33,26 @@ describe("accountGatingWindows", () => {
   it("keeps every Codex window", () => {
     const codex = [window("primary", "session", 10), window("secondary", "weekly", 90)];
     expect(accountGatingWindows(codex)).toEqual(codex);
+  });
+});
+
+describe("hasNoSessionLimit", () => {
+  it("requires explicit available weekly evidence and rejects a contradictory session", () => {
+    const windows = [window("seven_day", "weekly", 40), window("seven_day_fable", "weekly", 100)];
+    const usage = { checkedAt: "2026-10-31T12:00:00.000Z", windows, sessionLimit: "none" as const };
+    expect(hasNoSessionLimit(usage)).toBe(true);
+    expect(hasNoSessionLimit(undefined)).toBe(false);
+    expect(hasNoSessionLimit({ ...usage, sessionLimit: undefined })).toBe(false);
+    expect(hasNoSessionLimit({ ...usage, unavailable: { reason: "probeFailed" } })).toBe(false);
+    expect(hasNoSessionLimit({ ...usage, windows: [] })).toBe(false);
+    expect(hasNoSessionLimit({ ...usage, windows: [windows[1]!] })).toBe(false);
+    expect(
+      hasNoSessionLimit({ ...usage, windows: [...windows, window("five_hour", "session", 0)] }),
+    ).toBe(false);
+    expect(hasNoSessionLimit({ ...usage, windows: [window("seven_day", "weekly", NaN)] })).toBe(
+      false,
+    );
+    expect(accountGatingWindows(usage.windows)).toEqual([windows[0]]);
   });
 });
 

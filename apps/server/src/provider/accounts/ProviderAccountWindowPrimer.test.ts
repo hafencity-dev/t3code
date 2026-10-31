@@ -34,7 +34,7 @@ const usage = (
   checkedAt: iso(checkedAt),
   windows: [
     ...(sessionReset === undefined
-      ? []
+      ? [{ id: "five_hour", label: "Session", kind: "session" as const, usedPercent: 0 }]
       : [
           {
             id: "five_hour",
@@ -152,6 +152,13 @@ describe("planWindowPrime", () => {
   it("skips accounts that can't or shouldn't start a window", () => {
     const fresh = usage(0);
     const skipped: ProviderAccount[] = [
+      account(work, {
+        usage: {
+          ...fresh,
+          windows: fresh.windows.filter((window) => window.kind !== "session"),
+          sessionLimit: "none",
+        },
+      }),
       account(work, { status: "pending", usage: fresh }),
       account(work, { status: "signedOut", usage: fresh }),
       account(work, { status: "error", usage: fresh }),
@@ -170,6 +177,25 @@ describe("planWindowPrime", () => {
       at: 72 * HOUR + MINUTE,
     });
     expect(planWindowPrime(account(work, { usage: fresh }), 0)).toEqual({ kind: "prime" });
+    const weeklyOnly = {
+      ...fresh,
+      windows: fresh.windows.filter((window) => window.kind !== "session"),
+    };
+    expect(planWindowPrime(account(work, { usage: weeklyOnly }), 0)).toEqual({ kind: "probe" });
+    expect(
+      planWindowPrime(account(work, { usage: weeklyOnly }), 0, { nextAttemptAt: MINUTE }),
+    ).toEqual({ kind: "wait", at: MINUTE });
+    expect(
+      planWindowPrime(
+        account(work, {
+          usage: { ...weeklyOnly, sessionLimit: "none", unavailable: { reason: "probeFailed" } },
+        }),
+        0,
+      ),
+    ).toEqual({ kind: "probe" });
+    expect(
+      planWindowPrime(account(work, { usage: { ...fresh, sessionLimit: "none" } }), 0),
+    ).toEqual({ kind: "prime" });
   });
 
   it("ignores a spent model-scoped weekly unless it is the only weekly reported", () => {
@@ -217,6 +243,32 @@ describe("ProviderAccountWindowPrimer", () => {
       expect(h.state.primes).toEqual([]);
       expect(h.state.refreshes).toEqual([]);
       expect(h.primer.getState()).toEqual({});
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("backs off failed exemption checks without starting a paid window", () =>
+    Effect.gen(function* () {
+      const failed: ServerProviderUsageLimits = {
+        ...usage(0),
+        windows: usage(0).windows.filter((window) => window.kind !== "session"),
+        sessionLimit: "none",
+        unavailable: { reason: "probeFailed" },
+      };
+      const h = yield* makeHarness({
+        accounts: [account(personal, { usage: failed })],
+        refreshed: () => failed,
+      });
+      yield* h.evaluated;
+      expect(h.state.refreshes).toHaveLength(1);
+      expect(h.state.primes).toEqual([]);
+      expect(h.primer.getState().nextPrimeAt).toBe(iso(5 * MINUTE));
+      yield* h.primer.notify;
+      yield* h.evaluated;
+      expect(h.state.refreshes).toHaveLength(1);
+      yield* TestClock.adjust(5 * MINUTE);
+      yield* h.evaluated;
+      expect(h.state.refreshes).toHaveLength(2);
+      expect(h.state.primes).toEqual([]);
     }).pipe(Effect.scoped),
   );
 
@@ -275,6 +327,13 @@ describe("ProviderAccountWindowPrimer", () => {
       const h = yield* makeHarness({
         accounts: [
           account(personal, { usage: usage(0, undefined, 100) }),
+          account(ProviderAccountId.make("ultra"), {
+            usage: {
+              ...usage(0),
+              windows: usage(0).windows.filter((window) => window.kind !== "session"),
+              sessionLimit: "none",
+            },
+          }),
           account(work, { status: "signedOut", usage: usage(0) }),
           account(ProviderAccountId.make("pending"), { status: "pending", usage: usage(0) }),
           account(ProviderAccountId.make("error"), { status: "error", usage: usage(0) }),

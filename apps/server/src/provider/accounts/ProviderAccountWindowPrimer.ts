@@ -9,7 +9,7 @@ import type {
   ServerProviderUsageWindow,
 } from "@t3tools/contracts";
 import { Clock, DateTime, Effect, Fiber, Queue, Stream } from "effect";
-import { accountGatingWindows } from "@t3tools/shared/fork/accountUsageWindows";
+import { accountGatingWindows, hasNoSessionLimit } from "@t3tools/shared/fork/accountUsageWindows";
 import type * as Scope from "effect/Scope";
 
 /** A window counts as running until this long after its reset, so the reset has settled. */
@@ -59,7 +59,13 @@ export function planWindowPrime(
     return { kind: "skip" };
   const usage = account.usage;
   // API-key logins have no subscription windows to start.
-  if (usage?.unavailable?.reason === "unsupported") return { kind: "skip" };
+  if (usage?.unavailable?.reason === "unsupported" || hasNoSessionLimit(usage))
+    return { kind: "skip" };
+  const probePlan: WindowPrimerPlan =
+    state.nextAttemptAt !== undefined && state.nextAttemptAt > now
+      ? { kind: "wait", at: state.nextAttemptAt }
+      : { kind: "probe" };
+  if (usage?.unavailable !== undefined) return probePlan;
   const checkedAt = parseTime(usage?.checkedAt) ?? Number.NEGATIVE_INFINITY;
   let stale = !usage || usage.windows.length === 0;
   // Only the all-model weekly blocks every request; a spent model-scoped weekly (Fable) still
@@ -78,9 +84,15 @@ export function planWindowPrime(
       return { kind: "wait", at: resetsAt + WINDOW_PRIMER_GRACE_MS };
     if (checkedAt < resetsAt) stale = true;
   }
-  const sessionReset = parseTime(
-    usage?.windows.find((window) => window.kind === "session")?.resetsAt,
-  );
+  const session = usage?.windows.find((window) => window.kind === "session");
+  const sessionReset = parseTime(session?.resetsAt);
+  // An absent window cannot authorize a paid request; only an explicit unused session can.
+  if (
+    !session ||
+    !Number.isFinite(session.usedPercent) ||
+    (sessionReset === undefined && session.usedPercent !== 0)
+  )
+    return probePlan;
   if (sessionReset !== undefined && sessionReset + WINDOW_PRIMER_GRACE_MS > now)
     return { kind: "wait", at: sessionReset + WINDOW_PRIMER_GRACE_MS };
   // Until usage reports the window a start opened, assume it runs a full five hours.

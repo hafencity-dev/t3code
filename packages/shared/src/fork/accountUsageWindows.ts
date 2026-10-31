@@ -1,12 +1,31 @@
 // fork: which usage windows decide an account's headroom, shared by the account switcher
 // (web) and the auto-switch policy and window primer (server).
-import type { ServerProviderUsageWindow } from "@t3tools/contracts";
+import type { ServerProviderUsageLimits, ServerProviderUsageWindow } from "@t3tools/contracts";
 
 type UsageWindowShape = Pick<ServerProviderUsageWindow, "id" | "kind">;
 
 /** Claude's all-model weekly limit. */
 export const PRIMARY_WEEKLY_WINDOW_ID = "seven_day";
 const MODEL_SCOPED_WEEKLY_PREFIX = `${PRIMARY_WEEKLY_WINDOW_ID}_`;
+
+// A missing window is unknown; only explicit probe evidence can remove the session gate.
+export function hasNoSessionLimit(
+  usage: Pick<ServerProviderUsageLimits, "windows" | "sessionLimit" | "unavailable"> | undefined,
+): boolean {
+  return (
+    usage?.sessionLimit === "none" &&
+    usage.unavailable === undefined &&
+    !usage.windows.some((window) => window.kind === "session" || window.id === "five_hour") &&
+    usage.windows.some(
+      (window) =>
+        window.id === PRIMARY_WEEKLY_WINDOW_ID &&
+        window.kind === "weekly" &&
+        Number.isFinite(window.usedPercent) &&
+        window.usedPercent >= 0 &&
+        window.usedPercent <= 100,
+    )
+  );
+}
 
 /**
  * A Claude weekly limit for one model (`seven_day_fable`, `seven_day_overage_included`).

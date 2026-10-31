@@ -83,6 +83,11 @@ export function applyUsageLimitsUpdate(input: {
     previous === undefined ? { reason: "probeFailed" as const } : previous.unavailable;
   return {
     ...makeUsageLimits({ checkedAt: input.checkedAt, windows: merged.values() }),
+    // fork: sparse weekly updates retain the probe's absence evidence; a session contradicts it.
+    ...(previous?.sessionLimit === "none" &&
+    ![...merged.values()].some((window) => window.kind === "session" || window.id === "five_hour")
+      ? { sessionLimit: "none" as const }
+      : {}),
     ...(previous?.resetCredits !== undefined ? { resetCredits: previous.resetCredits } : {}),
     ...(unavailable !== undefined ? { unavailable } : {}),
   };
@@ -109,6 +114,7 @@ export function resolveUsageLimitsAfterProbe(input: {
     return { ...published, ...probed, checkedAt: published.checkedAt, windows: published.windows };
   }
   if (probed?.unavailable?.reason === "probeFailed" && published && !published.unavailable) {
+    if (published.sessionLimit === "none") return { ...published, unavailable: probed.unavailable };
     return published;
   }
   if (
@@ -118,7 +124,16 @@ export function resolveUsageLimitsAfterProbe(input: {
     !probed.unavailable &&
     Date.parse(published.checkedAt) > Date.parse(probed.checkedAt)
   ) {
-    return { ...probed, checkedAt: published.checkedAt, windows: published.windows };
+    const { sessionLimit, ...metadata } = probed;
+    return {
+      ...metadata,
+      ...(sessionLimit === "none" &&
+      !published.windows.some((window) => window.kind === "session" || window.id === "five_hour")
+        ? { sessionLimit }
+        : {}),
+      checkedAt: published.checkedAt,
+      windows: published.windows,
+    };
   }
   return probed;
 }

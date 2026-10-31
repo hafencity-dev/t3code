@@ -9,11 +9,27 @@ import type {
   ProviderAccountGroup,
   ProviderAccountId,
   ServerProvider,
+  ServerProviderUsageLimits,
 } from "@t3tools/contracts";
 import { Clock, DateTime, Effect, Fiber, Queue, Stream } from "effect";
 
 import type { ProviderAccountAutoSwitch as PersistedConfig } from "./ProviderAccountRegistry.ts";
+import { hasNoSessionLimit } from "@t3tools/shared/fork/accountUsageWindows";
 import { atAutoSwitchThreshold, chooseNextAccount } from "./autoSwitchPolicy.ts";
+
+function hasMeasuredUsage(
+  driver: ProviderAccountDriver,
+  usage: ServerProviderUsageLimits | undefined,
+) {
+  return (
+    usage !== undefined &&
+    usage.unavailable === undefined &&
+    usage.windows.length > 0 &&
+    (driver !== "claudeAgent" ||
+      usage.windows.some((window) => window.kind === "session") ||
+      hasNoSessionLimit(usage))
+  );
+}
 
 export interface ProviderAccountAutoSwitchRead {
   readonly config: PersistedConfig;
@@ -156,9 +172,7 @@ export const makeProviderAccountAutoSwitch = Effect.fn("makeProviderAccountAutoS
         Effect.gen(function* () {
           const provider = providers.find((item) => item.instanceId === instanceId);
           if (!provider || !runtime.enabled) return;
-          const known =
-            (provider.usageLimits?.windows.length ?? 0) > 0 &&
-            provider.usageLimits?.unavailable?.reason !== "unsupported";
+          const known = hasMeasuredUsage(driver, provider.usageLimits);
           const becameKnown = !runtime.usageKnown && known;
           runtime.usageKnown = known;
           const key = `${provider.usageLimits?.checkedAt ?? ""}:${provider.auth.status}:${provider.auth.email ?? ""}:${provider.status}:${known}`;
@@ -219,9 +233,7 @@ export const makeProviderAccountAutoSwitch = Effect.fn("makeProviderAccountAutoS
             return;
           }
           const active = group.accounts.find((account) => account.id === group.activeAccountId);
-          runtime.usageKnown =
-            (active?.usage?.windows.length ?? 0) > 0 &&
-            active?.usage?.unavailable?.reason !== "unsupported";
+          runtime.usageKnown = hasMeasuredUsage(driver, active?.usage);
           yield* subscribe(driver, group.instanceId);
           if (!active) {
             runtime.state = { state: "watching", message: "Waiting for an active account." };

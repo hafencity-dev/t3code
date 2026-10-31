@@ -35,6 +35,8 @@ export const ServerProviderUsageLimits = Schema.Struct({
   credentialFingerprint: Schema.optional(TrimmedNonEmptyString),
   // fork: distinguish identity-verified Claude probes from anonymous runtime limit events.
   probeCheckedAt: Schema.optional(IsoDateTime),
+  // fork: an explicit successful provider probe, never inferred from a missing session window.
+  sessionLimit: Schema.optional(Schema.Literal("none")),
   resetCredits: Schema.optional(ServerProviderResetCredits),
   externalUsage: Schema.optional(
     Schema.Struct({

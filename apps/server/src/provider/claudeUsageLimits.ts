@@ -171,10 +171,32 @@ export function claudeRateLimitEventToUpdate(
   return undefined;
 }
 
+function isUltraSubscription(value: string | undefined) {
+  const normalized = value?.toLowerCase().replace(/[\s_-]+/g, "");
+  return (
+    normalized === "ultra" ||
+    normalized === "claudeultrasubscription" ||
+    normalized === "max20" ||
+    normalized === "claudemax20xsubscription"
+  );
+}
+
+export function resolveClaudeUsageSubscriptionType(
+  initial: string | undefined,
+  measured: string | null | undefined,
+) {
+  // Older get_usage reports generic max even when this query initialized with the explicit 20x tier.
+  return measured === undefined || (measured === "max" && isUltraSubscription(initial))
+    ? initial
+    : (measured ?? undefined);
+}
+
 /** get_usage percentages are already 0-100. */
 export function claudeUsageResponseToLimits(input: {
-  readonly response: Pick<SDKControlGetUsageResponse, "rate_limits_available" | "rate_limits">;
+  readonly response: Pick<SDKControlGetUsageResponse, "rate_limits_available" | "rate_limits"> &
+    Partial<Pick<SDKControlGetUsageResponse, "subscription_type">>;
   readonly checkedAt: string;
+  readonly subscriptionType?: string | undefined;
 }): { readonly limits: ServerProviderUsageLimits; readonly names: ClaudeScopedLimitNames } {
   const { response, checkedAt } = input;
   if (!response.rate_limits_available || !response.rate_limits) {
@@ -210,8 +232,26 @@ export function claudeUsageResponseToLimits(input: {
       usedPercent: spendPercent,
     });
   }
+  const ultra =
+    input.subscriptionType !== undefined &&
+    isUltraSubscription(
+      resolveClaudeUsageSubscriptionType(input.subscriptionType, response.subscription_type),
+    );
+  const weekly = response.rate_limits.seven_day;
+  // Only a complete Ultra probe can distinguish an exempt session from an unmeasured one.
+  const noSessionLimit =
+    ultra &&
+    response.rate_limits.five_hour === null &&
+    typeof weekly?.utilization === "number" &&
+    Number.isFinite(weekly.utilization) &&
+    weekly.utilization >= 0 &&
+    weekly.utilization <= 100 &&
+    isoFromString(weekly.resets_at) !== undefined;
   return {
-    limits: makeUsageLimits({ checkedAt, windows }),
+    limits: {
+      ...makeUsageLimits({ checkedAt, windows }),
+      ...(noSessionLimit ? { sessionLimit: "none" as const } : {}),
+    },
     names: { overageIncluded },
   };
 }

@@ -6,6 +6,88 @@ const checkedAt = "2026-07-18T10:00:00.000Z";
 const noNames = { overageIncluded: undefined } as const;
 
 describe("claudeUsageResponseToLimits", () => {
+  it.each([
+    {
+      name: "generic max usage with explicit migrated identity",
+      subscriptionType: "claude_max_20x_subscription",
+      usageSubscriptionType: "max",
+      fiveHour: null,
+      expected: "none",
+    },
+    {
+      name: "explicit Pro downgrade",
+      subscriptionType: "claude_max_20x_subscription",
+      usageSubscriptionType: "pro",
+      fiveHour: null,
+    },
+    {
+      name: "explicit Max5 downgrade",
+      subscriptionType: "claude_max_20x_subscription",
+      usageSubscriptionType: "max5",
+      fiveHour: null,
+    },
+    { name: "Ultra", subscriptionType: "ultra", fiveHour: null, expected: "none" },
+    {
+      name: "explicit Ultra subscription",
+      subscriptionType: "claude_ultra_subscription",
+      fiveHour: null,
+      expected: "none",
+    },
+    { name: "migrated Max20", subscriptionType: "max20", fiveHour: null, expected: "none" },
+    {
+      name: "migrated Max20x subscription",
+      subscriptionType: "claude_max_20x_subscription",
+      fiveHour: null,
+      expected: "none",
+    },
+    {
+      name: "unverified Ultra",
+      subscriptionType: "ultra",
+      fiveHour: { utilization: 50, resets_at: "2026-07-18T14:39:00Z" },
+    },
+    { name: "missing Ultra bucket", subscriptionType: "ultra" },
+    { name: "unknown subscription", fiveHour: null },
+    { name: "generic Max", subscriptionType: "max", fiveHour: null },
+    { name: "unused Pro window", subscriptionType: "pro", fiveHour: null },
+    {
+      name: "empty Ultra bucket",
+      subscriptionType: "ultra",
+      fiveHour: { utilization: null, resets_at: null },
+    },
+    { name: "incomplete weekly", subscriptionType: "ultra", fiveHour: null, weekly: null },
+    {
+      name: "invalid weekly",
+      subscriptionType: "ultra",
+      fiveHour: null,
+      weekly: { utilization: Number.NaN, resets_at: "2026-07-24T08:59:00Z" },
+    },
+    { name: "unavailable limits", subscriptionType: "ultra", fiveHour: null, available: false },
+  ])(
+    "marks no session limit only for a complete Ultra measurement: $name",
+    ({ subscriptionType, usageSubscriptionType, fiveHour, weekly, available, expected }) => {
+      const limits = claudeUsageResponseToLimits({
+        checkedAt,
+        ...(subscriptionType === undefined ? {} : { subscriptionType }),
+        response: {
+          ...(usageSubscriptionType === undefined
+            ? {}
+            : { subscription_type: usageSubscriptionType }),
+          rate_limits_available: available ?? true,
+          rate_limits: {
+            ...(fiveHour === undefined ? {} : { five_hour: fiveHour }),
+            seven_day:
+              weekly === undefined
+                ? { utilization: 18.4, resets_at: "2026-07-24T08:59:00Z" }
+                : weekly,
+          },
+        },
+      }).limits;
+      expect(limits.sessionLimit).toBe(expected);
+      if (fiveHour?.utilization === 50)
+        expect(limits.windows.find((window) => window.id === "five_hour")?.usedPercent).toBe(50);
+    },
+  );
+
   it("maps the session, weekly, and model-scoped weekly windows", () => {
     expect(
       claudeUsageResponseToLimits({

@@ -237,7 +237,6 @@ export function AccountRow({
 }) {
   const message = accountStatusMessage(account, keeperLabel);
   const unsupported = account.usage?.unavailable?.reason === "unsupported";
-  const windows = account.usage?.windows ?? [];
   const primary = accountPrimaryAction(account, group, switchState);
   const switchReason = switchBlockedReason(group, switchState);
   const subtitle = accountSubtitle(account);
@@ -358,13 +357,13 @@ export function AccountRow({
             <div className={NARROW_USAGE}>
               <AccountUsageCell
                 kind="session"
-                windows={windows}
+                usage={account.usage}
                 now={now}
                 checking={resetChecking}
               />
               <AccountUsageCell
                 kind="weekly"
-                windows={windows}
+                usage={account.usage}
                 now={now}
                 checking={resetChecking}
               />

@@ -82,6 +82,8 @@ layer("reconcileLegacy2codeMigrationLedger", (it) => {
         [71, "PeerLinkFence"],
         [72, "WaitingLinkRequestIndex"],
         [73, "ActiveTurnItemIndexes"],
+        [74, "ExcludeAttachmentPlaceholdersFromSearch"],
+        [75, "SubagentDeliveryState"],
       ]);
       assert.deepStrictEqual((yield* readLedger).slice(0, before.length), before);
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
@@ -125,12 +127,14 @@ layer("reconcileLegacy2codeMigrationLedger", (it) => {
           "71_PeerLinkFence",
           "72_WaitingLinkRequestIndex",
           "73_ActiveTurnItemIndexes",
+          "74_ExcludeAttachmentPlaceholdersFromSearch",
+          "75_SubagentDeliveryState",
         ],
       );
       const repaired = yield* readLedger;
       assert.deepStrictEqual(repaired.slice(0, upstreamLedger.length), upstreamLedger);
-      assert.strictEqual(repaired.length, upstreamLedger.length + 22);
-      assert.strictEqual(repaired.at(-1)?.name, "ActiveTurnItemIndexes");
+      assert.strictEqual(repaired.length, upstreamLedger.length + 24);
+      assert.strictEqual(repaired.at(-1)?.name, "SubagentDeliveryState");
 
       // Running again changes nothing.
       assert.strictEqual(yield* reconcileLegacy2codeMigrationLedger(), false);

@@ -1,4 +1,4 @@
-import type { ServerProviderUsageWindow } from "@t3tools/contracts";
+import type { ProviderAccount } from "@t3tools/contracts";
 import { cn } from "../../lib/utils";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { accountUsageCellView, usageWindowTooltipLine, type UsageCellKind } from "./accounts.logic";
@@ -19,21 +19,22 @@ const BAR_TONE = {
 /** One usage column: the tightest window of its kind, with every window of that kind on hover. */
 export function AccountUsageCell({
   kind,
-  windows,
+  usage,
   now,
   checking,
 }: {
   kind: UsageCellKind;
-  windows: readonly ServerProviderUsageWindow[];
+  usage: ProviderAccount["usage"];
   now: number;
   /** A check for a passed reset will actually run. */
   checking: boolean;
 }) {
-  const { all, remaining, reset, resetPending, tone } = accountUsageCellView(
-    windows,
+  const { all, noLimit, remaining, reset, resetPending, tone } = accountUsageCellView(
+    usage?.windows ?? [],
     kind,
     now,
     checking,
+    usage,
   );
   const label = CELL_LABELS[kind];
   return (
@@ -46,7 +47,9 @@ export function AccountUsageCell({
               <span className="sr-only text-muted-foreground @max-[44rem]/accounts:not-sr-only">
                 {label}
               </span>
-              {remaining === null ? (
+              {noLimit ? (
+                <span className="font-medium text-foreground">No limit</span>
+              ) : remaining === null ? (
                 <span className="text-muted-foreground">N/A</span>
               ) : (
                 <span className={cn("font-medium", VALUE_TONE[tone])}>{remaining}% left</span>
@@ -55,32 +58,38 @@ export function AccountUsageCell({
                 <span className="ml-auto truncate text-muted-foreground">{reset}</span>
               ) : null}
             </div>
-            <div
-              role="progressbar"
-              aria-label={
-                resetPending
-                  ? `${label} limit: reset, ${checking ? "checking again" : "not checked yet"}`
-                  : remaining === null
-                    ? `${label} limit: not reported`
-                    : `${label} limit: ${remaining}% left${reset ? `, resets ${reset}` : ""}`
-              }
-              aria-valuemin={0}
-              aria-valuemax={100}
-              {...(remaining === null ? {} : { "aria-valuenow": remaining })}
-              className="h-1 overflow-hidden rounded-full bg-foreground/10"
-            >
-              {remaining === null ? null : (
-                <div
-                  className={cn("h-full rounded-full", BAR_TONE[tone])}
-                  style={{ width: `${remaining}%` }}
-                />
-              )}
-            </div>
+            {noLimit ? (
+              <div className="h-1" aria-hidden />
+            ) : (
+              <div
+                role="progressbar"
+                aria-label={
+                  resetPending
+                    ? `${label} limit: reset, ${checking ? "checking again" : "not checked yet"}`
+                    : remaining === null
+                      ? `${label} limit: not reported`
+                      : `${label} limit: ${remaining}% left${reset ? `, resets ${reset}` : ""}`
+                }
+                aria-valuemin={0}
+                aria-valuemax={100}
+                {...(remaining === null ? {} : { "aria-valuenow": remaining })}
+                className="h-1 overflow-hidden rounded-full bg-foreground/10"
+              >
+                {remaining === null ? null : (
+                  <div
+                    className={cn("h-full rounded-full", BAR_TONE[tone])}
+                    style={{ width: `${remaining}%` }}
+                  />
+                )}
+              </div>
+            )}
           </div>
         }
       />
       <TooltipPopup>
-        {all.length === 0 ? (
+        {noLimit ? (
+          "No 5-hour limit on this plan. Weekly limits still apply."
+        ) : all.length === 0 ? (
           `No ${kind === "session" ? "5-hour" : "weekly"} limit reported`
         ) : (
           <div className="grid gap-0.5">

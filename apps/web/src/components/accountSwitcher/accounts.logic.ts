@@ -14,6 +14,7 @@ import type {
 import { formatDuration, formatResetsIn } from "@t3tools/shared/usageLimits";
 import {
   accountGatingWindows,
+  hasNoSessionLimit,
   inactiveUsageStaleness,
 } from "@t3tools/shared/fork/accountUsageWindows";
 
@@ -168,12 +169,14 @@ export function accountUsageCellView(
   kind: UsageCellKind,
   now: number,
   checking: boolean,
+  usage?: ProviderAccount["usage"],
 ) {
   const { tightest, all } = accountUsageCell(windows, kind);
   const resetPending = tightest !== undefined && windowResetPassed(tightest, now);
   const remaining = tightest && !resetPending ? Math.round(100 - tightest.usedPercent) : null;
   return {
     all,
+    noLimit: kind === "session" && hasNoSessionLimit(usage),
     remaining,
     reset: tightest ? usageResetLabel(tightest, now, checking) : null,
     resetPending,
@@ -247,6 +250,7 @@ export function providerAccountsUsageKey(providers: readonly ServerProvider[]) {
             provider.usageLimits?.checkedAt ?? null,
             provider.usageLimits?.probeCheckedAt ?? null,
             provider.usageLimits?.unavailable ?? null,
+            provider.usageLimits?.sessionLimit ?? null,
             provider.auth.status,
             provider.auth.email ?? null,
           ]
@@ -737,10 +741,14 @@ const RECENT_WINDOW_START_MS = 10 * MINUTE;
 /** The muted status line under the "Start 5-hour windows automatically" toggle. */
 export function windowPrimerStatus(
   primer: ProviderAccountWindowPrimer,
-  accounts: readonly Pick<ProviderAccount, "id" | "label">[],
+  accounts: readonly (Pick<ProviderAccount, "id" | "label"> &
+    Partial<Pick<ProviderAccount, "usage">>)[],
   now: number,
 ) {
-  if (!primer.enabled) return "Starts each account's 5-hour window as soon as it can.";
+  if (accounts.length > 0 && accounts.every((account) => hasNoSessionLimit(account.usage))) {
+    return "These accounts have no 5-hour windows to start.";
+  }
+  if (!primer.enabled) return "Starts each eligible account's 5-hour window as soon as it can.";
   if (primer.message) return primer.message;
   const labelOf = (id: ProviderAccountId | undefined) =>
     accounts.find((account) => account.id === id)?.label ?? "an account";
