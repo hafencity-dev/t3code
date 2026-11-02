@@ -2847,6 +2847,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
     schemes: ["t3code", "t3code-dev"],
   };
   const buildConfig: Record<string, unknown> = {
+    afterPack: (yield* Path.Path).join(yield* RepoRoot, "scripts/prepare-server-compile-cache.cjs"),
     appId,
     productName,
     artifactName: distributionProfile?.artifactNames.default ?? "T3-Code-${version}-${arch}.${ext}",

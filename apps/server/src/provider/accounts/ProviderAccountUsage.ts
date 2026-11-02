@@ -12,7 +12,7 @@ import * as Effect from "effect/Effect";
 import { usageProbeFailureDetails } from "../../fork/claudeUsageProbe.ts";
 import { query as claudeQuery, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import { hasClaudeManagedMcpConfig, makeClaudeEnvironment } from "../Drivers/ClaudeHome.ts";
-import { readClaudeSettingsBaseUrl } from "../Drivers/ClaudeSkills.ts";
+import { readClaudeSettingsEnv } from "../Drivers/ClaudeSkills.ts";
 import { resolveClaudeSdkExecutablePath } from "../Drivers/ClaudeExecutable.ts";
 import * as Semaphore from "effect/Semaphore";
 import { claudeAuthMetadata, buildClaudeCapabilitiesProbeQueryOptions } from "../ClaudeProvider.ts";
@@ -105,11 +105,11 @@ export const probeAccountUsage = Effect.fn("providerAccounts.probeUsage")(functi
     const auth = claudeAuthMetadata({ subscriptionType, authMethod: result.tokenSource });
     const plan = auth?.label;
     const baseUrl =
-      (yield* readClaudeSettingsBaseUrl(
+      (yield* readClaudeSettingsEnv(
         { ...input.settings, homePath: input.homePath },
         input.cwd,
         environment,
-      )) ?? environment.ANTHROPIC_BASE_URL;
+      )).ANTHROPIC_BASE_URL ?? environment.ANTHROPIC_BASE_URL;
     const endpoint = URL.parse(baseUrl?.trim() ?? "");
     const customEndpoint =
       endpoint !== null &&

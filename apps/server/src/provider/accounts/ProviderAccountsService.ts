@@ -58,7 +58,8 @@ import * as ThreadManagement from "../../orchestration-v2/ThreadManagementServic
 import * as ProviderSessionManager from "../../orchestration-v2/ProviderSessionManager.ts";
 import * as ProjectionStore from "../../orchestration-v2/ProjectionStore.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
-import { resolveClaudeHomePath } from "../Drivers/ClaudeHome.ts";
+import * as ManagedProviders from "../../policy/managedProviders.ts";
+import { mergeClaudeProcessEnvironment, resolveClaudeHomePath } from "../Drivers/ClaudeHome.ts";
 import { resolveCodexHomeLayout } from "../Drivers/CodexHomeLayout.ts";
 import { ProviderRegistry } from "../ProviderRegistry.ts";
 import { ProviderInstanceRegistry } from "../ProviderInstanceRegistry.ts";
@@ -332,8 +333,22 @@ const make = Effect.fn("ProviderAccountsService.make")(function* (
 ) {
   const config = yield* ServerConfig;
   const homeDirectory = yield* HostProcess.HomeDirectory;
-  const hostEnvironment = yield* HostProcess.Environment;
   const settings = yield* ServerSettingsService;
+  const hostEnvironment = ManagedProviders.providerHostEnvironment(
+    settings.managedPolicy,
+    yield* HostProcess.Environment,
+  );
+  const blockedReason = (driver: ProviderAccountDriver) =>
+    ManagedProviders.disallowedDriverReason(
+      settings.managedPolicy,
+      ProviderDriverKind.make(driver),
+    );
+  const requireAllowed = Effect.fn("providerAccounts.requireAllowed")(function* (
+    driver: ProviderAccountDriver,
+  ) {
+    const message = blockedReason(driver);
+    if (message !== undefined) return yield* new ProviderAccountError({ message });
+  });
   const secrets = yield* SecretResolver.SecretResolver;
   const providers = yield* ProviderRegistry;
   const instances = yield* ProviderInstanceRegistry;
@@ -459,6 +474,7 @@ const make = Effect.fn("ProviderAccountsService.make")(function* (
   const recoverClaude = Effect.fn("providerAccounts.recoverClaude")(function* (
     registry: Awaited<ReturnType<typeof createProviderAccountRegistry>>,
   ) {
+    if (blockedReason("claudeAgent") !== undefined) return;
     const journalPath = claudeCredentialSwitchJournalPath(config.stateDir);
     const pending = yield* Effect.promise(() =>
       NodeFSP.stat(journalPath).then(
@@ -571,12 +587,19 @@ const make = Effect.fn("ProviderAccountsService.make")(function* (
         });
       resolved.push({ ...variable, value });
     }
+    if (driver === "claudeAgent") {
+      const config = yield* resolveProviderAccountConfig(current, driver);
+      return yield* mergeClaudeProcessEnvironment(config, resolved, hostEnvironment).pipe(
+        Effect.provide(context),
+      );
+    }
     return yield* mergeProviderInstanceEnvironment(resolved, hostEnvironment);
   });
 
   const configuration = Effect.fn("providerAccounts.configuration")(function* (
     driver: ProviderAccountDriver,
   ) {
+    yield* requireAllowed(driver);
     const current = yield* settings.getSettings.pipe(
       Effect.mapError(
         () => new ProviderAccountError({ message: "Could not read provider settings." }),
@@ -678,7 +701,10 @@ const make = Effect.fn("ProviderAccountsService.make")(function* (
 
   const listDetailed = Effect.fn("providerAccounts.listDetailed")(function* () {
     const providerSnapshots = yield* providers.getProviders;
-    const groups = yield* Effect.forEach(["claudeAgent", "codex"] as const, (driver) =>
+    const allowedDrivers = (["claudeAgent", "codex"] as const).filter(
+      (driver) => blockedReason(driver) === undefined,
+    );
+    const groups = yield* Effect.forEach(allowedDrivers, (driver) =>
       Effect.gen(function* () {
         const state = yield* groupState(driver);
         const registry = yield* registryEffect;
@@ -900,6 +926,7 @@ const make = Effect.fn("ProviderAccountsService.make")(function* (
    * its token was overwritten by the terminal login, so it is marked signed out.
    */
   const reconcileClaudeUnlocked = Effect.fn("providerAccounts.reconcileClaude")(function* () {
+    if (blockedReason("claudeAgent") !== undefined) return false;
     const registry = yield* registryEffect;
     // An unfinished switch owns the active home until recovery resolves it.
     if ((yield* claudeJournalPending) || claudeBarrier !== undefined) return false;
@@ -1243,6 +1270,7 @@ const make = Effect.fn("ProviderAccountsService.make")(function* (
       runPromise(
         mutation.withPermit(
           Effect.gen(function* () {
+            yield* requireAllowed(input.driver);
             const registry = yield* registryEffect;
             if (input.driver === "claudeAgent") {
               yield* requireClaudeReady();
@@ -1431,6 +1459,9 @@ const make = Effect.fn("ProviderAccountsService.make")(function* (
   const startLogin = (owner: string, input: ProviderAccountsStartLoginInput) =>
     Stream.callback<ProviderAccountLoginEvent, ProviderAccountError>((queue) =>
       Effect.gen(function* () {
+        const policyBlock = blockedReason(input.driver);
+        if (policyBlock !== undefined)
+          return yield* Queue.fail(queue, new ProviderAccountError({ message: policyBlock }));
         let pendingLogin: Promise<void> | undefined;
         // Scope finalizers run in reverse order: abort first, then await native cleanup.
         yield* Effect.addFinalizer(() =>
@@ -1693,6 +1724,7 @@ const make = Effect.fn("ProviderAccountsService.make")(function* (
   }) {
     const registry = yield* registryEffect;
     const previous = yield* io(() => registry.get(input.accountId));
+    yield* requireAllowed(previous.driver);
     const entry = yield* io(() => registry.rename(input.accountId, input.label));
     if (entry.label !== previous.label)
       yield* recordActivity({
@@ -1711,6 +1743,7 @@ const make = Effect.fn("ProviderAccountsService.make")(function* (
   }) {
     const registry = yield* registryEffect;
     const entry = yield* io(() => registry.get(input.accountId));
+    yield* requireAllowed(entry.driver);
     if (entry.driver === "claudeAgent") {
       yield* requireClaudeReady();
       yield* reconcileClaudeUnlocked();
@@ -1772,6 +1805,7 @@ const make = Effect.fn("ProviderAccountsService.make")(function* (
   const setAutoSwitch = Effect.fn("providerAccounts.setAutoSwitch")(function* (
     input: ProviderAccountsSetAutoSwitchInput,
   ) {
+    yield* requireAllowed(input.driver);
     const registry = yield* registryEffect;
     const before = yield* io(() => registry.getAutoSwitch(input.driver));
     const after = yield* io(() =>
@@ -1813,6 +1847,7 @@ const make = Effect.fn("ProviderAccountsService.make")(function* (
   const setWindowPrimer = Effect.fn("providerAccounts.setWindowPrimer")(function* (
     input: ProviderAccountsSetWindowPrimerInput,
   ) {
+    yield* requireAllowed(input.driver);
     const registry = yield* registryEffect;
     const before = yield* io(() => registry.getWindowPrimer());
     yield* io(() => registry.updateWindowPrimer({ enabled: input.enabled }));
@@ -1835,6 +1870,7 @@ const make = Effect.fn("ProviderAccountsService.make")(function* (
   ) {
     const registry = yield* registryEffect;
     const previous = yield* io(() => registry.get(input.accountId));
+    yield* requireAllowed(previous.driver);
     if ((previous.autoSwitchExcluded === true) !== input.excluded) {
       const entry = yield* io(() =>
         registry.setAutoSwitchExcluded(input.accountId, input.excluded),
@@ -1891,6 +1927,7 @@ const make = Effect.fn("ProviderAccountsService.make")(function* (
   );
   autoSwitch = yield* makeProviderAccountAutoSwitch({
     read: Effect.fn("providerAccounts.readAutoSwitch")(function* (driver) {
+      yield* requireAllowed(driver);
       const registry = yield* registryEffect;
       const automatic = yield* io(() => registry.getAutoSwitch(driver));
       // Runs under the account mutation; never decide on an unreconciled terminal login.
@@ -2046,6 +2083,16 @@ const make = Effect.fn("ProviderAccountsService.make")(function* (
   });
   windowPrimer = yield* makeProviderAccountWindowPrimer({
     read: Effect.fn("providerAccounts.readWindowPrimer")(function* () {
+      const policyBlock = blockedReason("claudeAgent");
+      if (policyBlock !== undefined)
+        return {
+          enabled: false,
+          group: undefined,
+          primedAt: new Map<ProviderAccountId, number>(),
+          loginInProgress: [],
+          probeAllowedAt: () => 0,
+          blocked: policyBlock,
+        };
       const registry = yield* registryEffect;
       const primer = yield* io(() => registry.getWindowPrimer());
       const group = claudeGroupOf(yield* list());

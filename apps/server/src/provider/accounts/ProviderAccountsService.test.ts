@@ -15,6 +15,7 @@ import {
   type ProviderAccountsSnapshot,
   type ProviderInstanceEnvironment,
   SecretProviderId,
+  type ManagedPolicySummary,
 } from "@t3tools/contracts";
 import { Deferred, Effect, Fiber, Layer, PubSub, Queue, Schema, Scope, Stream } from "effect";
 import * as SecretResolver from "@t3tools/secret-provider-core/server/SecretResolver";
@@ -194,6 +195,8 @@ describe("ProviderAccountsService", () => {
       backoff?: boolean;
       runningClaude?: boolean;
       environment?: ProviderInstanceEnvironment;
+      hostEnvironment?: NodeJS.ProcessEnv;
+      managedPolicy?: ManagedPolicySummary;
       secretValues?: ReadonlyArray<string | undefined>;
       probe?: Probe;
       runPrime?: typeof runClaudeWindowPrime;
@@ -225,33 +228,39 @@ describe("ProviderAccountsService", () => {
         invalidate: () => Effect.void,
       }),
       ServerConfig.layerTest(root, NodePath.join(root, "state")),
-      ServerSettings.layerTest({
-        providerInstances: {
-          [claudeId]: {
-            driver: ProviderDriverKind.make("claudeAgent"),
-            config: { homePath: options.claudeHomePath ?? NodePath.join(root, "claude") },
-            ...(options.claudeHomePath === undefined
-              ? {}
-              : {
-                  environment: [
-                    {
-                      name: "CLAUDE_CONFIG_DIR",
-                      value: NodePath.join(root, "claude"),
-                      sensitive: false,
-                    },
-                  ],
-                }),
-          },
-          [codexId]: {
-            driver: ProviderDriverKind.make("codex"),
-            displayName: "Keep this instance name",
-            config: { homePath: NodePath.join(root, "codex"), binaryPath: "never-spawn-this-cli" },
-            environment: options.environment ?? [
-              { name: "OPENAI_API_KEY", value: "private-value", sensitive: true },
-            ],
+      ServerSettings.layerTest(
+        {
+          providerInstances: {
+            [claudeId]: {
+              driver: ProviderDriverKind.make("claudeAgent"),
+              config: { homePath: options.claudeHomePath ?? NodePath.join(root, "claude") },
+              ...(options.claudeHomePath === undefined
+                ? {}
+                : {
+                    environment: [
+                      {
+                        name: "CLAUDE_CONFIG_DIR",
+                        value: NodePath.join(root, "claude"),
+                        sensitive: false,
+                      },
+                    ],
+                  }),
+            },
+            [codexId]: {
+              driver: ProviderDriverKind.make("codex"),
+              displayName: "Keep this instance name",
+              config: {
+                homePath: NodePath.join(root, "codex"),
+                binaryPath: "never-spawn-this-cli",
+              },
+              environment: options.environment ?? [
+                { name: "OPENAI_API_KEY", value: "private-value", sensitive: true },
+              ],
+            },
           },
         },
-      }),
+        options.managedPolicy,
+      ),
       providerLayer,
       Layer.mock(ThreadManagementService)({ streamDomainEvents: Stream.empty }),
       Layer.mock(ProviderSessionManagerV2)({ closeInstance: () => Effect.void }),
@@ -337,7 +346,10 @@ describe("ProviderAccountsService", () => {
       Effect.scoped,
       Effect.provide(NodeServices.layer),
       Effect.provideService(HostProcess.HomeDirectory, NodePath.join(root, "host-home")),
-      Effect.provideService(HostProcess.Environment, { HOME: NodePath.join(root, "host-home") }),
+      Effect.provideService(HostProcess.Environment, {
+        ...options.hostEnvironment,
+        HOME: NodePath.join(root, "host-home"),
+      }),
     );
   }
 
@@ -571,6 +583,70 @@ describe("ProviderAccountsService", () => {
           ).toBe("Personal");
         }),
       ),
+  );
+
+  it.effect.each(["claudeAgent", "codex"] as const)(
+    "keeps only policy-allowed %s accounts usable without launching the blocked driver",
+    (allowed) => {
+      const blocked = allowed === "codex" ? "claudeAgent" : "codex";
+      const start = vi.fn(async () => {});
+      let callbacks: ProviderAccountLoginOptions;
+      return run(
+        Effect.gen(function* () {
+          const service = yield* ProviderAccountsService;
+          expect((yield* service.list()).groups.map((group) => group.driver)).toEqual([allowed]);
+          expect(
+            (yield* service.refreshUsage({ force: true })).groups.map((group) => group.driver),
+          ).toEqual([allowed]);
+          const failure = yield* service
+            .startLogin("owner", { driver: blocked })
+            .pipe(Stream.runCollect, Effect.flip);
+          expect(failure.message).toContain("policy does not allow");
+          expect(start).not.toHaveBeenCalled();
+          if (blocked === "codex") {
+            const accountId = ProviderAccountId.make(seeded!.id);
+            for (const operation of [
+              service.rename({ accountId, label: "Blocked rename" }),
+              service.remove({ accountId }),
+              service.setAutoSwitchExcluded({ accountId, excluded: true }),
+              service.switchAccount({ accountId }),
+            ]) {
+              expect((yield* operation.pipe(Effect.flip)).message).toContain(
+                "policy does not allow",
+              );
+            }
+          }
+          yield* Effect.promise(() =>
+            expect(callbacks.prepare({ driver: blocked })).rejects.toThrow("policy does not allow"),
+          );
+          expect(
+            yield* service.setAutoSwitch({ driver: blocked, enabled: true }).pipe(Effect.flip),
+          ).toMatchObject({ _tag: "ProviderAccountError" });
+          if (blocked === "claudeAgent")
+            expect(
+              yield* service.setWindowPrimer({ driver: blocked, enabled: true }).pipe(Effect.flip),
+            ).toMatchObject({ _tag: "ProviderAccountError" });
+        }),
+        allowed === "claudeAgent",
+        {
+          managedPolicy: {
+            organization: "Fixture",
+            lockedSettings: [],
+            limits: { providers: { allowedDrivers: [ProviderDriverKind.make(allowed)] } },
+          },
+          login: (options) => {
+            callbacks = options;
+            return {
+              start,
+              isBusy: () => false,
+              logout: async () => {},
+              submitCode: async () => {},
+              cancel: async () => {},
+            };
+          },
+        },
+      );
+    },
   );
 
   it.effect(
@@ -1265,6 +1341,7 @@ describe("ProviderAccountsService", () => {
             NodePath.join(root, "host-home", "probe-home"),
           );
           expect(prepared.environment?.LITERAL).toBe("~/literal");
+          expect(prepared.environment).not.toHaveProperty("T3CODE_CODEX_LAUNCH_ARGS");
         }),
         true,
         {
@@ -1277,6 +1354,8 @@ describe("ProviderAccountsService", () => {
             { name: "LITERAL", value: "~/literal", sensitive: false },
           ],
           secretValues: readable ? ["~/probe-home"] : [undefined],
+          hostEnvironment: { T3CODE_CODEX_LAUNCH_ARGS: "--unsafe-override" },
+          managedPolicy: { organization: "Fixture", lockedSettings: [] },
           login: (options) => {
             callbacks = options;
             return new ProviderAccountLogin(options);
@@ -1505,11 +1584,18 @@ describe("ProviderAccountsService", () => {
         expect(environments).toHaveLength(1);
         expect(environments[0]).not.toHaveProperty("CLAUDE_CODE_OAUTH_TOKEN");
         expect(environments[0]).not.toHaveProperty("CLAUDE_SECURESTORAGE_CONFIG_DIR");
+        expect(environments[0]).not.toHaveProperty("CLAUDE_CODE_SESSION_ID");
+        expect(environments[0]).not.toHaveProperty("CLAUDE_CODE_MESSAGING_TOKEN");
+        expect(environments[0]?.CLAUDE_CODE_ENTRYPOINT).toBe("t3-code");
       }).pipe(Effect.ensuring(Effect.sync(() => vi.unstubAllEnvs()))),
       false,
       {
         claudeHomePath: NodePath.join(root, "claude"),
         probe,
+        hostEnvironment: {
+          CLAUDE_CODE_SESSION_ID: "parent-session",
+          CLAUDE_CODE_MESSAGING_TOKEN: "parent-token",
+        },
         before: async () => {
           seeded = await seedClaudeStores(["b"]);
         },
@@ -3140,6 +3226,7 @@ describe("ProviderAccountsService", () => {
     // S2: a terminal logout marks the active account signed out; it never becomes an account.
     it.effect("signs the active account out after a terminal logout and switches away", () => {
       let seeded: Awaited<ReturnType<typeof seedClaudeStores>>;
+      let updates!: PubSub.PubSub<readonly ServerProvider[]>;
       const logout = () =>
         Effect.promise(async () => {
           await NodeFSP.writeFile(NodePath.join(seeded.activeHome, ".credentials.json"), "{}");
@@ -3158,10 +3245,28 @@ describe("ProviderAccountsService", () => {
             status: "signedOut",
             message: claudeTerminalLogoutMessage,
           });
-          // Signing back in as the same account clears it.
+          // Provider refresh reconciles terminal logins even while list() remains nonblocking.
+          const events = yield* Stream.toQueue(service.autoSwitchEvents, { capacity: "unbounded" });
           yield* Effect.promise(() => terminalLogin(seeded, "default"));
-          expect(defaultOf(yield* service.list())).toMatchObject({ active: true, status: "ready" });
-          expect(defaultOf(yield* service.list()).message).toBeUndefined();
+          yield* PubSub.publish(updates, [
+            decodeProvider({
+              ...provider,
+              instanceId: claudeId,
+              driver: "claudeAgent",
+              checkedAt,
+              auth: { status: "authenticated", email: "default@example.test" },
+            }),
+          ]);
+          const signedIn = yield* Stream.fromQueue(events).pipe(
+            Stream.mapEffect(() => service.list()),
+            Stream.map(defaultOf),
+            Stream.filter((account) => account.status === "ready" && account.message === undefined),
+            Stream.runHead,
+          );
+          expect(signedIn).toMatchObject({
+            _tag: "Some",
+            value: { active: true, status: "ready" },
+          });
           yield* logout();
           group = claudeGroup(
             yield* service.switchAccount({ accountId: ProviderAccountId.make(seeded.ids.b!) }),
@@ -3181,6 +3286,10 @@ describe("ProviderAccountsService", () => {
         false,
         {
           claudeHomePath: NodePath.join(root, "claude"),
+          providerRegistry: Effect.gen(function* () {
+            updates = yield* PubSub.unbounded<readonly ServerProvider[]>();
+            return { streamChanges: Stream.fromPubSub(updates) };
+          }),
           before: async () => {
             seeded = await seedClaudeStores(["b"]);
           },
