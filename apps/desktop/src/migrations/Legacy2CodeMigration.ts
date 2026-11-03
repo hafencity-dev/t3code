@@ -6,7 +6,7 @@ import {
   type Legacy2CodeImportThread,
   type Legacy2CodeClaudeCodexRouting,
 } from "@t3tools/shared/fork/legacy2codeImport";
-import * as Crypto from "effect/Crypto";
+import * as Digest from "effect/crypto/Digest";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Hex from "effect/encoding/Hex";
@@ -433,11 +433,11 @@ const prepareWorkspaceImport = Effect.fn("desktop.legacy2code.prepareWorkspaceIm
   }): Effect.fn.Return<
     Omit<Legacy2CodeMigrationResult, "authStatus">,
     Legacy2CodeMigrationError,
-    Crypto.Crypto | FileSystem.FileSystem | Path.Path
+    Digest.Digest | FileSystem.FileSystem | Path.Path
   > {
     const fileSystem = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
-    const crypto = yield* Crypto.Crypto;
+    const crypto = yield* Digest.Digest;
     const sourcePath = path.join(input.legacyUserDataPath, "config", "workspace.json");
     const backupSourcePath = `${sourcePath}.backup`;
     const snapshotPath = path.join(input.migrationDirectory, LEGACY_WORKSPACE_SNAPSHOT_NAME);
@@ -537,7 +537,7 @@ const prepareWorkspaceImport = Effect.fn("desktop.legacy2code.prepareWorkspaceIm
     }
 
     const checksum = yield* crypto
-      .digest("SHA-256", new TextEncoder().encode(selected.snapshot.contents))
+      .digest(Digest.sha256, new TextEncoder().encode(selected.snapshot.contents))
       .pipe(
         Effect.map(Hex.encode),
         Effect.mapError(
@@ -623,7 +623,7 @@ export const prepareLegacy2CodeImport = Effect.fn("desktop.legacy2code.prepareIm
   }): Effect.fn.Return<
     Legacy2CodeMigrationResult,
     never,
-    Crypto.Crypto | FileSystem.FileSystem | Path.Path
+    Digest.Digest | FileSystem.FileSystem | Path.Path
   > {
     const fileSystem = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;

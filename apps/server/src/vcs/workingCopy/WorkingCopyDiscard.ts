@@ -1,20 +1,6 @@
-/**
- * fork: f4 — discard, implemented as a **pathspec stash backup**.
- *
- * The undo ladder's rule is that friction should be proportional to how hard
- * something is to undo, and that making an action undoable always beats making
- * it harder to do. `git stash push -- <paths>` both reverts the paths and
- * keeps them, so a confirmed discard can still offer an undo toast wired to
- * `restoreDiscardBackup`.
- *
- * Pathspec stash needs git >= 2.13. On an older git (or an unborn repository,
- * where there is nothing to stash against) no backup is possible — and that is
- * answered BEFORE anything is destroyed: the call returns
- * `requiresConfirmation` and touches nothing unless the input already carries
- * `confirmedDestructive: true`. Current clients confirm every discard before
- * sending that flag; the refusal remains load-bearing for older clients.
- */
-import * as Crypto from "effect/Crypto";
+// fork: pathspec stashes keep discarded files recoverable. Older Git and unborn HEADs
+// require explicit destructive confirmation before any write; older clients rely on this refusal.
+import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Effect from "effect/Effect";
 
 import {
@@ -97,12 +83,8 @@ export const discardDestructively = Effect.fn("workingCopy.discardDestructively"
     return;
   }
   for (const chunk of chunkPathsForExec(paths)) {
-    // fork: f4 — reset the index first, exactly like the whole-worktree branch
-    // above. `checkout -- <paths>` alone restores the worktree from the INDEX,
-    // so a staged+unstaged file would keep its staged half while the stash path
-    // (which resets to HEAD) drops both — one button, two meanings, and a
-    // confirm dialog that says "lost permanently" while half survives. Tolerant
-    // of failure: an unborn HEAD has nothing to reset to and still needs clean.
+    // Checkout restores from the index, so reset it first to discard both staged and unstaged edits.
+    // An unborn HEAD cannot reset but still needs checkout/clean to run.
     yield* git.run({
       operation: OPERATION,
       args: commands.resetPathsArgs(chunk),
@@ -135,7 +117,7 @@ export const discardPaths = Effect.fn("workingCopy.discardPaths")(function* (
     /** fork: f4 — "no backup is possible, do it anyway"; see the contract. */
     readonly confirmedDestructive?: boolean | undefined;
   },
-): Effect.fn.Return<WorkingCopyDiscardResult, WorkingCopyError, Crypto.Crypto> {
+): Effect.fn.Return<WorkingCopyDiscardResult, WorkingCopyError, SecureRandom.SecureRandom> {
   const version = yield* git.run({ operation: OPERATION, args: commands.versionArgs() });
   const recoverableGit = version.exitCode === 0 && supportsPathspecStash(version.stdout);
   // An unborn HEAD has nothing to stash against.
@@ -143,10 +125,7 @@ export const discardPaths = Effect.fn("workingCopy.discardPaths")(function* (
   const chunks = chunkPathsForExec(input.paths);
 
   if (!recoverableGit || head.exitCode !== 0 || chunks.length > 1) {
-    // fork: f4 — answer recoverability BEFORE destroying. Previously this ran
-    // the destructive path and only *then* reported `recoverable: false`, so on
-    // a fresh `git init` (unborn HEAD) the very first discard deleted untracked
-    // files with no dialog, no backup and no undo.
+    // No backup exists here, so refuse destructive writes unless the caller confirmed them.
     if (input.confirmedDestructive !== true) {
       return REQUIRES_CONFIRMATION;
     }
@@ -156,7 +135,7 @@ export const discardPaths = Effect.fn("workingCopy.discardPaths")(function* (
 
   // The marker finds this exact backup even when an agent or another client
   // pushes a stash before the list is read back. `stash@{0}` is not evidence.
-  const marker = `[t3-operation:${yield* (yield* Crypto.Crypto).randomUUIDv4().pipe(Effect.orDie)}]`;
+  const marker = `[t3-operation:${yield* (yield* SecureRandom.SecureRandom).uuidV4()}]`;
   const stashed = yield* git.run({
     operation: OPERATION,
     args: commands.stashPushArgs({

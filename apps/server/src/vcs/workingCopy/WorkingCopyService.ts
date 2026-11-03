@@ -3,7 +3,7 @@ import {
   resolveProjectSettings,
 } from "@t3tools/shared/projectSettings";
 import * as Option from "effect/Option";
-import * as Crypto from "effect/Crypto";
+import * as SecureRandom from "effect/crypto/SecureRandom";
 // fork: restrict both requested cwd and resolved repository to open projects/worktrees.
 // Serialize mutations per repository; reads remain uncached and unserialized.
 
@@ -177,7 +177,7 @@ export class WorkingCopyService extends Context.Service<
 >()("t3/vcs/workingCopy/WorkingCopyService") {}
 
 export const make = Effect.gen(function* () {
-  const crypto = yield* Crypto.Crypto;
+  const random = yield* SecureRandom.SecureRandom;
   const registry = yield* VcsDriverRegistry.VcsDriverRegistry;
   const projections = yield* ProjectionStore.ProjectionStoreV2;
   const projects = yield* ProjectStore.ProjectStoreV2;
@@ -396,7 +396,9 @@ export const make = Effect.gen(function* () {
     ),
     discardPaths: Effect.fn("WorkingCopyService.discardPaths")((input) =>
       runMutating("workingCopy.discardPaths", input.cwd, (git) =>
-        Discard.discardPaths(git, input).pipe(Effect.provideService(Crypto.Crypto, crypto)),
+        Discard.discardPaths(git, input).pipe(
+          Effect.provideService(SecureRandom.SecureRandom, random),
+        ),
       ),
     ),
     restoreDiscardBackup: Effect.fn("WorkingCopyService.restoreDiscardBackup")((input) =>

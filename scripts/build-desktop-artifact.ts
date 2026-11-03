@@ -2990,6 +2990,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
     buildConfig.toolsets = { appimage: "1.0.3" };
     const path = yield* Path.Path;
     const repoRoot = yield* RepoRoot;
+    buildConfig.afterPack = path.join(repoRoot, "scripts/linux-after-pack.ts");
     buildConfig.linux = {
       // fork: the 2code release ships and verifies the AppImage only.
       target: target === "AppImage" && !distributionProfile ? [target, "deb"] : [target],

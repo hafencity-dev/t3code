@@ -1,8 +1,10 @@
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import { decodeLegacy2CodeImportManifestJson } from "@t3tools/shared/fork/legacy2codeImport";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
@@ -31,7 +33,7 @@ const withTemporaryMigration = <A, E, R>(
       recursive: true,
     });
     return yield* run({ fileSystem, path, legacyUserDataPath, targetStateDir });
-  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer));
+  }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)));
 
 describe("Legacy2CodeMigration", () => {
   it.effect("copies first and prepares only real projects and resumable chats", () =>

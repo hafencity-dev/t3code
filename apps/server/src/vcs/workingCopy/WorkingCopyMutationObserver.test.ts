@@ -1,6 +1,7 @@
 // fork: repository invalidation — the observer seam sits inside the service's
 // guarded mutation lane, so reads and rejected cwds never notify.
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -87,7 +88,7 @@ const makeLayer = (options: {
     Layer.provide(
       Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
     ),
-    Layer.provideMerge(NodeServices.layer),
+    Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
   );
 
 it("maps each mutation to the repository domains it can change", () => {

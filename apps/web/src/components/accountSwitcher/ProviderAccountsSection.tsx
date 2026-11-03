@@ -129,7 +129,7 @@ export function ProviderAccountsSection({
       <SettingsGroup variant="grouped" divided>
         {!group ? (
           <p className="px-3 py-2.5 text-sm text-muted-foreground">
-            {provider} isn't set up on this device. Enable it in Settings → Providers.
+            {provider} isn't available on this device.
           </p>
         ) : accounts.length === 0 ? (
           <Empty size="compact">

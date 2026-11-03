@@ -1,4 +1,5 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -111,7 +112,7 @@ const makeLayer = (
     Layer.provide(textGenerationLayer),
     Layer.provide(ServerSettings.layerTest()),
     Layer.provide(providerRegistryLayer),
-    Layer.provideMerge(NodeServices.layer),
+    Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
   );
 
 const identityRoot = (cwd: string) => cwd;
@@ -409,7 +410,7 @@ const generationLayer = (harness: GenerationHarness) =>
     ),
     Layer.provide(harness.settings ?? ServerSettings.layerTest()),
     Layer.provide(providerRegistryLayer),
-    Layer.provideMerge(NodeServices.layer),
+    Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
   );
 
 it.effect(

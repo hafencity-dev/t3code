@@ -198,7 +198,7 @@ const makeClient = Effect.fn("makeClient")(function* (options: {
   const makeSession = (): RpcSession => ({
     client,
     initialConfig: Effect.never,
-    subscribeServerConfig: (input) => client.subscribeServerConfig(input),
+    subscribeServerConfig: (input = {}) => client.subscribeServerConfig(input),
     ready: Effect.void,
     probe: Effect.void,
     inboundFrames: Effect.succeed(0),
