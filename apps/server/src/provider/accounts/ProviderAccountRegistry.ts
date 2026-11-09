@@ -10,6 +10,7 @@ import { materializeCodexAccountHome } from "./CodexAccountHome.ts";
 import { syncDirectory } from "./durableFs.ts";
 
 /** Safe, user-facing registry validation failure; never includes credential contents. */
+// @effect-diagnostics-next-line extendsNativeError:off - The Promise-based registry exposes safe validation failures by instanceof.
 export class ProviderAccountRegistryGuardError extends Error {}
 
 const Driver = Schema.Literals(["claudeAgent", "codex"]);

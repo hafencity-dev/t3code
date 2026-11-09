@@ -28,12 +28,12 @@ import {
 import {
   Clock,
   Context,
-  Data,
   DateTime,
   Effect,
   Layer,
   PubSub,
   Queue,
+  Schema,
   Semaphore,
   Stream,
 } from "effect";
@@ -143,9 +143,10 @@ function claudeCredentialLocation(
 }
 
 // Preserve the native cause for local classification; only redacted typed errors cross RPCs.
-class AccountStorageFailure extends Data.TaggedError("AccountStorageFailure")<{
-  readonly cause: unknown;
-}> {}
+class AccountStorageFailure extends Schema.TaggedError<AccountStorageFailure>()(
+  "AccountStorageFailure",
+  { cause: Schema.Unknown },
+) {}
 
 /** Like `io`, but interruption abandons the promise; only for waits a finalizer aborts. */
 const interruptibleIo = <A>(operation: () => Promise<A>) =>
@@ -182,6 +183,7 @@ const io = <A>(operation: () => Promise<A>) => Effect.uninterruptible(interrupti
 
 /** The live snapshot, when it describes this entry; otherwise the entry's stored numbers apply. */
 function ownSnapshot(entry: ProviderAccountEntry, provider: ServerProvider | undefined) {
+  if (entry.driver === "codex" && provider?.auth.subscriptionSharing) return undefined;
   const metadata = entry.lastUsage;
   // The live Claude snapshot describes whoever is signed in to the active home. It belongs to
   // this entry only while it reports the entry's own identity; a terminal login elsewhere must
@@ -343,10 +345,28 @@ const make = Effect.fn("ProviderAccountsService.make")(function* (
       settings.managedPolicy,
       ProviderDriverKind.make(driver),
     );
+  const readSettings = settings.getSettings.pipe(
+    Effect.mapError(
+      () => new ProviderAccountError({ message: "Could not read provider settings." }),
+    ),
+  );
+  const accountBlockReason = Effect.fn("providerAccounts.blockReason")(function* (
+    driver: ProviderAccountDriver,
+    current?: ServerSettings,
+  ) {
+    const policyBlock = blockedReason(driver);
+    if (policyBlock !== undefined || driver !== "codex") return policyBlock;
+    const codex = yield* resolveProviderAccountConfig(current ?? (yield* readSettings), "codex");
+    // Managed ChatGPT stores its credentials outside the CLI homes this switcher controls.
+    return codex.setupMode === "managed"
+      ? "Open provider settings to change this managed ChatGPT connection."
+      : undefined;
+  });
   const requireAllowed = Effect.fn("providerAccounts.requireAllowed")(function* (
     driver: ProviderAccountDriver,
+    current?: ServerSettings,
   ) {
-    const message = blockedReason(driver);
+    const message = yield* accountBlockReason(driver, current);
     if (message !== undefined) return yield* new ProviderAccountError({ message });
   });
   const secrets = yield* SecretResolver.SecretResolver;
@@ -599,12 +619,8 @@ const make = Effect.fn("ProviderAccountsService.make")(function* (
   const configuration = Effect.fn("providerAccounts.configuration")(function* (
     driver: ProviderAccountDriver,
   ) {
-    yield* requireAllowed(driver);
-    const current = yield* settings.getSettings.pipe(
-      Effect.mapError(
-        () => new ProviderAccountError({ message: "Could not read provider settings." }),
-      ),
-    );
+    const current = yield* readSettings;
+    yield* requireAllowed(driver, current);
     const environment = yield* effectiveEnvironment(current, driver);
     if (driver === "claudeAgent") {
       const providerSettings = yield* resolveProviderAccountConfig(current, driver);
@@ -701,8 +717,9 @@ const make = Effect.fn("ProviderAccountsService.make")(function* (
 
   const listDetailed = Effect.fn("providerAccounts.listDetailed")(function* () {
     const providerSnapshots = yield* providers.getProviders;
-    const allowedDrivers = (["claudeAgent", "codex"] as const).filter(
-      (driver) => blockedReason(driver) === undefined,
+    const current = yield* readSettings;
+    const allowedDrivers = yield* Effect.filter(["claudeAgent", "codex"] as const, (driver) =>
+      accountBlockReason(driver, current).pipe(Effect.map((reason) => reason === undefined)),
     );
     const groups = yield* Effect.forEach(allowedDrivers, (driver) =>
       Effect.gen(function* () {
@@ -1065,14 +1082,14 @@ const make = Effect.fn("ProviderAccountsService.make")(function* (
     const state = yield* groupState(entry.driver);
     const generation = checkoutGeneration[entry.driver];
     if (state.activeAccountId !== id || (entry.driver === "claudeAgent" && claudeBarrier))
-      return yield* Effect.fail(new AccountUsageProbeStaleError("Account changed before refresh."));
+      return yield* new AccountUsageProbeStaleError({ message: "Account changed before refresh." });
     const instanceId = defaultInstanceIdForDriver(ProviderDriverKind.make(entry.driver));
     const refreshed = yield* holds.shared(id)(refreshInstanceLive(instanceId));
     if (
       generation !== checkoutGeneration[entry.driver] ||
       (yield* groupState(entry.driver)).activeAccountId !== id
     )
-      return yield* Effect.fail(new AccountUsageProbeStaleError("Account changed during refresh."));
+      return yield* new AccountUsageProbeStaleError({ message: "Account changed during refresh." });
     const candidate = refreshed.find((provider) => provider.instanceId === instanceId);
     const snapshot = ownSnapshot(entry, candidate);
     if (!snapshot || snapshot.auth.status !== "authenticated" || !snapshot.usageLimits)
@@ -1082,9 +1099,9 @@ const make = Effect.fn("ProviderAccountsService.make")(function* (
       !snapshot.usageLimits.unavailable &&
       !hotSwitchUsage.resolve(id, snapshot).live
     )
-      return yield* Effect.fail(
-        new AccountUsageProbeStaleError("Active usage is not verified for this account."),
-      );
+      return yield* new AccountUsageProbeStaleError({
+        message: "Active usage is not verified for this account.",
+      });
     return {
       checkedAt: snapshot.usageLimits.checkedAt,
       status: "ready" as const,
@@ -1106,9 +1123,9 @@ const make = Effect.fn("ProviderAccountsService.make")(function* (
         entry.driver === "claudeAgent" ? claudeStoreOf(entry) : entry.homePath || state.sharedHome;
       // refreshUsage never asks for a Claude account without a store; fail closed anyway.
       if (homePath === undefined)
-        return yield* Effect.fail(
-          new AccountUsageProbeStaleError("Account has no saved store to probe."),
-        );
+        return yield* new AccountUsageProbeStaleError({
+          message: "Account has no saved store to probe.",
+        });
       const input = { homePath, cwd: config.cwd };
       const result = yield* holds.shared(entry.id)(
         (state.driver === "claudeAgent"
@@ -1139,18 +1156,18 @@ const make = Effect.fn("ProviderAccountsService.make")(function* (
           accountId: entry.id,
           driver: entry.driver,
         });
-        return yield* Effect.fail(
-          new AccountUsageProbeStaleError("Usage probe reported another account."),
-        );
+        return yield* new AccountUsageProbeStaleError({
+          message: "Usage probe reported another account.",
+        });
       }
       // The store was probed before a checkout moved its credentials; drop the result.
       if (
         generation !== checkoutGeneration[entry.driver] ||
         (yield* groupState(entry.driver)).activeAccountId === entry.id
       ) {
-        return yield* Effect.fail(
-          new AccountUsageProbeStaleError("Account was switched during its usage probe."),
-        );
+        return yield* new AccountUsageProbeStaleError({
+          message: "Account was switched during its usage probe.",
+        });
       }
       return result;
     }),
@@ -1459,9 +1476,8 @@ const make = Effect.fn("ProviderAccountsService.make")(function* (
   const startLogin = (owner: string, input: ProviderAccountsStartLoginInput) =>
     Stream.callback<ProviderAccountLoginEvent, ProviderAccountError>((queue) =>
       Effect.gen(function* () {
-        const policyBlock = blockedReason(input.driver);
-        if (policyBlock !== undefined)
-          return yield* Queue.fail(queue, new ProviderAccountError({ message: policyBlock }));
+        const access = yield* Effect.result(requireAllowed(input.driver));
+        if (access._tag === "Failure") return yield* Queue.fail(queue, access.failure);
         let pendingLogin: Promise<void> | undefined;
         // Scope finalizers run in reverse order: abort first, then await native cleanup.
         yield* Effect.addFinalizer(() =>
@@ -1934,7 +1950,9 @@ const make = Effect.fn("ProviderAccountsService.make")(function* (
       if (driver === "claudeAgent") yield* reconcileClaudeUnlocked();
       // list() without its idle reconcile, which the held mutation would skip anyway.
       const detailed = yield* listDetailed();
-      const group = detailed.snapshot.groups.find((entry) => entry.driver === driver)!;
+      const group = detailed.snapshot.groups.find((entry) => entry.driver === driver);
+      if (!group)
+        return yield* new ProviderAccountError({ message: "Provider accounts are unavailable." });
       const now = yield* Clock.currentTimeMillis;
       const probeBlocked = new Set<ProviderAccountId>();
       const probeWakeAt = new Map<ProviderAccountId, number>();

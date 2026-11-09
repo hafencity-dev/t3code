@@ -127,12 +127,13 @@ export function makeProviderAccountSwitch(dependencies: {
       // Use V2's explicit logout/shutdown path and wait for its release records.
       // A session-detached event alone is only a request, not a shutdown receipt.
       yield* dependencies.sessions.closeInstance(instanceId).pipe(
-        Effect.timeout(20_000),
-        Effect.catchTag("TimeoutError", () =>
-          Effect.fail(
-            new ProviderAccountError({ message: "Timed out stopping provider sessions." }),
-          ),
-        ),
+        Effect.timeoutOrElse({
+          duration: 20_000,
+          orElse: () =>
+            Effect.fail(
+              new ProviderAccountError({ message: "Timed out stopping provider sessions." }),
+            ),
+        }),
         Effect.mapError((error) => new ProviderAccountError({ message: error.message })),
       );
     }
@@ -178,14 +179,15 @@ export function makeProviderAccountSwitch(dependencies: {
             yield* PubSub.take(changes);
           }
         }).pipe(
-          Effect.timeout(20_000),
-          Effect.catchTag("TimeoutError", () =>
-            Effect.fail(
-              new ProviderAccountError({
-                message: `Timed out rebuilding the ${target.driver} provider instance after switching accounts.`,
-              }),
-            ),
-          ),
+          Effect.timeoutOrElse({
+            duration: 20_000,
+            orElse: () =>
+              Effect.fail(
+                new ProviderAccountError({
+                  message: `Timed out rebuilding the ${target.driver} provider instance after switching accounts.`,
+                }),
+              ),
+          }),
         );
       }),
     );

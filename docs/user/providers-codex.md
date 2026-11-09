@@ -12,6 +12,9 @@ Manage shared usage and credits in ChatGPT through **Manage usage** in T3 Code.
 If a request uses a feature that ChatGPT sharing does not support, use another
 provider for that request.
 
+Fast and Ultrafast speeds are unavailable with this connection. To use the speed
+options your account supports, [use an existing Codex login](#use-an-existing-codex-login).
+
 When reconnecting, choose the same account in T3 Code and on OpenAI's sign-in
 page. Disconnecting stops running threads but keeps their history and lets you
 reconnect later.
@@ -25,7 +28,13 @@ T3 Code can use your installed Codex and its existing login. Run `codex login`
 on the environment's machine to sign in. [Provider setup](./install.md#providers)
 covers installation and custom configuration.
 
-To save several accounts and switch between them from the sidebar, see
+Running `codex login` does not change a managed ChatGPT connection. In
+**Settings > Providers**, add a Codex instance, choose **Configure manually**,
+and complete the wizard. Then select that instance from the thread's model
+picker. See [Use multiple accounts](#use-multiple-accounts).
+
+If your default Codex instance uses CLI credentials, you can switch between saved CLI logins
+from the sidebar. See
 [Account Switcher](./account-switcher.md).
 
 ## Use multiple accounts

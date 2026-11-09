@@ -10,6 +10,7 @@ const UPDATE_MS = 5_000;
 const RETRY_MS = 100;
 const LOCK_ERROR = "Could not safely lock Claude credentials. Try again shortly.";
 
+// @effect-diagnostics-next-line extendsNativeError:off - Promise-based lock recovery classifies this error by instanceof.
 export class ClaudeCredentialLockTimeoutError extends Error {
   constructor() {
     super("Claude is refreshing its login, try again in a moment");

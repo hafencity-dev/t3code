@@ -31,6 +31,7 @@ export type ClaudeCredentialSwitchAbandoned = {
   reason: string;
   journalPath: string;
 };
+// @effect-diagnostics-next-line extendsNativeError:off - Native credential recovery distinguishes the unrecoverable subclass by instanceof.
 export class ClaudeCredentialSwitchError extends Error {
   override readonly name = "ClaudeCredentialSwitchError";
 }

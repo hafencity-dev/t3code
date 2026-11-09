@@ -1,4 +1,5 @@
 // fork: provider accounts
+import * as Schema from "effect/Schema";
 import {
   ProviderAccountError,
   ClaudeSettings,
@@ -24,6 +25,11 @@ import {
 import { codexRateLimitsToLimits } from "../codexUsageLimits.ts";
 import { makeUnavailableUsageLimits } from "@t3tools/provider-core/server/usageLimits";
 import { inactiveUsageStaleness } from "@t3tools/shared/fork/accountUsageWindows";
+
+class ClaudeAccountUsageProbeError extends Schema.TaggedError<ClaudeAccountUsageProbeError>()(
+  "ClaudeAccountUsageProbeError",
+  { cause: Schema.Defect() },
+) {}
 
 export interface AccountUsage {
   readonly lastAttemptAt?: number | undefined;
@@ -63,39 +69,42 @@ export const probeAccountUsage = Effect.fn("providerAccounts.probeUsage")(functi
       environment,
     );
     const managedMcpConfig = yield* hasClaudeManagedMcpConfig();
-    const result = yield* Effect.tryPromise(async (signal) => {
-      const abort = new AbortController();
-      const cancel = () => abort.abort();
-      signal.addEventListener("abort", cancel, { once: true });
-      try {
-        const q = claudeQuery({
-          // oxlint-disable-next-line require-yield -- Keep the SDK input open without sending a user message during the usage probe.
-          prompt: (async function* (): AsyncGenerator<SDKUserMessage> {
-            await new Promise<void>((resolve) => {
-              if (abort.signal.aborted) resolve();
-              else abort.signal.addEventListener("abort", () => resolve(), { once: true });
-            });
-          })(),
-          options: buildClaudeCapabilitiesProbeQueryOptions({
-            executablePath,
-            abortController: abort,
-            environment,
-            cwd: input.cwd,
-            managedMcpConfig,
-          }),
-        });
-        const init = await q.initializationResult();
-        const account = init.account;
-        if (!account?.email && !account?.tokenSource && !account?.subscriptionType)
-          return undefined;
-        const usage = await q.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET({
-          skipBehaviors: true,
-        });
-        return { ...account, usage };
-      } finally {
-        signal.removeEventListener("abort", cancel);
-        abort.abort();
-      }
+    const result = yield* Effect.tryPromise({
+      try: async (signal) => {
+        const abort = new AbortController();
+        const cancel = () => abort.abort();
+        signal.addEventListener("abort", cancel, { once: true });
+        try {
+          const q = claudeQuery({
+            // oxlint-disable-next-line require-yield -- Keep the SDK input open without sending a user message during the usage probe.
+            prompt: (async function* (): AsyncGenerator<SDKUserMessage> {
+              await new Promise<void>((resolve) => {
+                if (abort.signal.aborted) resolve();
+                else abort.signal.addEventListener("abort", () => resolve(), { once: true });
+              });
+            })(),
+            options: buildClaudeCapabilitiesProbeQueryOptions({
+              executablePath,
+              abortController: abort,
+              environment,
+              cwd: input.cwd,
+              managedMcpConfig,
+            }),
+          });
+          const init = await q.initializationResult();
+          const account = init.account;
+          if (!account?.email && !account?.tokenSource && !account?.subscriptionType)
+            return undefined;
+          const usage = await q.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET({
+            skipBehaviors: true,
+          });
+          return { ...account, usage };
+        } finally {
+          signal.removeEventListener("abort", cancel);
+          abort.abort();
+        }
+      },
+      catch: (cause) => new ClaudeAccountUsageProbeError({ cause }),
     });
     if (!result) return { checkedAt, status: "signedOut" } satisfies AccountUsage;
     const subscriptionType = resolveClaudeUsageSubscriptionType(
@@ -169,9 +178,12 @@ export const probeAccountUsage = Effect.fn("providerAccounts.probeUsage")(functi
 }, Effect.scoped);
 
 /** Thrown by a probe whose account was checked out while it ran; its result is dropped. */
-export class AccountUsageProbeStaleError extends Error {
-  override readonly name = "AccountUsageProbeStaleError";
-}
+export class AccountUsageProbeStaleError extends Schema.TaggedError<AccountUsageProbeStaleError>()(
+  "AccountUsageProbeStaleError",
+  { message: Schema.String },
+) {}
+
+const isAccountUsageProbeStale = Schema.is(AccountUsageProbeStaleError);
 
 /** The shared probe budget: at most `MAX_ATTEMPTS` inactive probes per rolling window. */
 export const ACCOUNT_USAGE_BUDGET_WINDOW_MS = 5 * 60_000;
@@ -307,7 +319,7 @@ export const makeAccountUsageCache = <E, R>(dependencies: {
           Effect.catch((error) =>
             Effect.gen(function* () {
               // A stale result is neither a measurement nor a failure; the attempt still counted.
-              if (error instanceof AccountUsageProbeStaleError) return undefined;
+              if (isAccountUsageProbeStale(error)) return undefined;
               const failedAt = yield* Clock.currentTimeMillis;
               const { rateLimited, retryAt } = usageProbeFailureDetails(error, failedAt);
               const consecutiveFailures = (prior?.consecutiveFailures ?? 0) + 1;

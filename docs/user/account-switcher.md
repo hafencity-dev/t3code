@@ -3,6 +3,10 @@
 Save several Claude Code and Codex accounts and switch between them when one runs low. Open
 **Accounts** in the sidebar, below the usage stats.
 
+The sidebar manages Codex logins when the default Codex instance uses CLI credentials. If it uses
+a managed ChatGPT connection, select the account from the thread’s model picker. See
+[Use multiple accounts](./providers-codex.md#use-multiple-accounts).
+
 ## Add an account
 
 1. Open **Accounts** and select **Add account** next to Claude Code or Codex.

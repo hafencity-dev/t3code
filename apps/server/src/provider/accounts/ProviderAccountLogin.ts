@@ -62,7 +62,6 @@ export class ProviderAccountLoginParser {
     this.#raw = (this.#raw + chunk).slice(-65_536);
     // Hide incomplete OSC / CSI sequences until their next chunk arrives.
     const text = NodeUtil.stripVTControlCharacters(
-      // eslint-disable-next-line no-control-regex -- Match terminal escape sequences.
       this.#raw.replace(/\x1b(?:\][^\x07\x1b]*(?:\x1b)?|\[[0-?]*[ -/]*)$/u, ""),
     );
     const urlMatch = text.match(
@@ -138,6 +137,7 @@ const decodeCodexAuth = Schema.decodeUnknownSync(Schema.fromJsonString(CodexAuth
 const decodeCodexClaims = Schema.decodeUnknownSync(Schema.fromJsonString(CodexClaims));
 
 /** A sign-in, code, cancel or logout failure whose message is safe to show; never CLI output. */
+// @effect-diagnostics-next-line extendsNativeError:off - The native CLI login adapter exposes only this error class to its RPC boundary.
 export class ProviderAccountLoginError extends Error {
   override readonly name = "ProviderAccountLoginError";
 }
@@ -272,7 +272,7 @@ export class ProviderAccountLogin {
     const session = this.#owned(owner, loginId);
     if (!session.acceptsCode || !session.child || session.controller.signal.aborted)
       throw new LoginFailure("This sign-in is not waiting for a code.");
-    // eslint-disable-next-line no-control-regex -- Reject line injection into CLI stdin.
+
     if (!code.trim() || code.length > 8192 || /[\r\n\x00]/u.test(code))
       throw new LoginFailure("Invalid sign-in code.");
     const child = session.child;

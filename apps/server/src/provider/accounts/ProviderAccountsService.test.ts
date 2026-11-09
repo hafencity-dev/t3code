@@ -191,6 +191,7 @@ describe("ProviderAccountsService", () => {
       login?: Parameters<typeof ProviderAccountsService.layerWithLogin>[0];
       before?: () => Promise<void>;
       claudeHomePath?: string;
+      managedCodex?: boolean;
       pending?: boolean;
       backoff?: boolean;
       runningClaude?: boolean;
@@ -225,6 +226,7 @@ describe("ProviderAccountsService", () => {
     const dependencies = Layer.mergeAll(
       Layer.succeed(SecretResolver.SecretResolver, {
         read: () => Effect.succeed(options.secretValues ?? []),
+        label: Effect.succeed,
         invalidate: () => Effect.void,
       }),
       ServerConfig.layerTest(root, NodePath.join(root, "state")),
@@ -252,6 +254,7 @@ describe("ProviderAccountsService", () => {
               config: {
                 homePath: NodePath.join(root, "codex"),
                 binaryPath: "never-spawn-this-cli",
+                ...(options.managedCodex ? { setupMode: "managed" } : {}),
               },
               environment: options.environment ?? [
                 { name: "OPENAI_API_KEY", value: "private-value", sensitive: true },
@@ -585,9 +588,13 @@ describe("ProviderAccountsService", () => {
       ),
   );
 
-  it.effect.each(["claudeAgent", "codex"] as const)(
-    "keeps only policy-allowed %s accounts usable without launching the blocked driver",
-    (allowed) => {
+  it.effect.each([
+    { allowed: "claudeAgent", reason: "policy does not allow" },
+    { allowed: "codex", reason: "policy does not allow" },
+    { allowed: "claudeAgent", reason: "managed ChatGPT" },
+  ] as const)(
+    "keeps $allowed accounts usable when the other driver is blocked by $reason",
+    ({ allowed, reason }) => {
       const blocked = allowed === "codex" ? "claudeAgent" : "codex";
       const start = vi.fn(async () => {});
       let callbacks: ProviderAccountLoginOptions;
@@ -601,7 +608,7 @@ describe("ProviderAccountsService", () => {
           const failure = yield* service
             .startLogin("owner", { driver: blocked })
             .pipe(Stream.runCollect, Effect.flip);
-          expect(failure.message).toContain("policy does not allow");
+          expect(failure.message).toContain(reason);
           expect(start).not.toHaveBeenCalled();
           if (blocked === "codex") {
             const accountId = ProviderAccountId.make(seeded!.id);
@@ -611,13 +618,11 @@ describe("ProviderAccountsService", () => {
               service.setAutoSwitchExcluded({ accountId, excluded: true }),
               service.switchAccount({ accountId }),
             ]) {
-              expect((yield* operation.pipe(Effect.flip)).message).toContain(
-                "policy does not allow",
-              );
+              expect((yield* operation.pipe(Effect.flip)).message).toContain(reason);
             }
           }
           yield* Effect.promise(() =>
-            expect(callbacks.prepare({ driver: blocked })).rejects.toThrow("policy does not allow"),
+            expect(callbacks.prepare({ driver: blocked })).rejects.toThrow(reason),
           );
           expect(
             yield* service.setAutoSwitch({ driver: blocked, enabled: true }).pipe(Effect.flip),
@@ -629,11 +634,15 @@ describe("ProviderAccountsService", () => {
         }),
         allowed === "claudeAgent",
         {
-          managedPolicy: {
-            organization: "Fixture",
-            lockedSettings: [],
-            limits: { providers: { allowedDrivers: [ProviderDriverKind.make(allowed)] } },
-          },
+          ...(reason === "managed ChatGPT"
+            ? { managedCodex: true }
+            : {
+                managedPolicy: {
+                  organization: "Fixture",
+                  lockedSettings: [],
+                  limits: { providers: { allowedDrivers: [ProviderDriverKind.make(allowed)] } },
+                },
+              }),
           login: (options) => {
             callbacks = options;
             return {
@@ -647,6 +656,28 @@ describe("ProviderAccountsService", () => {
         },
       );
     },
+  );
+
+  it.effect(
+    "ignores a managed ChatGPT snapshot while the existing CLI instance is rebuilding",
+    () =>
+      run(
+        Effect.gen(function* () {
+          const service = yield* ProviderAccountsService;
+          const codex = (yield* service.list()).groups.find((group) => group.driver === "codex")!;
+          const account = codex.accounts.find((entry) => entry.active)!;
+          expect(account.email).toBeUndefined();
+          expect(account.usage).toBeUndefined();
+        }),
+        false,
+        {
+          providerRegistry: Effect.succeed({
+            getProviders: Effect.succeed([
+              { ...provider, auth: { ...provider.auth, subscriptionSharing: true } },
+            ]),
+          }),
+        },
+      ),
   );
 
   it.effect(

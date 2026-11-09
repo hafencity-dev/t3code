@@ -1,15 +1,16 @@
 import { assert, describe, it } from "@effect/vitest";
-import { Clock, Effect, Fiber } from "effect";
+import { Clock, Effect, Fiber, Schema } from "effect";
 import { TestClock } from "effect/testing";
 import { retryAppleNetworkCommand } from "./apple-command-retry.ts";
 
-class CommandFailure extends Error {
-  readonly _tag = "CommandFailure";
-}
+class CommandFailure extends Schema.TaggedError<CommandFailure>()("CommandFailure", {
+  message: Schema.String,
+}) {}
 
-const networkFailure = new CommandFailure(
-  'Command exited with non-zero exit code (1)\nstdout:\nError Domain=NSURLErrorDomain Code=-1005 "The network connection was lost."',
-);
+const networkFailure = new CommandFailure({
+  message:
+    'Command exited with non-zero exit code (1)\nstdout:\nError Domain=NSURLErrorDomain Code=-1005 "The network connection was lost."',
+});
 
 describe("Apple packaging command retry", () => {
   it.effect("retries transient output failures at 15, 30 and 45 seconds and returns success", () =>
@@ -17,7 +18,7 @@ describe("Apple packaging command retry", () => {
       const attempts: number[] = [];
       const operation = Effect.gen(function* () {
         attempts.push(yield* Clock.currentTimeMillis);
-        return attempts.length < 4 ? yield* Effect.fail(networkFailure) : "packaged";
+        return attempts.length < 4 ? yield* networkFailure : "packaged";
       }).pipe(retryAppleNetworkCommand("Package app"));
       const fiber = yield* Effect.forkChild(operation);
       yield* TestClock.adjust("90 seconds");
@@ -32,7 +33,9 @@ describe("Apple packaging command retry", () => {
       const failures: CommandFailure[] = [];
       const operation = Effect.suspend(() => {
         attempts++;
-        const error = new CommandFailure(`${networkFailure.message} (attempt ${attempts})`);
+        const error = new CommandFailure({
+          message: `${networkFailure.message} (attempt ${attempts})`,
+        });
         failures.push(error);
         return Effect.fail(error);
       }).pipe(retryAppleNetworkCommand("Package app"), Effect.flip);
@@ -53,7 +56,7 @@ describe("Apple packaging command retry", () => {
           "The staple and validate action failed! Error 68.",
           "NSURLErrorDomain Code=-1202: Certificate is not trusted",
         ]) {
-          const error = new CommandFailure(message);
+          const error = new CommandFailure({ message });
           let attempts = 0;
           const result = yield* Effect.suspend(() => {
             attempts++;
@@ -67,11 +70,12 @@ describe("Apple packaging command retry", () => {
 
   it.effect("stops if the next attempt reveals a permanent failure", () =>
     Effect.gen(function* () {
-      const permanent = new CommandFailure("No notarization ticket found.");
+      const permanent = new CommandFailure({ message: "No notarization ticket found." });
       let attempts = 0;
-      const operation = Effect.suspend(() =>
-        Effect.fail(++attempts === 1 ? networkFailure : permanent),
-      ).pipe(retryAppleNetworkCommand("Package app"), Effect.flip);
+      const operation = Effect.failSync(() => (++attempts === 1 ? networkFailure : permanent)).pipe(
+        retryAppleNetworkCommand("Package app"),
+        Effect.flip,
+      );
       const fiber = yield* Effect.forkChild(operation);
       yield* TestClock.adjust("15 seconds");
       assert.strictEqual(yield* Fiber.join(fiber), permanent);

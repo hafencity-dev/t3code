@@ -356,55 +356,57 @@ export const makeProviderAccountAutoSwitch = Effect.fn("makeProviderAccountAutoS
           // this mutation; a turn starting between that check and settings patch is a v1 race.
           const switched = yield* deps.switchAccount(target.id).pipe(
             Effect.as(true),
-            Effect.catchTag("ProviderAccountError", (error) =>
-              Effect.gen(function* () {
-                runtime.pendingKey = undefined;
-                runtime.state = {
-                  state: "paused",
-                  message: `Couldn't switch to ${target.label}: ${error.message}`,
-                };
-                yield* Effect.logWarning("Provider account auto-switch could not switch", {
-                  driver,
-                });
-                if (deps.recordSwitch)
-                  yield* deps.recordSwitch({
+            Effect.catchTags({
+              ProviderAccountError: Effect.fn("providerAccounts.autoSwitch.failed")(
+                function* (error) {
+                  runtime.pendingKey = undefined;
+                  runtime.state = {
+                    state: "paused",
+                    message: `Couldn't switch to ${target.label}: ${error.message}`,
+                  };
+                  yield* Effect.logWarning("Provider account auto-switch could not switch", {
                     driver,
-                    outcome: "failed",
-                    from: active,
-                    to: target,
-                    trigger: decision.trigger,
-                    summary: decision.summary,
-                    reason: decision.reason,
-                    error: error.message,
                   });
-                return false;
-              }),
-            ),
-            Effect.catchTag("ProviderAccountBusyError", (error) =>
-              Effect.gen(function* () {
-                if (group.switchMode === "hot") return yield* error;
-                runtime.needsIdle = true;
-                runtime.state = {
-                  state: "pending",
-                  message: decision.reason,
-                  pendingTargetAccountId: target.id,
-                  ...(decision.endgame ? { endgame: true as const } : {}),
-                };
-                const key = `${target.id}:${error.runningTurnCount}:${decision.reason}`;
-                if (runtime.pendingKey !== key) {
-                  runtime.pendingKey = key;
-                  yield* deps.publish({
-                    _tag: "pending",
-                    driver,
-                    toAccountId: target.id,
-                    toLabel: target.label,
-                    runningTurnCount: error.runningTurnCount,
-                    reason: decision.reason,
-                  });
-                }
-                return false;
-              }),
-            ),
+                  if (deps.recordSwitch)
+                    yield* deps.recordSwitch({
+                      driver,
+                      outcome: "failed",
+                      from: active,
+                      to: target,
+                      trigger: decision.trigger,
+                      summary: decision.summary,
+                      reason: decision.reason,
+                      error: error.message,
+                    });
+                  return false;
+                },
+              ),
+              ProviderAccountBusyError: Effect.fn("providerAccounts.autoSwitch.busy")(
+                function* (error) {
+                  if (group.switchMode === "hot") return yield* error;
+                  runtime.needsIdle = true;
+                  runtime.state = {
+                    state: "pending",
+                    message: decision.reason,
+                    pendingTargetAccountId: target.id,
+                    ...(decision.endgame ? { endgame: true as const } : {}),
+                  };
+                  const key = `${target.id}:${error.runningTurnCount}:${decision.reason}`;
+                  if (runtime.pendingKey !== key) {
+                    runtime.pendingKey = key;
+                    yield* deps.publish({
+                      _tag: "pending",
+                      driver,
+                      toAccountId: target.id,
+                      toLabel: target.label,
+                      runningTurnCount: error.runningTurnCount,
+                      reason: decision.reason,
+                    });
+                  }
+                  return false;
+                },
+              ),
+            }),
           );
           if (!switched) return;
           const at = yield* Clock.currentTimeMillis;
