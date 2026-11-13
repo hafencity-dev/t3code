@@ -453,14 +453,67 @@ describe("ProviderAccountAutoSwitch", () => {
     }).pipe(Effect.scoped),
   );
 
+  it.effect(
+    "switches when a Claude snapshot reaches 2% weekly with no reported 5-hour window",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* makeHarness({ driver: "claudeAgent", used: 20 });
+        yield* completed(h.completions, 2);
+        for (const usedPercent of [92, 98]) {
+          h.state.snapshot = {
+            ...h.state.snapshot,
+            group: {
+              ...h.state.snapshot.group,
+              accounts: h.state.snapshot.group.accounts.map((account) => ({
+                ...account,
+                usage: {
+                  checkedAt: new Date(0).toISOString(),
+                  windows: [
+                    {
+                      id: "seven_day",
+                      label: "Weekly",
+                      kind: "weekly" as const,
+                      usedPercent: account.active ? usedPercent : 64,
+                    },
+                  ],
+                },
+              })),
+            },
+          };
+          yield* Queue.offer(h.providers, [
+            decodeProvider({
+              instanceId: "claudeAgent",
+              driver: "claudeAgent",
+              enabled: true,
+              installed: true,
+              status: "ready",
+              auth: { status: "authenticated" },
+              version: null,
+              models: [],
+              checkedAt: new Date(0).toISOString(),
+              usageLimits: h.state.snapshot.group.accounts[0]!.usage,
+            }),
+          ]);
+        }
+        expect(yield* Queue.take(h.events)).toMatchObject({
+          _tag: "switched",
+          trigger: "weekly",
+          fromAccountId: personal,
+          toAccountId: work,
+        });
+        expect(h.state.probes).toEqual([]);
+      }).pipe(Effect.scoped),
+  );
+
   // After a hot switch the active account's numbers may be its stored ones, from before it was
   // used; they can't show it running low. A re-read finds the real numbers.
   it.effect("re-reads stale active usage after a minute and switches on the live numbers", () =>
     Effect.gen(function* () {
-      const h = yield* makeHarness({ driver: "claudeAgent", used: 50, staleActive: true });
+      const h = yield* makeHarness({ driver: "claudeAgent", used: 99, staleActive: true });
       yield* completed(h.completions, 2);
       expect(h.reactor.getState("claudeAgent").state).toBe("watching");
       expect(h.state.activeRefreshes).toBe(0);
+      expect(h.state.switches).toEqual([]);
       h.state.liveUsed = 95;
       yield* TestClock.adjust(60_000);
       expect(yield* Queue.take(h.events)).toMatchObject({

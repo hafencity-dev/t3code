@@ -7,6 +7,7 @@ import type {
 } from "@t3tools/contracts";
 import {
   accountGatingWindows,
+  PRIMARY_WEEKLY_WINDOW_ID,
   hasNoSessionLimit,
   inactiveUsageStaleness,
 } from "@t3tools/shared/fork/accountUsageWindows";
@@ -114,6 +115,25 @@ export type AutoSwitchDecision =
       readonly endgame?: true;
     };
 
+export function hasMeasuredUsage(
+  driver: AutoSwitchAccountView["driver"],
+  usage: ServerProviderUsageLimits | undefined,
+) {
+  return (
+    usage !== undefined &&
+    usage.unavailable === undefined &&
+    usage.windows.some(
+      (window) =>
+        Number.isFinite(window.usedPercent) &&
+        window.usedPercent >= 0 &&
+        window.usedPercent <= 100 &&
+        (driver !== "claudeAgent" ||
+          window.kind === "session" ||
+          (window.id === PRIMARY_WEEKLY_WINDOW_ID && window.kind === "weekly")),
+    )
+  );
+}
+
 function summarize(
   account: AutoSwitchAccountView,
   now: number,
@@ -146,13 +166,7 @@ function summarize(
   const blockers = windows.filter((window) => window.left <= thresholdFor(window.kind, thresholds));
   return {
     account,
-    known:
-      usable &&
-      (account.driver !== "claudeAgent" ||
-        sessions.length > 0 ||
-        hasNoSessionLimit(account.usage)) &&
-      (account.usage?.windows.length ?? 0) > 0 &&
-      account.usage?.unavailable?.reason !== "unsupported",
+    known: hasMeasuredUsage(account.driver, account.usage),
     fresh: usable && (probed.has(account.id) || !inactiveUsageStaleness(account.usage, now).stale),
     confirmed: usable && (probed.has(account.id) || usageConfirmed(account.usage, now)),
     hasSession: sessions.length > 0,
@@ -174,6 +188,14 @@ function summarize(
 }
 
 type Summary = ReturnType<typeof summarize>;
+
+function sessionDescription(summary: Summary) {
+  return summary.hasSession
+    ? `${summary.sessionLeft}% 5-hour`
+    : summary.noSessionLimit
+      ? "no 5-hour limit"
+      : "5-hour usage unreported";
+}
 
 /**
  * Recent enough to switch to without a confirmation probe: fresh under the inactive staleness
@@ -361,15 +383,25 @@ export function chooseNextAccount(input: AutoSwitchInput): AutoSwitchDecision {
   const config = endgame ? { ...input.config, ...endgameRules(input.config) } : input.config;
   const { current, candidates } = endgame ? summaries(config) : base;
   const endgameFlag = endgame && input.config.enabled ? { endgame: true as const } : {};
+  const needsEndgameCheck = stage !== "off" && needFor(base.current, input.config) !== undefined;
+  const unchecked = needsEndgameCheck
+    ? base.candidates.filter((candidate) => !candidate.known || !candidate.fresh)
+    : [];
+  const retryAt = Math.min(
+    ...unchecked.flatMap((candidate) => {
+      const at = input.probeWakeAt?.get(candidate.account.id);
+      return at !== undefined && at > now ? [at] : [];
+    }),
+  );
   const stay = (
     code: Extract<AutoSwitchDecision, { kind: "stay" }>["code"],
     reason: string,
-    wakeAt?: number,
+    wakeAt = Infinity,
   ): AutoSwitchDecision => ({
     kind: "stay",
     code,
     reason,
-    ...(wakeAt !== undefined && Number.isFinite(wakeAt) ? { wakeAt } : {}),
+    ...(Number.isFinite(Math.min(wakeAt, retryAt)) ? { wakeAt: Math.min(wakeAt, retryAt) } : {}),
     ...endgameFlag,
   });
   const duration = (at: number) =>
@@ -426,6 +458,15 @@ export function chooseNextAccount(input: AutoSwitchInput): AutoSwitchDecision {
       "healthy",
       `Waiting for usage from ${active.label} before switching at ${threshold}% 5-hour or ${weeklyThreshold}% weekly left.`,
     );
+  // Only lower the weekly threshold after checking candidates whose quota might have recovered.
+  const checkable = unchecked
+    .filter(
+      (candidate) =>
+        !probed.has(candidate.account.id) && !input.probeBlocked?.has(candidate.account.id),
+    )
+    .sort(compare)
+    .slice(0, maxProbe);
+  if (checkable.length > 0) return probe(checkable);
   const hard = signedOut || current.sessionLeft <= 0 || current.longLeft <= 0;
   const need = needFor(current, config);
   const targetResets = (target: Summary) =>
@@ -434,7 +475,7 @@ export function chooseNextAccount(input: AutoSwitchInput): AutoSwitchDecision {
       : `${target.account.label} has ${target.longLeft}% weekly left`;
   const switchSummaries = {
     session: (target: Summary) =>
-      `5-hour limit at ${current.sessionLeft}% · ${target.account.label} has ${target.noSessionLimit ? "no 5-hour limit" : `${target.sessionLeft}% left`}`,
+      `5-hour limit at ${current.sessionLeft}% · ${target.account.label} has ${target.hasSession ? `${target.sessionLeft}% left` : sessionDescription(target)}`,
     weekly: (target: Summary) => `Weekly limit at ${current.longLeft}% · ${targetResets(target)}`,
     signedOut: (target: Summary) =>
       `${active.label} is signed out or unavailable · ${targetResets(target)}`,
@@ -455,7 +496,7 @@ export function chooseNextAccount(input: AutoSwitchInput): AutoSwitchDecision {
         ? `${active.label} is at ${current.longLeft}% of its weekly limit; switching to ${target.account.label} (${target.longLeft}% left, resets in ${remainingText(target.deadline - now)}).`
         : trigger === "expiring"
           ? `${target.account.label}'s weekly limit resets in ${duration(target.deadline)}, sooner than ${active.label}'s (${Number.isFinite(current.deadline) ? duration(current.deadline) : "no known reset"}). Using ${target.account.label} first so its quota doesn't expire unused.`
-          : `${active.label} ${trigger === "signedOut" ? "is signed out or unavailable" : trigger === "session" ? `has ${current.sessionLeft}% of its 5-hour limit left` : `has ${current.longLeft}% of its weekly limit left`}; switching to ${target.account.label} (${trigger === "weekly" ? "" : target.noSessionLimit ? "no 5-hour limit; " : `5-hour ${target.sessionLeft}% left; `}weekly resets in ${duration(target.deadline)}, ${target.longLeft}% left).`,
+          : `${active.label} ${trigger === "signedOut" ? "is signed out or unavailable" : trigger === "session" ? `has ${current.sessionLeft}% of its 5-hour limit left` : `has ${current.longLeft}% of its weekly limit left`}; switching to ${target.account.label} (${trigger === "weekly" ? "" : target.hasSession ? `5-hour ${target.sessionLeft}% left; ` : `${sessionDescription(target)}; `}weekly resets in ${duration(target.deadline)}, ${target.longLeft}% left).`,
   });
   // At or below the threshold, any healthy candidate wins; the target margin prevents flapping.
   if (need !== undefined) {
@@ -581,7 +622,7 @@ export function chooseNextAccount(input: AutoSwitchInput): AutoSwitchDecision {
         ? `Endgame: using ${active.label} down to ${endgameFloorPercent}% before switching (all accounts are low).`
         : skipped !== undefined
           ? `Keeping ${active.label}. ${skipped.account.label} resets sooner but only has ${skipped.longLeft}% weekly left.`
-          : `${active.label} has ${current.noSessionLimit ? "no 5-hour limit" : `${current.sessionLeft}% 5-hour`} and ${current.longLeft}% weekly quota left; no switch needed.`,
+          : `${active.label} has ${sessionDescription(current)} and ${current.longLeft}% weekly quota left; no switch needed.`,
     Math.min(sessionWakeAt, weeklyWakeAt),
   );
 }

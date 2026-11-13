@@ -391,21 +391,37 @@ describe("chooseNextAccount 32-scenario policy table", () => {
     );
   });
 
-  it("does not invent session headroom for an unmeasured Claude bucket", () => {
-    const active = {
-      ...personal,
+  it("rotates at the weekly threshold when Claude reports only the all-model weekly", () => {
+    const weeklyOnly = (label: string, left: number) => ({
+      ...account(label),
       driver: "claudeAgent" as const,
       usage: {
         checkedAt: iso(0),
-        windows: [{ ...window("weekly", 80, 72 * hour), id: "seven_day" }],
+        windows: [{ ...window("weekly", left, 72 * hour), id: "seven_day" }],
+      },
+    });
+    const active = weeklyOnly("Personal", 2);
+    const candidate = weeklyOnly("Work", 36);
+    expect(chooseNextAccount(input({ active, candidates: [candidate] }))).toMatchObject(
+      switchTo("Work", "weekly"),
+    );
+    expect(chooseNextAccount(input({ active, candidates: [stale(candidate)] }))).toMatchObject(
+      probe("Work"),
+    );
+    const higher = weeklyOnly("Personal", 3);
+    expect(chooseNextAccount(input({ active: higher, candidates: [candidate] })).reason).toContain(
+      "5-hour usage unreported",
+    );
+    const modelOnly = {
+      ...candidate,
+      usage: {
+        ...candidate.usage,
+        windows: [{ ...window("weekly", 90, 72 * hour), id: "seven_day_fable" }],
       },
     };
-    expect(chooseNextAccount(input({ active, candidates: [] })).reason).toContain(
-      "Waiting for usage",
+    expect(chooseNextAccount(input({ active, candidates: [modelOnly] }))).toMatchObject(
+      probe("Work"),
     );
-    expect(
-      chooseNextAccount(input({ active: low, candidates: [{ ...active, id: id("Unknown") }] })),
-    ).toMatchObject({ kind: "probe" });
   });
 
   it("keeps a confirmed session-exempt account on its weekly quota", () => {
@@ -1120,6 +1136,15 @@ describe("endgame: every account runs down to 1% when all are low", () => {
   });
 
   it("returns to the normal rules as soon as any account has normal headroom again", () => {
+    // An unmeasured account might still have normal weekly headroom.
+    expect(decide(hauke(2), [marcos(3), { ...claude2(0), usage: undefined }])).toMatchObject(
+      probe("claude2"),
+    );
+    const blocked = decide(hauke(2), [marcos(3), { ...claude2(0), usage: undefined }], {
+      probeBlocked: new Set([id("claude2")]),
+      probeWakeAt: new Map([[id("claude2"), now + 10 * minute]]),
+    });
+    expect(blocked).toMatchObject({ kind: "stay", wakeAt: now + 10 * minute });
     // claude2's weekly reset gave it fresh quota: hauke switches at the normal 2% threshold.
     const decision = decide(hauke(2), [marcos(3), hauke(2), claude2(90)]);
     expect(decision).toMatchObject(switchTo("claude2", "weekly"));

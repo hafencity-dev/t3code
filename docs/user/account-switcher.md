@@ -62,7 +62,9 @@ Turn on **Auto-switch** per provider. It has two thresholds: **5-hour at** (10% 
 and **Weekly at** (2% left by default). The weekly threshold is low so each account's weekly quota
 gets used almost fully, while still switching before it runs out, so no chat stops mid-turn. When
 the active account reaches either threshold, T3 Code switches to the account whose weekly limit
-resets soonest and still has headroom, so no weekly quota expires unused. It also switches early,
+resets soonest and still has headroom. When Claude reports only the all-model weekly limit, that
+limit determines when the account switches. If Claude also reports a 5-hour limit, both thresholds
+apply. It also switches early,
 while the active account is still healthy, when another account's weekly limit resets sooner, so
 that quota is used up first. An account is only switched to while it has at least 3 points more
 weekly quota left than the weekly threshold (5% with the default 2%), so it never has to switch

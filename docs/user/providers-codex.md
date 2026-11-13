@@ -37,6 +37,34 @@ If your default Codex instance uses CLI credentials, you can switch between save
 from the sidebar. See
 [Account Switcher](./account-switcher.md).
 
+## Allow more time for provider checks
+
+If an authenticated Codex installation reports “Timed out while checking Codex
+app-server provider status,” set `T3CODE_CODEX_PROBE_TIMEOUT_MS=60000` in the
+T3 server's environment and restart it. See [Provider check timeouts](./install.md#provider-check-timeouts)
+for configuration and other providers.
+
+## Generate images
+
+Codex can generate images directly in a T3 Code thread when your Codex version,
+model, and account support native image generation.
+
+If Codex reports that its image tool is unavailable, image generation may be
+disabled in its configuration. In **Settings → Providers**, edit your existing
+Codex provider and add this to **Launch arguments**, keeping any other arguments:
+
+```text
+-c features.image_generation=true
+```
+
+This enables the feature for that T3 Code provider without changing your shared
+Codex configuration. You do not need another provider instance or a separate image
+API key. The flag does not add image support to an unsupported model or account.
+
+Launch arguments apply to Codex sessions started after you save them. Start a new
+thread with the same Codex provider and ask it to generate an image. The completed
+image appears in the thread.
+
 ## Use multiple accounts
 
 Add another ChatGPT account in **Settings → Providers**, then select the account
@@ -103,6 +131,15 @@ Codex tools can request access to another app. Respond to the named app's reques
 in the thread on web, desktop, or mobile. Some tools offer access for one request,
 the current session, or permanently. See [Permission modes](./permission-modes.md)
 for command and file approvals.
+
+## Use Daybreak
+
+Models with cyber access programs show a Cyber Access option in the model
+options. It starts on Standard, or on Daybreak when `config.toml` in your Codex
+home sets `daybreak = true` or the model only runs under Daybreak. Your choice carries
+over to new threads. Custom models do not offer it. If Codex rejects a turn
+because your login lacks the program, switch Cyber Access back to Standard or
+sign in to Codex with an account that has it.
 
 ## Codex says I hit a usage limit
 

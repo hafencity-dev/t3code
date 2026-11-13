@@ -9,27 +9,11 @@ import type {
   ProviderAccountGroup,
   ProviderAccountId,
   ServerProvider,
-  ServerProviderUsageLimits,
 } from "@t3tools/contracts";
 import { Clock, DateTime, Effect, Fiber, Queue, Stream } from "effect";
 
 import type { ProviderAccountAutoSwitch as PersistedConfig } from "./ProviderAccountRegistry.ts";
-import { hasNoSessionLimit } from "@t3tools/shared/fork/accountUsageWindows";
-import { atAutoSwitchThreshold, chooseNextAccount } from "./autoSwitchPolicy.ts";
-
-function hasMeasuredUsage(
-  driver: ProviderAccountDriver,
-  usage: ServerProviderUsageLimits | undefined,
-) {
-  return (
-    usage !== undefined &&
-    usage.unavailable === undefined &&
-    usage.windows.length > 0 &&
-    (driver !== "claudeAgent" ||
-      usage.windows.some((window) => window.kind === "session") ||
-      hasNoSessionLimit(usage))
-  );
-}
+import { atAutoSwitchThreshold, chooseNextAccount, hasMeasuredUsage } from "./autoSwitchPolicy.ts";
 
 export interface ProviderAccountAutoSwitchRead {
   readonly config: PersistedConfig;
@@ -175,16 +159,16 @@ export const makeProviderAccountAutoSwitch = Effect.fn("makeProviderAccountAutoS
           const known = hasMeasuredUsage(driver, provider.usageLimits);
           const becameKnown = !runtime.usageKnown && known;
           runtime.usageKnown = known;
-          const key = `${provider.usageLimits?.checkedAt ?? ""}:${provider.auth.status}:${provider.auth.email ?? ""}:${provider.status}:${known}`;
+          const low = atAutoSwitchThreshold(
+            provider.usageLimits?.windows ?? [],
+            runtime.thresholds,
+          );
+          const key = `${provider.usageLimits?.checkedAt ?? ""}:${provider.auth.status}:${provider.auth.email ?? ""}:${provider.status}:${known}:${low}`;
           if (key === lastProviderKey && !becameKnown) return;
           lastProviderKey = key;
           // Waiting on the live snapshot: any new one may be it.
           if (runtime.liveMissingSince !== undefined) return yield* notify(driver);
           const now = yield* Clock.currentTimeMillis;
-          const low = atAutoSwitchThreshold(
-            provider.usageLimits?.windows ?? [],
-            runtime.thresholds,
-          );
           if (
             becameKnown ||
             low ||
@@ -268,7 +252,7 @@ export const makeProviderAccountAutoSwitch = Effect.fn("makeProviderAccountAutoS
           const decision = chooseNextAccount({
             now,
             config,
-            active: view(active),
+            active: liveUsage ? view(active) : { ...view(active), usage: undefined },
             candidates: group.accounts.map(view),
             probed,
             ...(probeBlocked ? { probeBlocked } : {}),
