@@ -3036,7 +3036,8 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       },
     };
     // electron-updater replaces an installed AppImage in place only when its name has no x.y.z version.
-    if (buildConfig.publish) {
+    // fork: the 2code updater feed requires the versioned distribution artifact name.
+    if (buildConfig.publish && !distributionProfile) {
       buildConfig.appImage = {
         artifactName:
           updateChannel === "nightly" ? "T3-Code-Nightly-${arch}.${ext}" : "T3-Code-${arch}.${ext}",

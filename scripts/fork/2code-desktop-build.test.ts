@@ -57,6 +57,20 @@ it.effect("builds a legacy-compatible 2code updater configuration", () =>
       },
     ]);
 
+    const linux = yield* createBuildConfig(
+      "linux",
+      "AppImage",
+      "1.0.108",
+      false,
+      false,
+      undefined,
+      undefined,
+      false,
+      TWO_CODE_PRODUCTION_PROFILE,
+    );
+    const appImage = linux.appImage as { artifactName?: string } | undefined;
+    assert.equal(appImage?.artifactName ?? linux.artifactName, "2code-${version}-${arch}.${ext}");
+
     const mac = config.mac as Record<string, unknown>;
     assert.equal(mac.executableName, "2code");
     assert.equal(mac.artifactName, "2code-${version}-${arch}-mac.${ext}");
