@@ -391,6 +391,65 @@ describe("chooseNextAccount 32-scenario policy table", () => {
     );
   });
 
+  it("uses Claude session capacity before weekly-only accounts and checks again at reset", () => {
+    const config = { enabled: true, thresholdPercent: 20, weeklyThresholdPercent: 2 };
+    const session = (name: string, left: number, weekly = 80) => ({
+      ...account(name, left, weekly, 72 * hour),
+      driver: "claudeAgent" as const,
+    });
+    const weekly = {
+      ...session("Weekly", 100),
+      usage: {
+        checkedAt: iso(0),
+        windows: [{ ...window("weekly", 75, 4 * hour), id: "seven_day" }],
+      },
+    };
+    const check = (active: AutoSwitchAccountView, candidates: AutoSwitchAccountView[]) => ({
+      decision: chooseNextAccount(input({ active, candidates, config })),
+      best: nextAutoSwitchTarget({
+        now,
+        config,
+        activeAccountId: active.id,
+        accounts: [active, ...candidates],
+      }),
+    });
+    expect(check(session("A", 21), [weekly]).decision).toMatchObject(stay("healthy"));
+    expect(check(session("A", 20), [weekly, session("B", 21)])).toMatchObject({
+      decision: switchTo("B"),
+      best: { accountId: id("B"), due: true },
+    });
+    expect(check(session("A", 20), [weekly, session("B", 20)]).decision).toMatchObject(
+      switchTo("Weekly"),
+    );
+    expect(check(weekly, [session("A", 21)])).toMatchObject({
+      decision: switchTo("A", "expiring"),
+      best: { accountId: id("A"), due: true },
+    });
+    expect(check(weekly, [session("A", 20)]).decision).toMatchObject(
+      stay("healthy", now + 2 * hour),
+    );
+    expect(check(weekly, [stale(session("A", 75))]).decision).toMatchObject(probe("A"));
+    const reset = { ...rolled, driver: "claudeAgent" as const };
+    expect(check(weekly, [reset]).decision).toMatchObject(probe("Work"));
+    const retryAt = now + 2 * minute;
+    expect(
+      chooseNextAccount(
+        input({
+          active: weekly,
+          candidates: [reset],
+          config,
+          probeBlocked: new Set([reset.id]),
+          probeWakeAt: new Map([[reset.id, retryAt]]),
+        }),
+      ),
+    ).toMatchObject(stay("healthy", retryAt));
+
+    expect(
+      check(weekly, [session("A", 80, 2), { ...session("B", 80), autoSwitchExcluded: true }])
+        .decision,
+    ).toMatchObject(stay("healthy"));
+  });
+
   it("rotates at the weekly threshold when Claude reports only the all-model weekly", () => {
     const weeklyOnly = (label: string, left: number) => ({
       ...account(label),
@@ -1051,7 +1110,7 @@ describe("using sooner-resetting weekly quota first", () => {
     const decision = decide(marcos, [marcos, lowSession]);
     expect(decision).toMatchObject(stay("healthy", now + 19 * minute));
     expect(decision.reason).toBe(
-      "Keeping marcos. claude2 resets sooner but its 5-hour limit is low; switching when it resets in 19m.",
+      "Keeping marcos. claude2's 5-hour limit is low; switching when it resets in 19m.",
     );
   });
 

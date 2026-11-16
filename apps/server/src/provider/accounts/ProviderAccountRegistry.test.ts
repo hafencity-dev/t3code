@@ -71,7 +71,7 @@ describe("ProviderAccountRegistry", () => {
     const fresh = await createProviderAccountRegistry({ stateDir });
     expect(await fresh.getAutoSwitch("claudeAgent")).toEqual({
       enabled: false,
-      thresholdPercent: 10,
+      thresholdPercent: 20,
       weeklyThresholdPercent: 2,
     });
     expect(await fresh.getAutoSwitch("codex")).toEqual({
@@ -86,7 +86,7 @@ describe("ProviderAccountRegistry", () => {
     const reopened = await createProviderAccountRegistry({ stateDir });
     expect(await reopened.getAutoSwitch("claudeAgent")).toEqual({
       enabled: false,
-      thresholdPercent: 10,
+      thresholdPercent: 20,
       weeklyThresholdPercent: 2,
     });
     expect(await NodeFSP.readFile(registryPath(), "utf8")).toBe(before);
@@ -104,7 +104,7 @@ describe("ProviderAccountRegistry", () => {
     };
     await Promise.all([
       registry.updateAutoSwitch("claudeAgent", { enabled: true, lastSwitch }),
-      registry.updateAutoSwitch("claudeAgent", { thresholdPercent: 5 }),
+      registry.updateAutoSwitch("claudeAgent", { thresholdPercent: 25 }),
       registry.updateAutoSwitch("codex", { thresholdPercent: 50 }),
       registry.list("claudeAgent", shared),
     ]);
@@ -113,7 +113,7 @@ describe("ProviderAccountRegistry", () => {
     const { accessToken: _, ...expectedLastSwitch } = lastSwitch;
     expect(await reopened.getAutoSwitch("claudeAgent")).toEqual({
       enabled: true,
-      thresholdPercent: 5,
+      thresholdPercent: 25,
       weeklyThresholdPercent: 2,
       lastSwitch: expectedLastSwitch,
     });
@@ -206,10 +206,17 @@ describe("ProviderAccountRegistry", () => {
         version: 1,
         accounts: [],
         sharedHomes: {},
-        autoSwitch: { codex: { enabled: true, thresholdPercent: 15 } },
+        autoSwitch: {
+          codex: { enabled: true, thresholdPercent: 15 },
+          claudeAgent: { enabled: true, thresholdPercent: 10 },
+        },
       }),
     );
     const registry = await createProviderAccountRegistry({ stateDir });
+    expect(await registry.getAutoSwitch("claudeAgent")).toMatchObject({
+      enabled: true,
+      thresholdPercent: 20,
+    });
     expect(await registry.getAutoSwitch("codex")).toEqual({
       enabled: true,
       thresholdPercent: 15,
@@ -508,7 +515,7 @@ describe("ProviderAccountRegistry", () => {
       sharedHomePath: shared,
     });
     const lastUsage = {
-      checkedAt: new Date().toISOString(),
+      checkedAt: new Date(0).toISOString(),
       email: "work@example.com",
       accessToken: "never-persist",
     };

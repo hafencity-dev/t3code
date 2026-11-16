@@ -91,6 +91,11 @@ export function nextAccountReason(
   const when = group.nextAccountDue
     ? "Next up now"
     : `Next up when ${active ?? "the active account"} runs low`;
+  if (
+    account.driver === "claudeAgent" &&
+    account.usage?.windows.some((window) => window.kind === "session")
+  )
+    return `${when}: accounts with available 5-hour quota are used first.`;
   return `${when}: its weekly limit resets soonest${reset} with enough left.`;
 }
 

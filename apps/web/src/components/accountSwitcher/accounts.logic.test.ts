@@ -217,6 +217,13 @@ describe("account choices", () => {
     expect(nextAccountReason(next, { accounts: [marcos, next], nextAccountDue: true }, NOW)).toBe(
       "Next up now: its weekly limit resets soonest (4d 13h) with enough left.",
     );
+    expect(
+      nextAccountReason(
+        { ...next, driver: "claudeAgent" },
+        { accounts: [marcos, next], nextAccountDue: true },
+        NOW,
+      ),
+    ).toBe("Next up now: accounts with available 5-hour quota are used first.");
     expect(nextAccountReason(account("no-reset", 20), { accounts: [] }, NOW)).toBe(
       "Next up when the active account runs low: its weekly limit resets soonest with enough left.",
     );

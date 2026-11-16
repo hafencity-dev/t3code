@@ -32,8 +32,9 @@ vi.mock("~/state/environments", () => ({
     })),
   }),
 }));
-vi.mock("~/state/npmRelease", () => ({ useNpmReleasePublished: () => true }));
+vi.mock("~/state/use-atom-command", () => ({ useAtomCommand: () => vi.fn() }));
 vi.mock("~/state/server", () => ({
+  serverEnvironment: { stageServerUpdate: {} },
   environmentUpdateStatesAtom: () => fixtures.machines.map((machine) => machine.updateState),
 }));
 vi.mock("~/state/session", () => ({

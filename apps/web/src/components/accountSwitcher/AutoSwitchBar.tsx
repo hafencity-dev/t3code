@@ -8,6 +8,7 @@ import type {
   ProviderAccountGroup,
   ProviderAccountId,
 } from "@t3tools/contracts";
+import { CLAUDE_SESSION_RESERVE_PERCENT } from "@t3tools/shared/fork/accountUsageWindows";
 import { useId, useRef, useState } from "react";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { Badge } from "../ui/badge";
@@ -92,6 +93,7 @@ export function AutoSwitchBar({
   onSwitchStart: (accountId: ProviderAccountId) => void;
   onSwitchEnd: (accountId: ProviderAccountId) => void;
 }) {
+  const isClaude = group.driver === "claudeAgent";
   const { autoSwitch } = group;
   const labelId = useId();
   const [saving, setSaving] = useState(false);
@@ -164,8 +166,9 @@ export function AutoSwitchBar({
               Auto-switch<span className="sr-only"> {provider}</span>
             </TooltipTrigger>
             <TooltipPopup>
-              Switches when the active account runs low. Prefers accounts whose weekly limit resets
-              soonest so no quota goes unused.
+              {isClaude
+                ? "Uses accounts with available 5-hour quota first, then accounts with only weekly quota."
+                : "Switches when the active account runs low. Prefers accounts whose weekly limit resets soonest so no quota goes unused."}
               {group.switchMode === "restart" ? " Never interrupts a running turn." : null}
             </TooltipPopup>
           </Tooltip>
@@ -176,7 +179,11 @@ export function AutoSwitchBar({
               5-hour at
               <ThresholdSelect
                 value={autoSwitch.thresholdPercent}
-                options={SESSION_THRESHOLDS}
+                options={
+                  isClaude
+                    ? SESSION_THRESHOLDS.filter((value) => value >= CLAUDE_SESSION_RESERVE_PERCENT)
+                    : SESSION_THRESHOLDS
+                }
                 disabled={saving}
                 label={`${provider} 5-hour auto-switch threshold`}
                 onChange={(thresholdPercent) => void update(true, { thresholdPercent })}

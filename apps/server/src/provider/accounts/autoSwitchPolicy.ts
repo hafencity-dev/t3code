@@ -241,9 +241,14 @@ const hasWeeklyHeadroom = (candidate: Summary, rules: AutoSwitchRules) =>
   rules.weeklyThresholdPercent +
     (rules.endgame ? endgameTargetMarginPercent : weeklyTargetMarginPercent);
 
-/** Both limits clear their thresholds by the target margin, so a switch cannot flap back. */
+const hasClaudeSession = (summary: Summary) =>
+  summary.account.driver === "claudeAgent" && summary.hasSession;
+
+// Even one remaining point above the reserve makes a Claude session preferable to weekly-only usage.
 const hasStrictHeadroom = (candidate: Summary, thresholds: AutoSwitchRules) =>
-  candidate.sessionLeft >= thresholds.thresholdPercent + targetMarginPercent &&
+  (hasClaudeSession(candidate)
+    ? candidate.sessionLeft > thresholds.thresholdPercent
+    : candidate.sessionLeft >= thresholds.thresholdPercent + targetMarginPercent) &&
   hasWeeklyHeadroom(candidate, thresholds);
 
 /** A 5-hour threshold switch accepts this much 5-hour quota when nothing clears the margin. */
@@ -281,9 +286,10 @@ const endgameRules = (thresholds: AutoSwitchThresholds): AutoSwitchRules => ({
   endgame: true,
 });
 
-/** Its weekly quota resets more than an hour before the active account's, so use it first. */
-const resetsSoonerThan = (candidate: Summary, current: Summary) =>
-  candidate.deadline + hour < current.deadline;
+const preferredOverActive = (candidate: Summary, current: Summary) =>
+  hasClaudeSession(candidate) !== hasClaudeSession(current)
+    ? hasClaudeSession(candidate)
+    : candidate.deadline + hour < current.deadline;
 
 /** Whether the active account is at a threshold (or unusable), so a reactive switch is due. */
 const needFor = (
@@ -303,6 +309,7 @@ const compareCandidates = (a: Summary, b: Summary) => {
   const bucketA = Math.floor(a.deadline / hour);
   const bucketB = Math.floor(b.deadline / hour);
   return (
+    Number(hasClaudeSession(b)) - Number(hasClaudeSession(a)) ||
     (bucketA === bucketB ? 0 : bucketA < bucketB ? -1 : 1) ||
     b.longLeft - a.longLeft ||
     b.sessionLeft - a.sessionLeft ||
@@ -356,7 +363,7 @@ export function nextAutoSwitchTarget(
   const sooner =
     current === undefined
       ? undefined
-      : ranking.find((candidate) => resetsSoonerThan(candidate, current));
+      : ranking.find((candidate) => preferredOverActive(candidate, current));
   const next = sooner ?? ranking[0];
   return next && { accountId: next.account.id, due: sooner !== undefined };
 }
@@ -480,7 +487,9 @@ export function chooseNextAccount(input: AutoSwitchInput): AutoSwitchDecision {
     signedOut: (target: Summary) =>
       `${active.label} is signed out or unavailable · ${targetResets(target)}`,
     expiring: (target: Summary) =>
-      `${targetResets(target)}, sooner than ${active.label}, so its quota gets used first`,
+      hasClaudeSession(target) && !current.hasSession
+        ? `${target.account.label} has ${target.sessionLeft}% of its 5-hour quota left`
+        : `${targetResets(target)}, sooner than ${active.label}, so its quota gets used first`,
   };
   const switchTo = (
     target: Summary,
@@ -495,7 +504,9 @@ export function chooseNextAccount(input: AutoSwitchInput): AutoSwitchDecision {
       endgame && trigger === "weekly"
         ? `${active.label} is at ${current.longLeft}% of its weekly limit; switching to ${target.account.label} (${target.longLeft}% left, resets in ${remainingText(target.deadline - now)}).`
         : trigger === "expiring"
-          ? `${target.account.label}'s weekly limit resets in ${duration(target.deadline)}, sooner than ${active.label}'s (${Number.isFinite(current.deadline) ? duration(current.deadline) : "no known reset"}). Using ${target.account.label} first so its quota doesn't expire unused.`
+          ? hasClaudeSession(target) && !current.hasSession
+            ? `Switching from ${active.label} to ${target.account.label} to use its available 5-hour quota (${target.sessionLeft}% left).`
+            : `${target.account.label}'s weekly limit resets in ${duration(target.deadline)}, sooner than ${active.label}'s (${Number.isFinite(current.deadline) ? duration(current.deadline) : "no known reset"}). Using ${target.account.label} first so its quota doesn't expire unused.`
           : `${active.label} ${trigger === "signedOut" ? "is signed out or unavailable" : trigger === "session" ? `has ${current.sessionLeft}% of its 5-hour limit left` : `has ${current.longLeft}% of its weekly limit left`}; switching to ${target.account.label} (${trigger === "weekly" ? "" : target.hasSession ? `5-hour ${target.sessionLeft}% left; ` : `${sessionDescription(target)}; `}weekly resets in ${duration(target.deadline)}, ${target.longLeft}% left).`,
   });
   // At or below the threshold, any healthy candidate wins; the target margin prevents flapping.
@@ -569,8 +580,8 @@ export function chooseNextAccount(input: AutoSwitchInput): AutoSwitchDecision {
   // Use up quota that resets sooner first, down to the weekly threshold. A fresh reset moves an
   // account's deadline a week out, so it stops being preferred on its own; deadlines only ever
   // move earlier along a chain of proactive switches, so they cannot ping-pong.
-  const resetsSooner = (candidate: Summary) => resetsSoonerThan(candidate, current);
-  const proactive = rank(true).filter(resetsSooner);
+  const preferred = (candidate: Summary) => preferredOverActive(candidate, current);
+  const proactive = rank(true).filter(preferred);
   const lastSwitchAt = Math.max(
     input.lastSwitchAt ?? -Infinity,
     input.lastManualSwitchAt ?? -Infinity,
@@ -582,28 +593,28 @@ export function chooseNextAccount(input: AutoSwitchInput): AutoSwitchDecision {
       "dwell",
       pending === undefined
         ? `Keeping ${active.label} for at least ${proactiveDwellMs / minute} minutes after the last switch.`
-        : `Switching from ${active.label} to ${pending.account.label} in ${remainingText(dwellEnd - now)}: its weekly limit resets sooner (${remainingText(pending.deadline - now)}).`,
+        : hasClaudeSession(pending) && !current.hasSession
+          ? `Switching from ${active.label} to ${pending.account.label} in ${remainingText(dwellEnd - now)} to use its 5-hour quota.`
+          : `Switching from ${active.label} to ${pending.account.label} in ${remainingText(dwellEnd - now)}: its weekly limit resets sooner (${remainingText(pending.deadline - now)}).`,
       dwellEnd,
     );
   }
   const selection = pickOrProbe(proactive);
   if (selection !== undefined)
     return "kind" in selection ? selection : switchTo(selection, "expiring");
-  const sooner = candidates.filter(
-    (candidate) => candidate.known && !blocked(candidate) && resetsSooner(candidate),
+  const preferredCandidates = candidates.filter(
+    (candidate) => candidate.known && preferred(candidate),
   );
   // A sooner-resetting account whose session is low becomes a target once its session resets.
-  const sessionLow = sooner
+  const sessionLow = preferredCandidates
     .filter(
-      (candidate) =>
-        hasWeeklyHeadroom(candidate, config) &&
-        candidate.sessionLeft < threshold + targetMarginPercent,
+      (candidate) => hasWeeklyHeadroom(candidate, config) && !hasStrictHeadroom(candidate, config),
     )
     .sort((a, b) => a.sessionResetAt - b.sessionResetAt || compare(a, b));
   const sessionWakeAt = Math.min(
     ...sessionLow.map((candidate) => candidate.sessionResetAt).filter((at) => at > now),
   );
-  const weeklyLow = sooner
+  const weeklyLow = preferredCandidates
     .filter((candidate) => !hasWeeklyHeadroom(candidate, config))
     .sort((a, b) => a.deadline - b.deadline || compare(a, b));
   // A weekly reset moves a deadline, which can make proactive rebalancing worthwhile.
@@ -617,12 +628,25 @@ export function chooseNextAccount(input: AutoSwitchInput): AutoSwitchDecision {
   return stay(
     "healthy",
     waiting !== undefined
-      ? `Keeping ${active.label}. ${waiting.account.label} resets sooner but its 5-hour limit is low${waiting.sessionResetAt > now && Number.isFinite(waiting.sessionResetAt) ? `; switching when it resets in ${remainingText(waiting.sessionResetAt - now)}` : ""}.`
+      ? `Keeping ${active.label}. ${waiting.account.label}'s 5-hour limit is low${waiting.sessionResetAt > now && Number.isFinite(waiting.sessionResetAt) ? `; switching when it resets in ${remainingText(waiting.sessionResetAt - now)}` : ""}.`
       : endgame
         ? `Endgame: using ${active.label} down to ${endgameFloorPercent}% before switching (all accounts are low).`
         : skipped !== undefined
           ? `Keeping ${active.label}. ${skipped.account.label} resets sooner but only has ${skipped.longLeft}% weekly left.`
           : `${active.label} has ${sessionDescription(current)} and ${current.longLeft}% weekly quota left; no switch needed.`,
-    Math.min(sessionWakeAt, weeklyWakeAt),
+    Math.min(
+      sessionWakeAt,
+      weeklyWakeAt,
+      ...candidates
+        .filter(
+          (candidate) =>
+            blocked(candidate) &&
+            hasClaudeSession(candidate) &&
+            !current.hasSession &&
+            hasStrictHeadroom(candidate, config),
+        )
+        .map((candidate) => input.probeWakeAt?.get(candidate.account.id) ?? Infinity)
+        .filter((at) => at > now),
+    ),
   );
 }

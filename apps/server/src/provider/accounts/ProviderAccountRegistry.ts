@@ -4,6 +4,7 @@ import * as NodeCrypto from "node:crypto";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 import { ServerProviderUsageLimits } from "@t3tools/contracts";
+import { CLAUDE_SESSION_RESERVE_PERCENT } from "@t3tools/shared/fork/accountUsageWindows";
 import * as Schema from "effect/Schema";
 import { materializeClaudeAccountHome } from "./ClaudeAccountHome.ts";
 import { materializeCodexAccountHome } from "./CodexAccountHome.ts";
@@ -235,6 +236,10 @@ export async function createProviderAccountRegistry(input: { stateDir: string })
     const config = stored.autoSwitch?.[driver] ?? { enabled: false, thresholdPercent: 10 };
     return structuredClone({
       ...config,
+      thresholdPercent:
+        driver === "claudeAgent"
+          ? Math.max(CLAUDE_SESSION_RESERVE_PERCENT, config.thresholdPercent)
+          : config.thresholdPercent,
       weeklyThresholdPercent: config.weeklyThresholdPercent ?? defaultWeeklyThresholdPercent,
     });
   }
@@ -269,9 +274,14 @@ export async function createProviderAccountRegistry(input: { stateDir: string })
         const previous = getAutoSwitch(driver);
         const thresholdPercent =
           patch.thresholdPercent === undefined ? previous.thresholdPercent : patch.thresholdPercent;
-        if (!Number.isInteger(thresholdPercent) || thresholdPercent < 5 || thresholdPercent > 50) {
+        const minimum = driver === "claudeAgent" ? CLAUDE_SESSION_RESERVE_PERCENT : 5;
+        if (
+          !Number.isInteger(thresholdPercent) ||
+          thresholdPercent < minimum ||
+          thresholdPercent > 50
+        ) {
           throw new ProviderAccountRegistryGuardError(
-            "Auto-switch threshold must be an integer between 5 and 50.",
+            `Auto-switch threshold must be an integer between ${minimum} and 50.`,
           );
         }
         const weeklyThresholdPercent =

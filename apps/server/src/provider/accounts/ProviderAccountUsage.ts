@@ -16,7 +16,11 @@ import { hasClaudeManagedMcpConfig, makeClaudeEnvironment } from "../Drivers/Cla
 import { readClaudeSettingsEnv } from "../Drivers/ClaudeSkills.ts";
 import { resolveClaudeSdkExecutablePath } from "../Drivers/ClaudeExecutable.ts";
 import * as Semaphore from "effect/Semaphore";
-import { claudeAuthMetadata, buildClaudeCapabilitiesProbeQueryOptions } from "../ClaudeProvider.ts";
+import {
+  claudeAuthMetadata,
+  claudeProbeSpawnVia,
+  buildClaudeCapabilitiesProbeQueryOptions,
+} from "../ClaudeProvider.ts";
 import { codexPlanLabel, withCodexAppServerClient } from "../CodexProvider.ts";
 import {
   claudeUsageResponseToLimits,
@@ -69,6 +73,7 @@ export const probeAccountUsage = Effect.fn("providerAccounts.probeUsage")(functi
       environment,
     );
     const managedMcpConfig = yield* hasClaudeManagedMcpConfig();
+    const spawnVia = yield* claudeProbeSpawnVia;
     const result = yield* Effect.tryPromise({
       try: async (signal) => {
         const abort = new AbortController();
@@ -89,6 +94,7 @@ export const probeAccountUsage = Effect.fn("providerAccounts.probeUsage")(functi
               environment,
               cwd: input.cwd,
               managedMcpConfig,
+              spawnVia,
             }),
           });
           const init = await q.initializationResult();
@@ -111,7 +117,11 @@ export const probeAccountUsage = Effect.fn("providerAccounts.probeUsage")(functi
       result.subscriptionType,
       result.usage.subscription_type,
     );
-    const auth = claudeAuthMetadata({ subscriptionType, authMethod: result.tokenSource });
+    const auth = claudeAuthMetadata({
+      subscriptionType,
+      authMethod: result.tokenSource,
+      apiKeySource: result.apiKeySource,
+    });
     const plan = auth?.label;
     const baseUrl =
       (yield* readClaudeSettingsEnv(

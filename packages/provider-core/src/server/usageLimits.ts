@@ -89,6 +89,7 @@ export function applyUsageLimitsUpdate(input: {
       ? { sessionLimit: "none" as const }
       : {}),
     ...(previous?.resetCredits !== undefined ? { resetCredits: previous.resetCredits } : {}),
+    ...(previous?.zeroSpendCap ? { zeroSpendCap: true } : {}),
     ...(unavailable !== undefined ? { unavailable } : {}),
   };
 }

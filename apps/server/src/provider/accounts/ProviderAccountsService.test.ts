@@ -802,7 +802,7 @@ describe("ProviderAccountsService", () => {
             (group) =>
               !group.autoSwitch.enabled &&
               group.autoSwitch.state === "off" &&
-              group.autoSwitch.thresholdPercent === 10 &&
+              group.autoSwitch.thresholdPercent === (group.driver === "claudeAgent" ? 20 : 10) &&
               group.autoSwitch.weeklyThresholdPercent === 2,
           ),
         ).toBe(true);
@@ -1995,8 +1995,8 @@ describe("ProviderAccountsService", () => {
           )!;
           expect(active).toMatchObject({ id: seeded.ids.b, email: "b@example.test" });
           expect(active.usage?.windows.map((window) => window.usedPercent)).toEqual([0, 30]);
-          // A running turn reports b's 5-hour limit crossing the 10% threshold.
-          yield* live.rateLimit(claudeLimits(92, "2026-09-25T12:00:00.000Z").windows);
+          // A running turn reports b's 5-hour limit reaching the 20% reserve.
+          yield* live.rateLimit(claudeLimits(80, "2026-09-25T12:00:00.000Z").windows);
           expect(yield* nextSwitch).toMatchObject({
             fromAccountId: seeded.ids.b,
             trigger: "session",

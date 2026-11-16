@@ -2,6 +2,8 @@
 // (web) and the auto-switch policy and window primer (server).
 import type { ServerProviderUsageLimits, ServerProviderUsageWindow } from "@t3tools/contracts";
 
+export const CLAUDE_SESSION_RESERVE_PERCENT = 20;
+
 type UsageWindowShape = Pick<ServerProviderUsageWindow, "id" | "kind">;
 
 /** Claude's all-model weekly limit. */

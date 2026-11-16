@@ -42,8 +42,9 @@ or another connected client cannot bypass that pause.
 Select **Switch** on an account. Each account shows its 5-hour and weekly usage and when they reset.
 For Claude Code, **Weekly** is the all-model weekly limit; model-specific weekly limits (such as
 Fable) appear when you hover it and don't affect recommendations or automatic switching.
-**Best option** marks the account automatic switching would move to next: the one whose weekly
-limit resets soonest and still has enough 5-hour and weekly quota left.
+**Best option** marks the account automatic switching would move to next. Claude prioritizes
+accounts with usable 5-hour quota, then uses the earliest weekly reset among eligible accounts
+with the same priority.
 
 - **Claude Code** switches in place, like running `claude auth login` in a terminal. Running
   sessions keep going and use the new account from their next request. On macOS this can take up
@@ -58,13 +59,15 @@ new account the next time you switch.
 
 ## Automatic switching
 
-Turn on **Auto-switch** per provider. It has two thresholds: **5-hour at** (10% left by default)
+Turn on **Auto-switch** per provider. It has two thresholds: **5-hour at** (20% left for Claude, 10% for Codex by default)
 and **Weekly at** (2% left by default). The weekly threshold is low so each account's weekly quota
 gets used almost fully, while still switching before it runs out, so no chat stops mid-turn. When
 the active account reaches either threshold, T3 Code switches to the account whose weekly limit
 resets soonest and still has headroom. When Claude reports only the all-model weekly limit, that
 limit determines when the account switches. If Claude also reports a 5-hour limit, both thresholds
-apply. It also switches early,
+apply. Claude uses accounts with 5-hour quota above the session threshold before weekly-only
+accounts. It returns to a 5-hour account once its window resets and usage is confirmed. Existing
+Claude thresholds below 20% now use 20%. Within the same group it also switches early,
 while the active account is still healthy, when another account's weekly limit resets sooner, so
 that quota is used up first. An account is only switched to while it has at least 3 points more
 weekly quota left than the weekly threshold (5% with the default 2%), so it never has to switch
