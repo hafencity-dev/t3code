@@ -4,7 +4,7 @@ import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
-import { runMigrations } from "../Migrations.ts";
+import { migrationManifest, runMigrations } from "../Migrations.ts";
 import { reconcileLegacy2codeMigrationLedger } from "./reconcileLegacy2codeMigrations.ts";
 
 const layer = it.layer(Layer.mergeAll(NodeSqliteClient.layer({ filename: ":memory:" })));
@@ -69,27 +69,10 @@ layer("reconcileLegacy2codeMigrationLedger", (it) => {
       const before = yield* readLedger;
       yield* forkifyLedger;
 
-      assert.deepStrictEqual(yield* runMigrations(), [
-        [62, "ThreadFailureLookupIndex"],
-        [63, "DropUnusedV1Projections"],
-        [64, "CanonicalizeThreadPullRequestLinks"],
-        [65, "CodexUsageNativeTurnIndex"],
-        [66, "RepairClientSettlementTimestamps"],
-        [67, "WebhookDedupe"],
-        [68, "ShellStopRequestIndex"],
-        [69, "ThreadMessageSearch"],
-        [70, "PeerLinks"],
-        [71, "PeerLinkFence"],
-        [72, "WaitingLinkRequestIndex"],
-        [73, "ActiveTurnItemIndexes"],
-        [74, "ExcludeAttachmentPlaceholdersFromSearch"],
-        [75, "SubagentDeliveryState"],
-        [76, "ProjectionProjectsPinArchive"],
-        [77, "RepairBooleanSettledOverride"],
-        [78, "DropOrchestrationEventCorrelationIndex"],
-        [79, "DelegatedRecoveryIndexes"],
-        [80, "ScheduledTaskThreadMode"],
-      ]);
+      assert.deepStrictEqual(
+        yield* runMigrations(),
+        migrationManifest.filter(([id]) => id > 61),
+      );
       assert.deepStrictEqual((yield* readLedger).slice(0, before.length), before);
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
@@ -108,43 +91,15 @@ layer("reconcileLegacy2codeMigrationLedger", (it) => {
       const executed = yield* runMigrations();
 
       assert.deepStrictEqual(
-        executed.map(([id, name]) => `${id}_${name}`),
-        [
-          "52_ProjectionThreadTitleState",
-          "53_PullRequestFilesViewed",
-          "54_ProjectionThreadsAutoSettleDisabledAt",
-          "55_OrchestrationV2",
-          "56_RemoveRedundantProjectionIndexes",
-          "57_ScheduledTaskWebhooks",
-          "58_WebhookRelayDeliveries",
-          "59_McpAppModelContext",
-          "60_ThreadSnapshotWindowIndexes",
-          "61_PullRequestReviewGuides",
-          "62_ThreadFailureLookupIndex",
-          "63_DropUnusedV1Projections",
-          "64_CanonicalizeThreadPullRequestLinks",
-          "65_CodexUsageNativeTurnIndex",
-          "66_RepairClientSettlementTimestamps",
-          "67_WebhookDedupe",
-          "68_ShellStopRequestIndex",
-          "69_ThreadMessageSearch",
-          "70_PeerLinks",
-          "71_PeerLinkFence",
-          "72_WaitingLinkRequestIndex",
-          "73_ActiveTurnItemIndexes",
-          "74_ExcludeAttachmentPlaceholdersFromSearch",
-          "75_SubagentDeliveryState",
-          "76_ProjectionProjectsPinArchive",
-          "77_RepairBooleanSettledOverride",
-          "78_DropOrchestrationEventCorrelationIndex",
-          "79_DelegatedRecoveryIndexes",
-          "80_ScheduledTaskThreadMode",
-        ],
+        executed,
+        migrationManifest.filter(([id]) => id > 51),
       );
       const repaired = yield* readLedger;
       assert.deepStrictEqual(repaired.slice(0, upstreamLedger.length), upstreamLedger);
-      assert.strictEqual(repaired.length, upstreamLedger.length + 29);
-      assert.strictEqual(repaired.at(-1)?.name, "ScheduledTaskThreadMode");
+      assert.deepStrictEqual(
+        repaired.map(({ migration_id, name }) => [migration_id, name]),
+        migrationManifest,
+      );
 
       // Running again changes nothing.
       assert.strictEqual(yield* reconcileLegacy2codeMigrationLedger(), false);

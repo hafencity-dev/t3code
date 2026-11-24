@@ -412,18 +412,7 @@ describe("ssh tunnel scripts", () => {
       NodeChildProcess.execFileSync("sh", ["-c", `sha256sum ${archive} > SHA256SUMS`], {
         cwd: release,
       });
-      for (const tool of [
-        "sh",
-        "mkdir",
-        "mktemp",
-        "cat",
-        "rm",
-        "grep",
-        "cut",
-        checksum,
-        "tar",
-        "mv",
-      ]) {
+      for (const tool of ["sh", "mkdir", "mktemp", "cat", "rm", "grep", "cut", checksum, "mv"]) {
         NodeFS.symlinkSync(
           NodeChildProcess.execFileSync("sh", ["-c", `command -v ${tool}`], {
             encoding: "utf8",

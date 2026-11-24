@@ -192,15 +192,12 @@ it.effect("runs background Git in its own lane so user commands never queue behi
         concurrency: "unbounded",
       },
     ).pipe(Effect.provideService(GitVcsDriver.BackgroundGitWork, true), Effect.forkChild);
+    assert.deepStrictEqual(yield* Queue.takeN(starts, 2), ["background", "background"]);
     const foreground = yield* Effect.forEach(Array.from({ length: 4 }), () => run(["foreground"]), {
       concurrency: "unbounded",
     }).pipe(Effect.forkChild);
 
-    yield* TestClock.adjust("2 seconds");
-    const started = yield* Queue.takeAll(starts);
-    assert.deepStrictEqual([...started].toSorted(), [
-      "background",
-      "background",
+    assert.deepStrictEqual(yield* Queue.takeN(starts, 4), [
       "foreground",
       "foreground",
       "foreground",

@@ -20,6 +20,10 @@ const fixtures = vi.hoisted(() => ({
   ],
 }));
 
+vi.mock("gt-react", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("gt-react")>()),
+  useMessages: () => (text: string) => text,
+}));
 vi.mock("@effect/atom-react", () => ({ useAtomValue: (value: unknown) => value }));
 vi.mock("~/branding", () => ({ APP_VERSION: "0.0.50" }));
 vi.mock("~/env", () => ({ isElectron: true }));
@@ -28,7 +32,7 @@ vi.mock("~/state/environments", () => ({
     environments: fixtures.machines.map((machine) => ({
       ...machine,
       connection: { phase: "connected" },
-      entry: { target: { _tag: "BearerConnectionTarget", connectionId: "remote" } },
+      entry: { enabled: true, target: { _tag: "BearerConnectionTarget", connectionId: "remote" } },
     })),
   }),
 }));
