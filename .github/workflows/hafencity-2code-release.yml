@@ -207,7 +207,7 @@ jobs:
     name: Build signed 2code macOS arm64
     needs: [preflight, build_linux]
     if: needs.preflight.outputs.should_build == 'true' && needs.build_linux.result == 'success'
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 60
     environment:
       name: 2code-production
