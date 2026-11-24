@@ -1409,6 +1409,7 @@ describe("VcsStatusBroadcaster", () => {
       Layer.provide(layerBackgroundPolicy(() => true)),
       Layer.provide(
         Layer.mock(GitWorkflowService.GitWorkflowService)({
+          readLocalStatusRefSnapshot: () => Effect.succeed(null),
           localStatus: () =>
             Effect.sync(() => {
               state.localStatusCalls += 1;
@@ -2858,6 +2859,7 @@ describe("VcsStatusBroadcaster", () => {
         Layer.provide(layerBackgroundPolicy(() => true)),
         Layer.provide(
           Layer.mock(GitWorkflowService.GitWorkflowService)({
+            readLocalStatusRefSnapshot: () => Effect.succeed(null),
             readRefSnapshot: () => Effect.succeed(null),
             localStatus: () =>
               Effect.suspend(() =>
@@ -3017,6 +3019,7 @@ describe("VcsStatusBroadcaster", () => {
         Layer.provide(layerBackgroundPolicy(() => true)),
         Layer.provide(
           Layer.mock(GitWorkflowService.GitWorkflowService)({
+            readLocalStatusRefSnapshot: () => Effect.succeed(null),
             readRefSnapshot: () => Effect.succeed(null),
             localStatus: () =>
               Effect.suspend(() => {

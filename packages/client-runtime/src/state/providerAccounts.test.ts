@@ -10,6 +10,7 @@ import {
 } from "@t3tools/contracts";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
@@ -161,13 +162,10 @@ it.effect(
         expect(lists).toBeGreaterThan(reads);
 
         // Pasting the code settles a command that invalidates the list again.
-        const submitted = yield* Effect.promise(() =>
-          atoms.submitLoginCode.run(registry, {
-            environmentId: target.environmentId,
-            input: { loginId: loginId!, code: "code" },
-          }),
-        );
-        expect(submitted._tag).toBe("Success");
+        yield* atoms.submitLoginCode.run(registry, {
+          environmentId: target.environmentId,
+          input: { loginId: loginId!, code: "code" },
+        });
         expect(submits).toBe(1);
         yield* settledList();
         expect(starts).toBe(1);
@@ -304,8 +302,7 @@ it.effect.each(["rename", "refreshUsage"] as const)(
         );
         expect(shownOutcome()).toBe(operation === "rename" ? "Before" : false);
 
-        let outcomeAtResolve: string | boolean | null | undefined;
-        const completed = (
+        const command =
           operation === "rename"
             ? atoms.rename.run(registry, {
                 environmentId: target.environmentId,
@@ -314,24 +311,13 @@ it.effect.each(["rename", "refreshUsage"] as const)(
             : atoms.refreshUsage.run(registry, {
                 environmentId: target.environmentId,
                 input: { accountIds: [ProviderAccountId.make("work")], force: true },
-              })
-        ).then((result) => {
-          outcomeAtResolve = shownOutcome();
-          return result;
-        });
-        // The list refresh is in flight and still shows the old label. Give a command that
-        // doesn't wait every chance to resolve anyway; passing never depends on this.
+              });
+        const completed = yield* command.pipe(Effect.map(shownOutcome), Effect.forkScoped);
         yield* Deferred.await(listCalled);
-        yield* Effect.raceFirst(
-          Effect.promise(() => completed),
-          Effect.yieldNow.pipe(Effect.repeat({ times: 20 })),
-        );
-        expect(outcomeAtResolve).toBeUndefined();
+        expect(completed.pollUnsafe()).toBeUndefined();
         expect(shownOutcome()).toBe(operation === "rename" ? "Before" : false);
         yield* Deferred.succeed(release, undefined);
-        const result = yield* Effect.promise(() => completed);
-        expect(result._tag).toBe("Success");
-        expect(outcomeAtResolve).toBe(operation === "rename" ? "After" : true);
+        expect(yield* Fiber.join(completed)).toBe(operation === "rename" ? "After" : true);
       }),
     ),
 );

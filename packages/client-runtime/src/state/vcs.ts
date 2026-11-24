@@ -387,7 +387,7 @@ export function createVcsEnvironmentAtoms<R, E>(
           cwd: target.input.cwd,
         });
 
-  const invalidateRefsIfChanged = (
+  const invalidateRefsIfChanged = Effect.fn("VcsStatus.invalidateRefsIfChanged")((
     target: { readonly environmentId: EnvironmentId; readonly input: { readonly cwd: string } },
     registry: AtomRegistry.AtomRegistry,
     exit: Exit.Exit<VcsRefreshStatusResult, unknown>,
@@ -400,7 +400,7 @@ export function createVcsEnvironmentAtoms<R, E>(
     return pushes
       ? invalidate
       : invalidate.pipe(Effect.map(() => bumpWorkingCopyRevision(registry, scope)));
-  };
+  });
 
   return {
     listRefs,
