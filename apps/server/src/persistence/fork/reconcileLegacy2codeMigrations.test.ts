@@ -97,8 +97,8 @@ layer("reconcileLegacy2codeMigrationLedger", (it) => {
       const repaired = yield* readLedger;
       assert.deepStrictEqual(repaired.slice(0, upstreamLedger.length), upstreamLedger);
       assert.deepStrictEqual(
-        repaired.map(({ migration_id, name }) => [migration_id, name]),
-        migrationManifest,
+        repaired,
+        migrationManifest.map(([migration_id, name]) => ({ migration_id, name })),
       );
 
       // Running again changes nothing.
