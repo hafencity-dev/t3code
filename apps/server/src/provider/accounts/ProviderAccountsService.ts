@@ -891,6 +891,9 @@ const make = Effect.fn("ProviderAccountsService.make")(function* (
             enabled: automatic.enabled,
             thresholdPercent: automatic.thresholdPercent,
             weeklyThresholdPercent: automatic.weeklyThresholdPercent,
+            ...(driver === "claudeAgent"
+              ? { includeFableUsage: automatic.includeFableUsage ?? false }
+              : {}),
             ...(automatic.enabled ? automaticState : {}),
             state: !automatic.enabled
               ? ("off" as const)
@@ -1216,6 +1219,9 @@ const make = Effect.fn("ProviderAccountsService.make")(function* (
           const { usage: result, measured: fresh } = yield* cache.refreshMeasured({
             id: account.id,
             active: account.active,
+            includeFableUsage:
+              account.driver === "claudeAgent" &&
+              claudeGroup?.autoSwitch.includeFableUsage === true,
             ...(previous ? { previous } : {}),
             ...(input.force === undefined ? {} : { force: input.force }),
           });
@@ -1830,6 +1836,9 @@ const make = Effect.fn("ProviderAccountsService.make")(function* (
         ...(input.thresholdPercent === undefined
           ? {}
           : { thresholdPercent: input.thresholdPercent }),
+        ...(input.includeFableUsage === undefined
+          ? {}
+          : { includeFableUsage: input.includeFableUsage }),
         ...(input.weeklyThresholdPercent === undefined
           ? {}
           : { weeklyThresholdPercent: input.weeklyThresholdPercent }),
@@ -1838,7 +1847,8 @@ const make = Effect.fn("ProviderAccountsService.make")(function* (
     if (
       before.enabled !== after.enabled ||
       before.thresholdPercent !== after.thresholdPercent ||
-      before.weeklyThresholdPercent !== after.weeklyThresholdPercent
+      before.weeklyThresholdPercent !== after.weeklyThresholdPercent ||
+      Boolean(before.includeFableUsage) !== Boolean(after.includeFableUsage)
     )
       yield* recordActivity({
         driver: input.driver,
@@ -1849,6 +1859,9 @@ const make = Effect.fn("ProviderAccountsService.make")(function* (
           ...(before.enabled === after.enabled ? {} : { enabledChanged: true }),
           thresholdPercent: after.thresholdPercent,
           weeklyThresholdPercent: after.weeklyThresholdPercent,
+          ...(Boolean(before.includeFableUsage) === Boolean(after.includeFableUsage)
+            ? {}
+            : { includeFableUsage: after.includeFableUsage === true }),
         },
         outcome: "ok",
       });
@@ -1968,7 +1981,7 @@ const make = Effect.fn("ProviderAccountsService.make")(function* (
           usage &&
           !usage.unavailable &&
           usage.windows.length > 0 &&
-          usageConfirmed(usage, now);
+          usageConfirmed(usage, now, automatic.includeFableUsage);
         if (!confirmed && !cache.canProbe(account.id, now, previous, true)) {
           probeBlocked.add(account.id);
           probeWakeAt.set(account.id, cache.nextAllowedAt(account.id, now, previous, true));

@@ -9,6 +9,7 @@ import type {
   ProviderAccountId,
 } from "@t3tools/contracts";
 import { CLAUDE_SESSION_RESERVE_PERCENT } from "@t3tools/shared/fork/accountUsageWindows";
+import { useGT } from "gt-react";
 import { useId, useRef, useState } from "react";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { Badge } from "../ui/badge";
@@ -96,20 +97,22 @@ export function AutoSwitchBar({
   const isClaude = group.driver === "claudeAgent";
   const { autoSwitch } = group;
   const labelId = useId();
+  const fableId = useId();
+  const gt = useGT();
   const [saving, setSaving] = useState(false);
   const pending = useRef(false);
   const setAutoSwitch = useAtomCommand(providerAccountsEnvironment.setAutoSwitch, {
     reportFailure: false,
   });
   const provider = ACCOUNT_DRIVER_LABELS[group.driver];
-  const update = async (enabled: boolean, thresholds?: Parameters<typeof autoSwitchInput>[3]) => {
+  const update = async (enabled: boolean, options?: Parameters<typeof autoSwitchInput>[3]) => {
     if (pending.current) return;
     pending.current = true;
     setSaving(true);
     await (async () => {
       const result = await setAutoSwitch({
         environmentId,
-        input: autoSwitchInput(group.driver, enabled, autoSwitch, thresholds),
+        input: autoSwitchInput(group.driver, enabled, autoSwitch, options),
       });
       if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
         const error = squashAtomCommandFailure(result);
@@ -204,6 +207,18 @@ export function AutoSwitchBar({
                 onChange={(weeklyThresholdPercent) => void update(true, { weeklyThresholdPercent })}
               />
             </span>
+            {isClaude && autoSwitch.includeFableUsage !== undefined ? (
+              <label htmlFor={fableId} className="inline-flex shrink-0 items-center gap-1.5">
+                <Switch
+                  id={fableId}
+                  size="sm"
+                  checked={autoSwitch.includeFableUsage}
+                  disabled={saving}
+                  onCheckedChange={(includeFableUsage) => void update(true, { includeFableUsage })}
+                />
+                {gt("Include Fable quota")}
+              </label>
+            ) : null}
           </>
         ) : null}
         {status.badge ? (

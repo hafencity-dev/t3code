@@ -10,6 +10,7 @@ import {
   PRIMARY_WEEKLY_WINDOW_ID,
   hasNoSessionLimit,
   inactiveUsageStaleness,
+  isFableWeeklyWindow,
 } from "@t3tools/shared/fork/accountUsageWindows";
 
 const minute = 60_000;
@@ -52,6 +53,7 @@ export interface AutoSwitchThresholds {
   readonly thresholdPercent: number;
   /** Percent left on a weekly (or monthly) window; low so weekly quota gets used up. */
   readonly weeklyThresholdPercent: number;
+  readonly includeFableUsage?: boolean | undefined;
 }
 
 /** Thresholds in effect; the endgame lowers the weekly one to the floor and its target margin. */
@@ -65,7 +67,7 @@ export function atAutoSwitchThreshold(
   windows: ReadonlyArray<Pick<ServerProviderUsageWindow, "id" | "kind" | "usedPercent">>,
   thresholds: AutoSwitchThresholds,
 ) {
-  return accountGatingWindows(windows).some(
+  return accountGatingWindows(windows, thresholds.includeFableUsage).some(
     (window) =>
       window.kind !== "other" && 100 - window.usedPercent <= thresholdFor(window.kind, thresholds),
   );
@@ -141,15 +143,15 @@ function summarize(
   probed: ReadonlySet<ProviderAccountId>,
 ) {
   const usable = account.usage?.unavailable?.reason !== "probeFailed";
-  // Claude hard-blocks a model only for that model's requests, so its model-scoped weeklies
-  // (Fable) never gate the account while the all-model weekly is reported.
-  const windows = accountGatingWindows(account.usage?.windows ?? [])
+  const { includeFableUsage } = thresholds;
+  const windows = accountGatingWindows(account.usage?.windows ?? [], includeFableUsage)
     .filter((window) => window.kind !== "other")
     .map((window) => {
       const reset = window.resetsAt === undefined ? undefined : Date.parse(window.resetsAt);
       const expired = reset !== undefined && reset <= now;
       return {
         kind: window.kind,
+        id: window.id,
         left: expired ? 100 : 100 - window.usedPercent,
         reset: expired ? undefined : reset,
       };
@@ -167,12 +169,21 @@ function summarize(
   return {
     account,
     known: hasMeasuredUsage(account.driver, account.usage),
-    fresh: usable && (probed.has(account.id) || !inactiveUsageStaleness(account.usage, now).stale),
-    confirmed: usable && (probed.has(account.id) || usageConfirmed(account.usage, now)),
+    fresh:
+      usable &&
+      (probed.has(account.id) ||
+        !inactiveUsageStaleness(account.usage, now, includeFableUsage).stale),
+    confirmed:
+      usable && (probed.has(account.id) || usageConfirmed(account.usage, now, includeFableUsage)),
     hasSession: sessions.length > 0,
     noSessionLimit: hasNoSessionLimit(account.usage),
     sessionLeft,
     longLeft,
+    weeklyLabel:
+      includeFableUsage &&
+      longs.some((window) => window.left === longLeft && isFableWeeklyWindow(window))
+        ? "Fable weekly"
+        : "weekly",
     sessionResetAt,
     longResetAt: Math.min(...longs.map((window) => window.reset ?? Infinity)),
     deadline: Math.min(
@@ -204,10 +215,11 @@ function sessionDescription(summary: Summary) {
 export function usageConfirmed(
   usage: Pick<ServerProviderUsageLimits, "checkedAt" | "windows"> | undefined,
   now: number,
+  includeFableUsage = false,
 ) {
   return (
     usage !== undefined &&
-    !inactiveUsageStaleness(usage, now).stale &&
+    !inactiveUsageStaleness(usage, now, includeFableUsage).stale &&
     now - Date.parse(usage.checkedAt) <= AUTO_SWITCH_CONFIRM_MS
   );
 }
@@ -483,7 +495,8 @@ export function chooseNextAccount(input: AutoSwitchInput): AutoSwitchDecision {
   const switchSummaries = {
     session: (target: Summary) =>
       `5-hour limit at ${current.sessionLeft}% · ${target.account.label} has ${target.hasSession ? `${target.sessionLeft}% left` : sessionDescription(target)}`,
-    weekly: (target: Summary) => `Weekly limit at ${current.longLeft}% · ${targetResets(target)}`,
+    weekly: (target: Summary) =>
+      `${current.weeklyLabel === "weekly" ? "Weekly" : current.weeklyLabel} limit at ${current.longLeft}% · ${targetResets(target)}`,
     signedOut: (target: Summary) =>
       `${active.label} is signed out or unavailable · ${targetResets(target)}`,
     expiring: (target: Summary) =>
@@ -502,12 +515,12 @@ export function chooseNextAccount(input: AutoSwitchInput): AutoSwitchDecision {
     ...endgameFlag,
     reason:
       endgame && trigger === "weekly"
-        ? `${active.label} is at ${current.longLeft}% of its weekly limit; switching to ${target.account.label} (${target.longLeft}% left, resets in ${remainingText(target.deadline - now)}).`
+        ? `${active.label} is at ${current.longLeft}% of its ${current.weeklyLabel} limit; switching to ${target.account.label} (${target.longLeft}% left, resets in ${remainingText(target.deadline - now)}).`
         : trigger === "expiring"
           ? hasClaudeSession(target) && !current.hasSession
             ? `Switching from ${active.label} to ${target.account.label} to use its available 5-hour quota (${target.sessionLeft}% left).`
             : `${target.account.label}'s weekly limit resets in ${duration(target.deadline)}, sooner than ${active.label}'s (${Number.isFinite(current.deadline) ? duration(current.deadline) : "no known reset"}). Using ${target.account.label} first so its quota doesn't expire unused.`
-          : `${active.label} ${trigger === "signedOut" ? "is signed out or unavailable" : trigger === "session" ? `has ${current.sessionLeft}% of its 5-hour limit left` : `has ${current.longLeft}% of its weekly limit left`}; switching to ${target.account.label} (${trigger === "weekly" ? "" : target.hasSession ? `5-hour ${target.sessionLeft}% left; ` : `${sessionDescription(target)}; `}weekly resets in ${duration(target.deadline)}, ${target.longLeft}% left).`,
+          : `${active.label} ${trigger === "signedOut" ? "is signed out or unavailable" : trigger === "session" ? `has ${current.sessionLeft}% of its 5-hour limit left` : `has ${current.longLeft}% of its ${current.weeklyLabel} limit left`}; switching to ${target.account.label} (${trigger === "weekly" ? "" : target.hasSession ? `5-hour ${target.sessionLeft}% left; ` : `${sessionDescription(target)}; `}weekly resets in ${duration(target.deadline)}, ${target.longLeft}% left).`,
   });
   // At or below the threshold, any healthy candidate wins; the target margin prevents flapping.
   if (need !== undefined) {

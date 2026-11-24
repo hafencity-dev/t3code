@@ -41,7 +41,8 @@ or another connected client cannot bypass that pause.
 
 Select **Switch** on an account. Each account shows its 5-hour and weekly usage and when they reset.
 For Claude Code, **Weekly** is the all-model weekly limit; model-specific weekly limits (such as
-Fable) appear when you hover it and don't affect recommendations or automatic switching.
+Fable) appear when you hover it. With **Include Fable quota** enabled, the weekly column shows
+the lower of the all-model and Fable balances.
 **Best option** marks the account automatic switching would move to next. Claude prioritizes
 accounts with usable 5-hour quota, then uses the earliest weekly reset among eligible accounts
 with the same priority.
@@ -58,6 +59,10 @@ If you sign in with a different Claude account in a terminal, the switcher saves
 new account the next time you switch.
 
 ## Automatic switching
+
+If you use Fable as your main agent, turn on **Include Fable quota** under Claude Code’s
+**Auto-switch** settings. The weekly threshold then also applies to the reported Fable quota
+when switching away from the active account and choosing the next one. This option is off by default.
 
 Turn on **Auto-switch** per provider. It has two thresholds: **5-hour at** (20% left for Claude, 10% for Codex by default)
 and **Weekly at** (2% left by default). The weekly threshold is low so each account's weekly quota

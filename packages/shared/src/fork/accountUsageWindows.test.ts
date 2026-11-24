@@ -24,6 +24,12 @@ describe("accountGatingWindows", () => {
     expect(isModelScopedWeeklyWindow(fable)).toBe(true);
     expect(isModelScopedWeeklyWindow(weekly)).toBe(false);
     expect(accountGatingWindows([session, weekly, fable])).toEqual([session, weekly]);
+    const overage = window("seven_day_overage_included", "weekly", 100);
+    expect(accountGatingWindows([session, weekly, fable, overage], true)).toEqual([
+      session,
+      weekly,
+      fable,
+    ]);
   });
 
   it("keeps model-scoped weeklies when no all-model weekly exists", () => {
@@ -88,6 +94,11 @@ describe("inactiveUsageStaleness", () => {
     const reported = { ...window("five_hour", "session", 0), resetsAt: iso(-60) };
     const fable = { ...window("seven_day_fable", "weekly", 100), resetsAt: iso(5) };
     const weekly = window("seven_day", "weekly", 40);
+    expect(inactiveUsageStaleness(measured([reported, weekly, fable]), at(10), true)).toMatchObject(
+      {
+        reason: "windowReset",
+      },
+    );
     expect(inactiveUsageStaleness(measured([reported, weekly, fable]), at(10))).toEqual({
       stale: false,
       staleAt: at(30),

@@ -391,6 +391,39 @@ describe("chooseNextAccount 32-scenario policy table", () => {
     );
   });
 
+  it("uses the Fable weekly threshold for both the active Claude account and switch targets when enabled", () => {
+    const claude = (name: string, fableLeft: number, deadline: number) => ({
+      ...account(name),
+      driver: "claudeAgent" as const,
+      usage: {
+        checkedAt: iso(0),
+        windows: [
+          window("session", 60, hour),
+          { ...window("weekly", 80, deadline), id: "seven_day" },
+          { ...window("weekly", fableLeft, deadline), id: "seven_day_fable" },
+        ],
+      },
+    });
+    const active = claude("Active", 2, 48 * hour);
+    const candidates = [claude("Spent", 0, 48 * hour), claude("Available", 60, 72 * hour)];
+    const config = { ...input().config, includeFableUsage: true };
+    expect(chooseNextAccount(input({ active, candidates }))).toMatchObject(stay("healthy"));
+    expect(chooseNextAccount(input({ active, candidates, config }))).toMatchObject(
+      switchTo("Available", "weekly"),
+    );
+    expect(
+      nextAutoSwitchTarget({
+        now,
+        activeAccountId: active.id,
+        accounts: [active, ...candidates],
+        config,
+      }),
+    ).toEqual({
+      accountId: id("Available"),
+      due: true,
+    });
+  });
+
   it("uses Claude session capacity before weekly-only accounts and checks again at reset", () => {
     const config = { enabled: true, thresholdPercent: 20, weeklyThresholdPercent: 2 };
     const session = (name: string, left: number, weekly = 80) => ({

@@ -11,7 +11,6 @@ import {
   type WorkingCopyDiffResult,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
-import * as Cause from "effect/Cause";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -380,50 +379,39 @@ describe("repository invalidation across clients", () => {
         });
         yield* Queue.offer(client.frames, snapshot(0));
         const run = () =>
-          Effect.promise(() =>
-            client.workingCopy.stagePaths.run(client.registry, {
-              environmentId: TARGET.environmentId,
-              input: { cwd: CWD, paths: ["a.ts"] },
-            }),
-          );
-
-        const outcome = (result: AsyncResult.AsyncResult<unknown, unknown>) =>
-          AsyncResult.isFailure(result) ? String(Cause.squash(result.cause)) : "ok";
+          client.workingCopy.stagePaths.run(client.registry, {
+            environmentId: TARGET.environmentId,
+            input: { cwd: CWD, paths: ["a.ts"] },
+          });
 
         // Old server: no push, so the client invalidates once itself.
-        expect(outcome(yield* run())).toBe("ok");
+        yield* run();
         expect(client.revision()).toBe(1);
 
         // An unrelated bump during the RPC does not satisfy the fallback.
         server.beforeSettling = Effect.sync(() => {
           client.registry.update(workingCopyRevisionAtom(SCOPE), (n) => n + 1);
         });
-        expect(outcome(yield* run())).toBe("ok");
+        yield* run();
         expect(client.revision()).toBe(3);
 
         // A server frame carrying a revision for this target does.
         server.beforeSettling = Queue.offer(client.frames, localUpdated(1, ["worktree"])).pipe(
           Effect.andThen(client.awaitRevision(4)),
         );
-        expect(outcome(yield* run())).toBe("ok");
+        yield* run();
         expect(client.revision()).toBe(4);
 
         // A server advertising revisions never triggers the fallback, and the
         // same applies to the upstream vcs commands.
         server.advertises = true;
         server.beforeSettling = Effect.void;
-        expect(outcome(yield* run())).toBe("ok");
+        yield* run();
         expect(client.revision()).toBe(4);
-        expect(
-          outcome(
-            yield* Effect.promise(() =>
-              client.vcs.refreshStatus.run(client.registry, {
-                environmentId: TARGET.environmentId,
-                input: { cwd: CWD },
-              }),
-            ),
-          ),
-        ).toBe("ok");
+        yield* client.vcs.refreshStatus.run(client.registry, {
+          environmentId: TARGET.environmentId,
+          input: { cwd: CWD },
+        });
         expect(client.revision()).toBe(4);
         expect(client.registry.get(vcsRefsCacheStateAtom(TARGET)).revision).toBe(0);
       }),

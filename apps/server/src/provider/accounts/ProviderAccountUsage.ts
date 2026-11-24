@@ -202,10 +202,12 @@ export const ACCOUNT_USAGE_BUDGET_WINDOW_MS = 5 * 60_000;
 export function storedUsageStaleness(
   usage: Pick<AccountUsage, "checkedAt" | "usage">,
   now: number,
+  includeFableUsage = false,
 ) {
   return inactiveUsageStaleness(
     { checkedAt: usage.checkedAt, windows: usage.usage?.windows ?? [] },
     now,
+    includeFableUsage,
   );
 }
 const MANUAL_FLOOR_MS = 60_000;
@@ -250,10 +252,15 @@ export const makeAccountUsageCache = <E, R>(dependencies: {
   };
   // Manual refreshes wait only for the 60s floor and failure backoff; staleness gates the rest.
   // A success's stored nextAllowedAt is ignored so older values never block them.
-  const accountAt = (prior: AccountUsage | undefined, now: number, force = false) => {
+  const accountAt = (
+    prior: AccountUsage | undefined,
+    now: number,
+    force = false,
+    includeFableUsage = false,
+  ) => {
     const staleness =
       !force && prior && (prior.usage || prior.status === "signedOut") && !prior.lastFailureKind
-        ? storedUsageStaleness(prior, now)
+        ? storedUsageStaleness(prior, now, includeFableUsage)
         : undefined;
     return Math.max(
       prior?.lastFailureKind ? (prior.nextAllowedAt ?? 0) : 0,
@@ -281,6 +288,7 @@ export const makeAccountUsageCache = <E, R>(dependencies: {
     readonly active: boolean;
     readonly previous?: AccountUsage;
     readonly force?: boolean;
+    readonly includeFableUsage?: boolean;
   }) {
     if (input.active && !dependencies.allowActive)
       return { usage: input.previous, measured: false };
@@ -291,7 +299,9 @@ export const makeAccountUsageCache = <E, R>(dependencies: {
         const inFlight = pending.get(input.id);
         if (inFlight) return { effect: inFlight, probing: true };
         const now = yield* Clock.currentTimeMillis;
-        if (now < Math.max(accountAt(prior, now, input.force), budgetAt(now)))
+        if (
+          now < Math.max(accountAt(prior, now, input.force, input.includeFableUsage), budgetAt(now))
+        )
           return { effect: Effect.succeed(prior), probing: false };
         // Reserve the attempt before releasing the admission lock, not after the probe finishes.
         while (attempts.length && attempts[0]!.at <= now - ACCOUNT_USAGE_BUDGET_WINDOW_MS)

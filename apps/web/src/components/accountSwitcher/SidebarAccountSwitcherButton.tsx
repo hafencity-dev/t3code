@@ -70,11 +70,11 @@ export function SidebarAccountSwitcherButton() {
     const group = groups.find((group) => group.driver === driver);
     if (!group || !shouldShowAccountBadge(group, providers, now)) return [];
     const active = group.accounts.find((account) => account.active);
-    return [{ driver, active }];
+    return [{ driver, active, includeFableUsage: group.autoSwitch.includeFableUsage }];
   });
-  const warning = activeAccounts.flatMap(({ driver, active }) => {
-    if (!active || accountTone(active, now) === "secondary") return [];
-    const remaining = remainingPercent(active, now);
+  const warning = activeAccounts.flatMap(({ driver, active, includeFableUsage }) => {
+    if (!active || accountTone(active, now, includeFableUsage) === "secondary") return [];
+    const remaining = remainingPercent(active, now, includeFableUsage);
     return [
       `${ACCOUNT_DRIVER_LABELS[driver]}: ${active.status !== "ready" ? "Not ready" : `${Math.round(remaining ?? 0)}% left`}`,
     ];
@@ -103,14 +103,14 @@ export function SidebarAccountSwitcherButton() {
                           Auto
                         </Badge>
                       ) : null}
-                      {activeAccounts.map(({ driver, active }) => {
+                      {activeAccounts.map(({ driver, active, includeFableUsage }) => {
                         const Mark = driver === "claudeAgent" ? ClaudeAI : OpenAI;
                         return (
                           <Badge
                             key={driver}
                             className="min-w-0 shrink"
                             size="sm"
-                            variant={active ? accountTone(active, now) : "error"}
+                            variant={active ? accountTone(active, now, includeFableUsage) : "error"}
                           >
                             <Mark className="size-3" />
                             {!active || active.status !== "ready" ? (

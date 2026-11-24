@@ -78,6 +78,7 @@ export const ProviderAccountAutoSwitch = Schema.Struct({
   thresholdPercent: ProviderAccountAutoSwitchThresholdPercent,
   weeklyThresholdPercent: ProviderAccountAutoSwitchWeeklyThresholdPercent,
   state: Schema.Literals(["off", "watching", "pending", "waiting", "paused"]),
+  includeFableUsage: Schema.optional(Schema.Boolean),
   message: Schema.optional(TrimmedNonEmptyString),
   pendingTargetAccountId: Schema.optional(ProviderAccountId),
   wakeAt: Schema.optional(IsoDateTime),
@@ -217,6 +218,7 @@ export const ProviderAccountActivityEntry = Schema.Struct({
     Schema.Struct({
       enabled: Schema.Boolean,
       enabledChanged: Schema.optional(Schema.Boolean),
+      includeFableUsage: Schema.optional(Schema.Boolean),
       thresholdPercent: Schema.optional(NonNegativeInt),
       weeklyThresholdPercent: Schema.optional(NonNegativeInt),
     }),
@@ -298,6 +300,7 @@ export const ProviderAccountsSetAutoSwitchInput = Schema.Struct({
   enabled: Schema.Boolean,
   thresholdPercent: Schema.optional(ProviderAccountAutoSwitchThresholdPercent),
   weeklyThresholdPercent: Schema.optional(ProviderAccountAutoSwitchWeeklyThresholdPercent),
+  includeFableUsage: Schema.optional(Schema.Boolean),
 });
 export type ProviderAccountsSetAutoSwitchInput = typeof ProviderAccountsSetAutoSwitchInput.Type;
 export const ProviderAccountsSetWindowPrimerInput = Schema.Struct({

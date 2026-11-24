@@ -155,6 +155,13 @@ describe("account choices", () => {
     ).toBe("error");
     expect(remainingPercent(claude, now)).toBe(60);
     expect(accountTone(claude, now)).toBe("secondary");
+    expect(accountTone(claude, now, true)).toBe("warning");
+    expect(
+      accountUsageCellView([weekly, fable], "weekly", now, false, undefined, true),
+    ).toMatchObject({
+      remaining: 12,
+      reset: "in 2d 0h",
+    });
     // Without the all-model weekly, the model-scoped one fills the column.
     expect(accountUsageCellView([fable], "weekly", now, true).remaining).toBe(12);
     expect(

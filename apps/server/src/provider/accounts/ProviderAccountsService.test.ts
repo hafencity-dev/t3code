@@ -835,8 +835,23 @@ describe("ProviderAccountsService", () => {
         }
         yield* service.setAutoSwitch({ driver: "codex", enabled: false });
         const config = yield* ServerConfig.ServerConfig;
+        expect(
+          initial.groups.find((group) => group.driver === "claudeAgent")?.autoSwitch
+            .includeFableUsage,
+        ).toBe(false);
+        yield* service.setAutoSwitch({
+          driver: "claudeAgent",
+          enabled: true,
+          includeFableUsage: true,
+        });
+        const unchanged = yield* service.setAutoSwitch({ driver: "claudeAgent", enabled: false });
+        expect(
+          unchanged.groups.find((group) => group.driver === "claudeAgent")?.autoSwitch
+            .includeFableUsage,
+        ).toBe(true);
         const persisted = yield* Effect.promise(async () => {
           const registry = await createProviderAccountRegistry({ stateDir: config.stateDir });
+          expect((await registry.getAutoSwitch("claudeAgent")).includeFableUsage).toBe(true);
           return registry.getAutoSwitch("codex");
         });
         expect(persisted).toEqual({
@@ -844,6 +859,20 @@ describe("ProviderAccountsService", () => {
           thresholdPercent: 25,
           weeklyThresholdPercent: 5,
         });
+        const disabled = yield* service.setAutoSwitch({
+          driver: "claudeAgent",
+          enabled: false,
+          includeFableUsage: false,
+        });
+        expect(
+          disabled.groups.find((group) => group.driver === "claudeAgent")?.autoSwitch
+            .includeFableUsage,
+        ).toBe(false);
+        expect(
+          yield* service
+            .setAutoSwitch({ driver: "codex", enabled: false, includeFableUsage: true })
+            .pipe(Effect.flip),
+        ).toMatchObject({ _tag: "ProviderAccountError" });
         expect(
           (yield* service.list()).groups.find((group) => group.driver === "codex")?.autoSwitch
             .state,

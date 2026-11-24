@@ -51,6 +51,7 @@ export type ProviderAccountEntry = typeof Entry.Type;
 const AutoSwitch = Schema.Struct({
   enabled: Schema.Boolean,
   thresholdPercent: Schema.Int.check(Schema.isBetween({ minimum: 5, maximum: 50 })),
+  includeFableUsage: Schema.optional(Schema.Boolean),
   /** Files from before the separate weekly threshold omit it; reads default it to 2. */
   weeklyThresholdPercent: Schema.optional(
     Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 25 })),
@@ -271,6 +272,9 @@ export async function createProviderAccountRegistry(input: { stateDir: string })
     getAutoSwitch: (driver: ProviderAccountDriver) => serialized(async () => getAutoSwitch(driver)),
     updateAutoSwitch: (driver: ProviderAccountDriver, patch: ProviderAccountAutoSwitchPatch) =>
       serialized(async () => {
+        if (driver !== "claudeAgent" && patch.includeFableUsage !== undefined) {
+          throw new ProviderAccountRegistryGuardError("Only Claude accounts have a Fable quota.");
+        }
         const previous = getAutoSwitch(driver);
         const thresholdPercent =
           patch.thresholdPercent === undefined ? previous.thresholdPercent : patch.thresholdPercent;
@@ -300,6 +304,9 @@ export async function createProviderAccountRegistry(input: { stateDir: string })
           enabled: patch.enabled ?? previous.enabled,
           thresholdPercent,
           weeklyThresholdPercent,
+          ...(patch.includeFableUsage === undefined
+            ? {}
+            : { includeFableUsage: patch.includeFableUsage }),
           ...(patch.lastSwitch !== undefined ? { lastSwitch: patch.lastSwitch } : {}),
           ...(patch.lastManualSwitchAt !== undefined
             ? { lastManualSwitchAt: patch.lastManualSwitchAt }

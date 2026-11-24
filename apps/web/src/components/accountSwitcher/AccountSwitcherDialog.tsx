@@ -130,7 +130,9 @@ export function AccountSwitcherDialog({
   // Background refresh probes at most one stale inactive account; the server gate decides.
   const autoRefresh = useEffectEvent((at: number) => {
     if (!environmentId || autoPending.current) return;
-    const accountId = autoRefreshAccountId(allAccounts, at);
+    const includeFableUsage = groups.find((group) => group.driver === "claudeAgent")?.autoSwitch
+      .includeFableUsage;
+    const accountId = autoRefreshAccountId(allAccounts, at, includeFableUsage);
     if (!accountId || pendingIds.current.has(accountId)) return;
     autoPending.current = true;
     track(accountId, true);

@@ -177,7 +177,12 @@ export function ProviderAccountsSection({
                   signingIn={signingInId === account.id}
                   resetChecking={
                     refreshingIds.has(account.id) ||
-                    usageResetCheckWillRun(account, now, resetChecksAttempted)
+                    usageResetCheckWillRun(
+                      account,
+                      now,
+                      resetChecksAttempted,
+                      group.autoSwitch.includeFableUsage,
+                    )
                   }
                   switchState={accountSwitchState(switchingId, account.id)}
                   menuTriggerRef={(element) => {

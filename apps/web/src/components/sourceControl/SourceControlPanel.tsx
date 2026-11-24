@@ -46,7 +46,7 @@ import { Input } from "~/components/ui/input";
 import { InputGroup, InputGroupAddon, InputGroupInput } from "~/components/ui/input-group";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
 import { stackedThreadToast, toastManager } from "~/components/ui/toast";
-import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
+import { namedClipboardTarget, useCopyToClipboard } from "~/hooks/useCopyToClipboard";
 import { useEnvironmentQuery } from "~/state/query";
 import { serverEnvironment } from "~/state/server";
 import { useAtomCommand } from "~/state/use-atom-command";
@@ -310,7 +310,7 @@ export function SourceControlPanel(props: SourceControlPanelProps) {
    * toasts here are what makes it visible either way.
    */
   const { copyToClipboard } = useCopyToClipboard<string>({
-    target: "commit details",
+    target: namedClipboardTarget("commit details"),
     onCopy: (label) => sourceControlInfoToast(`Copied ${label}`),
     onError: (error) => {
       toastManager.add(

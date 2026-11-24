@@ -8,6 +8,10 @@ import { SourceControlHeader } from "./SourceControlHeader";
 import { SourceControlPanelShell } from "./SourceControlPanelShell";
 
 vi.mock("~/env", () => ({ isElectron: true }));
+vi.mock("gt-react", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("gt-react")>()),
+  useGT: () => (text: string) => text,
+}));
 
 const noop = () => undefined;
 const status: WorkingCopyStatusResult = {

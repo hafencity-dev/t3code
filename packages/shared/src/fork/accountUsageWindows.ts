@@ -37,18 +37,24 @@ export function isModelScopedWeeklyWindow(window: UsageWindowShape) {
   return window.kind === "weekly" && window.id.startsWith(MODEL_SCOPED_WEEKLY_PREFIX);
 }
 
-/**
- * The windows that gate the whole account. Claude hard-blocks a model only for that
- * model's requests, so its model-scoped weeklies are dropped whenever the all-model weekly
- * is reported. Without it they stay, so the account never reads as unmeasured.
- */
-export function accountGatingWindows<W extends UsageWindowShape>(windows: readonly W[]): W[] {
+/** The all-model weekly supersedes scoped limits except Fable when selected for rotation. */
+export function accountGatingWindows<W extends UsageWindowShape>(
+  windows: readonly W[],
+  includeFableUsage = false,
+): W[] {
   const hasPrimaryWeekly = windows.some(
     (window) => window.kind === "weekly" && window.id === PRIMARY_WEEKLY_WINDOW_ID,
   );
   return hasPrimaryWeekly
-    ? windows.filter((window) => !isModelScopedWeeklyWindow(window))
+    ? windows.filter(
+        (window) =>
+          !isModelScopedWeeklyWindow(window) || (includeFableUsage && isFableWeeklyWindow(window)),
+      )
     : [...windows];
+}
+
+export function isFableWeeklyWindow(window: UsageWindowShape) {
+  return window.kind === "weekly" && /^seven_day_(?:claude_)?fable(?:_|$)/.test(window.id);
 }
 
 /**
@@ -65,9 +71,8 @@ export type InactiveUsageStaleness =
 
 /**
  * The one staleness rule for inactive accounts, used by the server's probe gate, auto-switch,
- * and the account switcher's automatic refresh. Only a gating window (5-hour, all-model weekly)
- * that reset after the measurement counts; a reset already past when measured is what the
- * provider reported.
+ * and the account switcher's automatic refresh. Only resets of selected gates after the measurement count. A reset
+ * already past when measured is what the provider reported.
  */
 export function inactiveUsageStaleness(
   usage:
@@ -79,11 +84,12 @@ export function inactiveUsageStaleness(
       }
     | undefined,
   now: number,
+  includeFableUsage = false,
 ): InactiveUsageStaleness {
   if (!usage) return { stale: true, reason: "neverMeasured" };
   const checkedAt = Date.parse(usage.checkedAt);
   if (!Number.isFinite(checkedAt)) return { stale: true, reason: "neverMeasured" };
-  const resets = accountGatingWindows(usage.windows)
+  const resets = accountGatingWindows(usage.windows, includeFableUsage)
     .filter((window) => window.kind !== "other" && window.resetsAt !== undefined)
     .map((window) => Date.parse(window.resetsAt!))
     .filter((at) => at > checkedAt);

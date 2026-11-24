@@ -11,11 +11,12 @@ import type {
   ServerProvider,
   ServerProviderUsageWindow,
 } from "@t3tools/contracts";
-import { formatDuration, formatResetsIn } from "@t3tools/shared/usageLimits";
+import { formatDuration, formatResetsIn } from "@t3tools/shared/usageLimitsCopy";
 import {
   accountGatingWindows,
   hasNoSessionLimit,
   inactiveUsageStaleness,
+  isFableWeeklyWindow,
 } from "@t3tools/shared/fork/accountUsageWindows";
 
 export const ACCOUNT_DRIVERS = ["claudeAgent", "codex"] as const;
@@ -57,19 +58,22 @@ export function shortPlanLabel(plan: string) {
 /**
  * Unknown usage must never look like unused quota or become the recommended account. A
  * window whose reset has passed no longer counts: its number describes a window that ended.
- * Claude's model-scoped weeklies never gate the account while its all-model weekly is known.
  */
-export function remainingPercent(account: ProviderAccount, now: number): number | null {
+export function remainingPercent(
+  account: ProviderAccount,
+  now: number,
+  includeFableUsage = false,
+): number | null {
   if (!account.usage || account.usage.unavailable) return null;
-  const current = accountGatingWindows(account.usage.windows).filter(
+  const current = accountGatingWindows(account.usage.windows, includeFableUsage).filter(
     (window) => !windowResetPassed(window, now),
   );
   if (current.length === 0) return null;
   return 100 - Math.max(...current.map((window) => window.usedPercent));
 }
 
-export function accountTone(account: ProviderAccount, now: number) {
-  const remaining = remainingPercent(account, now);
+export function accountTone(account: ProviderAccount, now: number, includeFableUsage = false) {
+  const remaining = remainingPercent(account, now, includeFableUsage);
   if (account.status !== "ready" || (remaining !== null && remaining <= 10)) return "error";
   return remaining !== null && remaining <= 25 ? "warning" : "secondary";
 }
@@ -81,10 +85,15 @@ export function accountTone(account: ProviderAccount, now: number) {
  */
 export function nextAccountReason(
   account: ProviderAccount,
-  group: Pick<ProviderAccountGroup, "accounts" | "nextAccountDue">,
+  group: Pick<ProviderAccountGroup, "accounts" | "nextAccountDue"> &
+    Partial<Pick<ProviderAccountGroup, "autoSwitch">>,
   now: number,
 ) {
-  const { tightest } = accountUsageCell(account.usage?.windows ?? [], "weekly");
+  const { tightest } = accountUsageCell(
+    account.usage?.windows ?? [],
+    "weekly",
+    group.autoSwitch?.includeFableUsage,
+  );
   const at = tightest?.resetsAt ? Date.parse(tightest.resetsAt) : Number.NaN;
   const reset = Number.isFinite(at) && at > now ? ` (${formatDuration(at - now)})` : "";
   const active = group.accounts.find((candidate) => candidate.active)?.label;
@@ -111,19 +120,19 @@ export type UsageCellKind = "session" | "weekly";
 
 /**
  * The window a usage column shows plus every window it stands for (the hover lists `all`).
- * Weekly shows Claude's all-model weekly; model-scoped weeklies only join the hover unless no
- * all-model weekly is reported. Weekly falls back to monthly windows when none is weekly.
+ * Weekly falls back to monthly windows when none is weekly.
  */
 export function accountUsageCell(
   windows: readonly ServerProviderUsageWindow[],
   kind: UsageCellKind,
+  includeFableUsage = false,
 ) {
   const weekly = windows.filter((window) => window.kind === "weekly");
   const candidates =
     kind === "session"
       ? windows.filter((window) => window.kind === "session")
       : weekly.length > 0
-        ? accountGatingWindows(weekly)
+        ? accountGatingWindows(weekly, includeFableUsage)
         : windows.filter((window) => window.kind === "monthly");
   const all =
     kind === "weekly" && weekly.length > 0
@@ -175,12 +184,14 @@ export function accountUsageCellView(
   now: number,
   checking: boolean,
   usage?: ProviderAccount["usage"],
+  includeFableUsage = false,
 ) {
-  const { tightest, all } = accountUsageCell(windows, kind);
+  const { tightest, all } = accountUsageCell(windows, kind, includeFableUsage);
   const resetPending = tightest !== undefined && windowResetPassed(tightest, now);
   const remaining = tightest && !resetPending ? Math.round(100 - tightest.usedPercent) : null;
   return {
     all,
+    fable: includeFableUsage && tightest !== undefined && isFableWeeklyWindow(tightest),
     noLimit: kind === "session" && hasNoSessionLimit(usage),
     remaining,
     reset: tightest ? usageResetLabel(tightest, now, checking) : null,
@@ -226,14 +237,18 @@ export function usageResetCheckWillRun(
   account: ProviderAccount,
   now: number,
   attempted: ReadonlySet<string>,
+  includeFableUsage = false,
 ) {
   const key = usageResetKey(account, now);
   if (key === null || Date.parse(account.usageRefresh?.nextAllowedAt ?? "") > now) return false;
   if (account.active) return !attempted.has(key);
   // Only a gating window's reset makes the automatic refresh pick an inactive account.
   return (
-    inactiveUsageStaleness(account.usage, now).stale &&
-    !(Date.parse(account.usageRefresh?.nextAllowedAt ?? "") > now)
+    inactiveUsageStaleness(
+      account.usage,
+      now,
+      account.driver === "claudeAgent" && includeFableUsage,
+    ).stale && !(Date.parse(account.usageRefresh?.nextAllowedAt ?? "") > now)
   );
 }
 
@@ -265,14 +280,17 @@ export function providerAccountsUsageKey(providers: readonly ServerProvider[]) {
 }
 
 export function shouldShowAccountBadge(
-  group: Pick<ProviderAccountGroup, "driver" | "accounts">,
+  group: Pick<ProviderAccountGroup, "driver" | "accounts"> &
+    Partial<Pick<ProviderAccountGroup, "autoSwitch">>,
   providers: readonly ServerProvider[],
   now: number,
 ) {
   if (!defaultAccountProvider(group.driver, providers)?.enabled) return false;
   const active = group.accounts.find((account) => account.active);
   return (
-    group.accounts.length > 1 || (active !== undefined && accountTone(active, now) !== "secondary")
+    group.accounts.length > 1 ||
+    (active !== undefined &&
+      accountTone(active, now, group.autoSwitch?.includeFableUsage) !== "secondary")
   );
 }
 
@@ -286,6 +304,7 @@ export function isUsageRefreshCoolingDown(lastRefreshedAt: number | null | undef
 export function autoRefreshAccountId(
   accounts: readonly ProviderAccount[],
   now: number,
+  includeFableUsage = false,
 ): ProviderAccountId | null {
   const candidates = accounts.filter(
     (account) =>
@@ -297,7 +316,11 @@ export function autoRefreshAccountId(
       !(Date.parse(account.usageRefresh?.nextAllowedAt ?? "") > now),
   );
   const stale = candidates.flatMap((account) => {
-    const staleness = inactiveUsageStaleness(account.usage, now);
+    const staleness = inactiveUsageStaleness(
+      account.usage,
+      now,
+      account.driver === "claudeAgent" && includeFableUsage,
+    );
     return staleness.stale ? [{ account, reason: staleness.reason }] : [];
   });
   const first = (reason: "neverMeasured" | "windowReset") =>
@@ -774,24 +797,28 @@ export function windowPrimerStatus(
   return last ?? "No signed-in account can start a window right now.";
 }
 
-type AutoSwitchThresholds = Pick<
+type AutoSwitchOptions = Pick<
   ProviderAccountGroup["autoSwitch"],
-  "thresholdPercent" | "weeklyThresholdPercent"
+  "thresholdPercent" | "weeklyThresholdPercent" | "includeFableUsage"
 >;
 
 /**
- * Sends only the thresholds that changed, so a toggle or one select never overwrites a
- * threshold changed elsewhere.
+ * Sends only changed options so one control cannot overwrite settings changed on another device.
  */
 export function autoSwitchInput(
   driver: ProviderAccountDriver,
   enabled: boolean,
-  current: AutoSwitchThresholds,
-  next: Partial<AutoSwitchThresholds> = {},
+  current: AutoSwitchOptions,
+  next: Partial<AutoSwitchOptions> = {},
 ) {
   return {
     driver,
     enabled,
+    ...(driver === "claudeAgent" &&
+    next.includeFableUsage !== undefined &&
+    next.includeFableUsage !== Boolean(current.includeFableUsage)
+      ? { includeFableUsage: next.includeFableUsage }
+      : {}),
     ...(next.thresholdPercent === undefined || next.thresholdPercent === current.thresholdPercent
       ? {}
       : { thresholdPercent: next.thresholdPercent }),

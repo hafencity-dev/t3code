@@ -37,7 +37,7 @@ import {
   SettingsRow,
   SettingsSection,
 } from "./settingsLayout";
-import { searchableSetting } from "./settingsSearch";
+import { useSearchableSetting } from "./settingsSearch";
 
 const PROMPT_MODES: ReadonlyArray<{
   readonly value: ClaudeCodexRoutingPromptMode;
@@ -197,6 +197,7 @@ function PromptEditor({
 }
 
 export function ModelRoutingSettingsPanel() {
+  const searchableSetting = useSearchableSetting();
   const settings = usePrimarySettings();
   const updateSettings = useUpdatePrimarySettings();
   const providers = useAtomValue(primaryServerProvidersAtom);
@@ -335,7 +336,7 @@ export function ModelRoutingSettingsPanel() {
               resetAction={
                 modelPreferencesCustomized ? (
                   <SettingResetButton
-                    label="model preferences"
+                    ariaLabel="Reset model preferences"
                     onClick={() =>
                       saveRouting({
                         ...routing,

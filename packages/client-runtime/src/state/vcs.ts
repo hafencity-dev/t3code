@@ -2,6 +2,7 @@ import {
   type EnvironmentId,
   type VcsListRefsInput,
   type VcsListRefsResult,
+  type VcsRefreshStatusResult,
   type VcsStatusResult,
   type VcsStatusStreamEvent,
   WS_METHODS,
@@ -9,6 +10,7 @@ import {
 import { applyGitStatusStreamEvent } from "@t3tools/shared/git";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Option from "effect/Option";
 import * as Result from "effect/Result";
 import * as Schedule from "effect/Schedule";
@@ -28,11 +30,13 @@ import * as Persistence from "../platform/persistence.ts";
 import {
   request,
   subscribeDynamicWithSession,
+  requestGuarded,
   subscribeVcsBranch,
   refreshVcsBranch,
   type EnvironmentRpcInput,
 } from "../rpc/client.ts";
 import {
+  bumpWorkingCopyRevision,
   invalidateRepository,
   observeRepositoryChange,
   serverPushesRevisions,
@@ -40,7 +44,11 @@ import {
 } from "./repositoryInvalidation.ts";
 import { followStreamInEnvironment } from "./runtime.ts";
 import { vcsCommandConcurrency, vcsCommandScheduler } from "./vcsCommandScheduler.ts";
-import { vcsRefsCacheStateAtom, withVcsRefsPersistenceLock } from "./vcsRefInvalidation.ts";
+import {
+  invalidateCachedVcsRefsIfChanged,
+  vcsRefsCacheStateAtom,
+  withVcsRefsPersistenceLock,
+} from "./vcsRefInvalidation.ts";
 
 // Share freshness across search and pagination keys, but keep it local to this registry.
 const serverRefsRevisionAtom = Atom.family((_key: string) => Atom.make(0).pipe(Atom.keepAlive));
@@ -379,6 +387,21 @@ export function createVcsEnvironmentAtoms<R, E>(
           cwd: target.input.cwd,
         });
 
+  const invalidateRefsIfChanged = (
+    target: { readonly environmentId: EnvironmentId; readonly input: { readonly cwd: string } },
+    registry: AtomRegistry.AtomRegistry,
+    exit: Exit.Exit<VcsRefreshStatusResult, unknown>,
+  ) => {
+    const scope = { environmentId: target.environmentId, cwd: target.input.cwd };
+    const pushes = serverPushesRevisions(options.capabilities, registry, target.environmentId);
+    const digest = Exit.isSuccess(exit) ? exit.value.refsDigest : undefined;
+    if (pushes && digest === undefined) return Effect.void;
+    const invalidate = invalidateCachedVcsRefsIfChanged(registry, scope, digest);
+    return pushes
+      ? invalidate
+      : invalidate.pipe(Effect.map(() => bumpWorkingCopyRevision(registry, scope)));
+  };
+
   return {
     listRefs,
     // An uncached read for decisions that must match the repository now, not
@@ -416,14 +439,16 @@ export function createVcsEnvironmentAtoms<R, E>(
       tag: WS_METHODS.vcsRefreshStatus,
       scheduler: vcsCommandScheduler,
       concurrency: vcsCommandConcurrency,
-      onSettled: invalidateRefs,
+      onSettled: invalidateRefsIfChanged,
     }),
     // Outside the serial queue: it only reads status, and a checkout picked right after opening
     // the picker must not wait behind that read.
     refreshLocalStatusForPicker: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:vcs:refresh-local-status-for-picker",
       tag: WS_METHODS.vcsRefreshStatus,
-      onSettled: invalidateRefs,
+      execute: (input: { readonly cwd: string }) =>
+        requestGuarded(WS_METHODS.vcsRefreshStatus, { cwd: input.cwd, localOnly: true }),
+      onSettled: invalidateRefsIfChanged,
     }),
     createWorktree: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:vcs:create-worktree",

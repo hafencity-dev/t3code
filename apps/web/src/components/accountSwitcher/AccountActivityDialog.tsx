@@ -18,6 +18,7 @@ import {
   ZapIcon,
   type LucideIcon,
 } from "lucide-react";
+import { useMessages } from "gt-react";
 import { useRef, useState } from "react";
 import { cn } from "../../lib/utils";
 import { useEnvironmentQuery } from "../../state/query";
@@ -91,7 +92,8 @@ const FILTERS: readonly { value: ActivityFilter; label: string }[] = [
 ];
 
 function ActivityRow({ entry, now }: { entry: ProviderAccountActivityEntry; now: number }) {
-  const view = activityView(entry);
+  const messages = useMessages();
+  const view = activityView(entry, messages);
   const Icon = ICONS[view.icon];
   const Mark = entry.driver === "claudeAgent" ? ClaudeAI : OpenAI;
   const clock = activityClock(entry.at);

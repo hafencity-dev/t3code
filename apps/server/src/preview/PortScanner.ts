@@ -8,6 +8,7 @@ import {
 } from "@t3tools/contracts";
 import { signalProcessGroup } from "@t3tools/provider-core/server/processGroup";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import { windowsSystem32Path } from "@t3tools/shared/windowsSystem";
 import { isLoopbackHost, LSOF_LOCAL_HOST_TOKENS } from "@t3tools/shared/preview";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
@@ -372,6 +373,9 @@ const lsofProcessIds = (raw: string): ReadonlyArray<number> => {
 
 const AGENT_THREAD_ASSIGNMENT = new RegExp(`(?:^|\\s)${AGENT_THREAD_ENV}=(\\S+)`);
 
+/** A browser an agent's tool drives listens only for DevTools, which is not a page to preview. */
+const DEVTOOLS_PORT_ARGUMENT = /(?:^|[\s\0])--remote-debugging-port=/;
+
 /** Reads `/proc/<pid>/environ`, whose entries are NUL-separated. */
 const parseProcEnvironThread = (raw: string): ThreadId | null => {
   const prefix = `${AGENT_THREAD_ENV}=`;
@@ -390,6 +394,26 @@ const psCommandsByPid = (raw: string): ReadonlyMap<number, string> => {
     if (match) commands.set(Number(match[1]), match[2]!);
   }
   return commands;
+};
+
+/**
+ * A listener with an agent thread in its environment. An agent CLI is a direct child of this
+ * server and has that environment too, but its own ports are not servers it started.
+ */
+interface AgentListener {
+  readonly threadId: ThreadId;
+  readonly isAgentCli: boolean;
+}
+
+/** Reads the parent pid from `/proc/<pid>/stat`, whose command field can hold spaces. */
+const parseProcStatParent = (raw: string): number | null => {
+  const parent = Number(
+    raw
+      .slice(raw.lastIndexOf(")") + 1)
+      .trim()
+      .split(" ")[1],
+  );
+  return Number.isInteger(parent) ? parent : null;
 };
 
 /** Splits `/proc/<pid>/environ` on NUL, or the environment macOS `ps -E` appends on spaces. */
@@ -522,7 +546,7 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
   // Each current listener pid's agent thread, or null without one. A process keeps its launch
   // environment, so a pid is read once while it listens. Cleared while no client retains the
   // scanner, since unscanned pids can be reused.
-  const agentThreadsRef = yield* Ref.make<ReadonlyMap<number, ThreadId | null>>(new Map());
+  const agentThreadsRef = yield* Ref.make<ReadonlyMap<number, AgentListener | null>>(new Map());
   const agentCommandStopWatchers = new Set<AgentCommandStopWatcher>();
   let runningAgents = 0;
   // An agent that exited, or a cache cleared with a marked listener, owes one listener read: the
@@ -534,7 +558,7 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
   ) {
     // macOS ps appends the environment to argv. Exclude argv so a shell script containing
     // an assignment cannot claim a listener or look like it inherited a command.
-    const args = ["-ww", "-o", "pid=,command=", "-p", pids.join(",")];
+    const args = ["-ww", "-o", "pid=,ppid=,command=", "-p", pids.join(",")];
     const read = (psArgs: ReadonlyArray<string>) =>
       processRunner
         .run({
@@ -547,11 +571,20 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
     const [commands, withEnvironment] = yield* Effect.all([read(args), read(["-E", ...args])], {
       concurrency: 2,
     });
-    const environments = new Map<number, string>();
+    const environments = new Map<
+      number,
+      { command: string; parent: number; environment: string }
+    >();
     for (const [pid, command] of commands) {
       const full = withEnvironment.get(pid);
       if (full === command || full?.startsWith(`${command} `)) {
-        environments.set(pid, full.slice(command.length));
+        const match = /^\s*(\d+)\s+(.*)$/.exec(command);
+        if (match)
+          environments.set(pid, {
+            parent: Number(match[1]),
+            command: match[2]!,
+            environment: full.slice(command.length),
+          });
       }
     }
     return environments;
@@ -562,29 +595,42 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
   ) {
     const cached = yield* Ref.get(agentThreadsRef);
     const unread = pids.filter((pid) => !cached.has(pid));
-    const read: ReadonlyMap<number, ThreadId | null> =
+    const readProcListener = Effect.fnUntraced(function* (pid: number) {
+      const threadId = yield* fileSystem.readFileString(`/proc/${pid}/environ`).pipe(
+        Effect.map(parseProcEnvironThread),
+        Effect.orElseSucceed(() => null),
+      );
+      if (threadId === null) return [pid, null] as const;
+      const isDevTools = yield* fileSystem.readFileString(`/proc/${pid}/cmdline`).pipe(
+        Effect.map((cmdline) => DEVTOOLS_PORT_ARGUMENT.test(cmdline)),
+        Effect.orElseSucceed(() => false),
+      );
+      if (isDevTools) return [pid, null] as const;
+      const parent = yield* fileSystem.readFileString(`/proc/${pid}/stat`).pipe(
+        Effect.map(parseProcStatParent),
+        Effect.orElseSucceed(() => null),
+      );
+      return [pid, { threadId, isAgentCli: parent === process.pid }] as const;
+    });
+    const read: ReadonlyMap<number, AgentListener | null> =
       unread.length === 0
         ? new Map()
         : hostPlatform === "linux"
-          ? new Map(
-              yield* Effect.forEach(
-                unread,
-                (pid) =>
-                  fileSystem.readFileString(`/proc/${pid}/environ`).pipe(
-                    Effect.map(parseProcEnvironThread),
-                    Effect.orElseSucceed(() => null),
-                    Effect.map((threadId) => [pid, threadId] as const),
-                  ),
-                { concurrency: 16 },
-              ),
-            )
+          ? new Map(yield* Effect.forEach(unread, readProcListener, { concurrency: 16 }))
           : yield* readPsEnvironments(unread).pipe(
               Effect.map(
                 (rows) =>
                   new Map(
-                    [...rows].map(([pid, env]) => {
-                      const value = AGENT_THREAD_ASSIGNMENT.exec(env)?.[1];
-                      return [pid, value ? ThreadId.make(value) : null] as const;
+                    [...rows].map(([pid, row]) => {
+                      const value = AGENT_THREAD_ASSIGNMENT.exec(row.environment)?.[1];
+                      const listener =
+                        value && !DEVTOOLS_PORT_ARGUMENT.test(row.command)
+                          ? {
+                              threadId: ThreadId.make(value),
+                              isAgentCli: row.parent === process.pid,
+                            }
+                          : null;
+                      return [pid, listener] as const;
                     }),
                   ),
               ),
@@ -593,10 +639,10 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
                 return new Map();
               }),
             );
-    const next = new Map<number, ThreadId | null>();
+    const next = new Map<number, AgentListener | null>();
     for (const pid of pids) {
-      const threadId = cached.has(pid) ? cached.get(pid) : read.get(pid);
-      if (threadId !== undefined) next.set(pid, threadId);
+      const listener = cached.has(pid) ? cached.get(pid) : read.get(pid);
+      if (listener !== undefined) next.set(pid, listener);
     }
     yield* Ref.set(agentThreadsRef, next);
     return next;
@@ -610,8 +656,10 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
     agentScanPending = false;
     const threads = yield* readAgentThreads(pids.filter((pid) => !terminalOwners.has(pid)));
     const owners = new Map(terminalOwners);
-    for (const [pid, threadId] of threads) {
-      if (threadId !== null) owners.set(pid, { terminal: null, agent: { threadId } });
+    for (const [pid, listener] of threads) {
+      if (listener !== null && !listener.isAgentCli) {
+        owners.set(pid, { terminal: null, agent: { threadId: listener.threadId } });
+      }
     }
     return owners;
   });
@@ -829,12 +877,13 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
     );
     const cachedPids = new Set(cached.map(([pid]) => pid));
     const expiresAtMillis = nowMillis + WINDOWS_PROCESS_NAME_TTL_MS;
+    const tasklist = windowsSystem32Path(yield* HostProcess.Environment, "tasklist.exe");
     const fetched = yield* Effect.forEach(
       [...pids].filter((pid) => !cachedPids.has(pid)),
       (pid) =>
         processRunner
           .run({
-            command: "tasklist.exe",
+            command: tasklist,
             args: ["/FO", "CSV", "/NH", "/FI", `PID eq ${pid}`],
             timeout: Duration.millis(WINDOWS_LISTENER_TIMEOUT_MS),
             maxOutputBytes: 64 * 1024,
@@ -1119,10 +1168,10 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
       return new Map(read.flatMap(Option.toArray));
     }
     const rows = yield* readPsEnvironments(pids).pipe(
-      Effect.orElseSucceed(() => new Map<number, string>()),
+      Effect.orElseSucceed(() => new Map<never, never>()),
     );
     const variables = new Map<number, ReadonlyMap<string, string>>();
-    for (const [pid, env] of rows) {
+    for (const [pid, { environment: env }] of rows) {
       variables.set(pid, parseEnvironmentVariables(env, /\s+/, names));
     }
     return variables;

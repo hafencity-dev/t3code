@@ -363,6 +363,7 @@ export function AccountRow({
               />
               <AccountUsageCell
                 kind="weekly"
+                includeFableUsage={group.autoSwitch.includeFableUsage}
                 usage={account.usage}
                 now={now}
                 checking={resetChecking}

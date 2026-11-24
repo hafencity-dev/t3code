@@ -22,21 +22,24 @@ export function AccountUsageCell({
   usage,
   now,
   checking,
+  includeFableUsage,
 }: {
   kind: UsageCellKind;
   usage: ProviderAccount["usage"];
   now: number;
   /** A check for a passed reset will actually run. */
   checking: boolean;
+  includeFableUsage?: boolean | undefined;
 }) {
-  const { all, noLimit, remaining, reset, resetPending, tone } = accountUsageCellView(
+  const { all, fable, noLimit, remaining, reset, resetPending, tone } = accountUsageCellView(
     usage?.windows ?? [],
     kind,
     now,
     checking,
     usage,
+    includeFableUsage,
   );
-  const label = CELL_LABELS[kind];
+  const label = fable ? "Fable" : CELL_LABELS[kind];
   return (
     <Tooltip>
       <TooltipTrigger
@@ -44,7 +47,12 @@ export function AccountUsageCell({
           <div className="grid min-w-0 gap-1.5">
             <div className="flex min-w-0 items-baseline gap-2 text-xs tabular-nums">
               {/* Visible only in the narrow layout, where there is no column header. */}
-              <span className="sr-only text-muted-foreground @max-[44rem]/accounts:not-sr-only">
+              <span
+                className={cn(
+                  "text-muted-foreground",
+                  !fable && "sr-only @max-[44rem]/accounts:not-sr-only",
+                )}
+              >
                 {label}
               </span>
               {noLimit ? (

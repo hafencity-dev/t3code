@@ -3,6 +3,8 @@ import type {
   ProviderAccountDriver,
   ProviderAccountsActivityInput,
 } from "@t3tools/contracts";
+import { msg } from "gt-react";
+import { m, type MessageResolver } from "~/i18n/messages";
 import { formatAgo } from "./accounts.logic";
 
 /** Entries per "Load more" step; the log itself keeps 500. */
@@ -67,7 +69,10 @@ function thresholds(entry: ProviderAccountActivityEntry) {
 }
 
 /** The whole row as the user reads it. Unknown future kinds never reach here (decode). */
-export function activityView(entry: ProviderAccountActivityEntry): ActivityView {
+export function activityView(
+  entry: ProviderAccountActivityEntry,
+  resolve: MessageResolver = m,
+): ActivityView {
   const { labels } = entry;
   const detail = entry.reason;
   const base = {
@@ -176,7 +181,11 @@ export function activityView(entry: ProviderAccountActivityEntry): ActivityView 
           text(
             entry.settings?.enabledChanged
               ? `Auto-switch turned ${enabled ? "on" : "off"}`
-              : "Auto-switch thresholds changed",
+              : entry.settings?.includeFableUsage !== undefined
+                ? entry.settings.includeFableUsage
+                  ? resolve(msg("Fable quota included in auto-switch"))
+                  : resolve(msg("Fable quota excluded from auto-switch"))
+                : "Auto-switch thresholds changed",
           ),
         ],
         icon: "settings",
